@@ -1,0 +1,29 @@
+# 模型文件
+*.onnx
+*.bin
+src-tauri/resources/models/ocr/
+src-tauri/resources/models/translation/
+
+# Rust 构建产物
+target/
+
+# Node.js
+node_modules/
+dist/
+
+# 环境配置
+.env
+*.local
+
+# IDE
+.idea/
+.vscode/launch.json
+
+# 日志
+*.log
+logs/
+
+# OS
+Thumbs.db
+desktop.ini
+*.DS_Store

@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "ocr": {
+    "det": {
+      "id": "ppocr-det-v4",
+      "path": "ocr/det.onnx",
+      "sha256": "",
+      "size_bytes": 0
+    },
+    "rec_ja": {
+      "id": "ppocr-rec-ja",
+      "path": "ocr/rec_ja.onnx",
+      "sha256": "",
+      "size_bytes": 0
+    },
+    "rec_en": {
+      "id": "ppocr-rec-en",
+      "path": "ocr/rec_en.onnx",
+      "sha256": "",
+      "size_bytes": 0
+    },
+    "rec_multi": null,
+    "dicts": {
+      "ja": "ocr/dict_ja.txt",
+      "en": "ocr/dict_en.txt"
+    },
+    "preprocess_params": {
+      "image_size": [960, 960],
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "det_threshold": 0.3,
+      "unclip_ratio": 2.0
+    }
+  },
+  "translation": null
+}

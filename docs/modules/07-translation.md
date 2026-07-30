@@ -1,0 +1,127 @@
+# 模块 07：vtrans-translation 翻译引擎
+
+| 属性 | 值 |
+|------|-----|
+| Crate | `vtrans-translation` |
+| 分支 | `feat/07-translation` |
+| 上游依赖 | `vtrans-core`, `vtrans-security`, `vtrans-models` |
+| 层级 | 2 |
+| 复杂度 | 高 |
+| 阶段 | Phase 2 |
+
+## 职责
+
+实现 TranslationProvider trait，提供 API 翻译和本地 ONNX 翻译两种实现。支持取消、超时和有限次数重试。Prompt 明确要求只返回译文不解释内容。
+
+## 公开 API
+
+实现 `vtrans_core::TranslationProvider` trait。
+
+```rust
+/// 通用 HTTP/JSON API 翻译器
+pub struct ApiTranslationProvider { /* ... */ }
+
+impl ApiTranslationProvider {
+    pub fn new(
+        endpoint: &str,
+        model: &str,
+        api_key: &str,
+        timeout: Duration,
+        max_retries: u32,
+    ) -> Self;
+}
+
+/// 本地 ONNX 翻译器
+pub struct LocalTranslationProvider { /* ... */ }
+
+impl LocalTranslationProvider {
+    pub fn from_manifest(manifest: &ModelManifest) -> Result<Self, TranslationError>;
+}
+
+/// 校验语言对是否被支持
+pub fn validate_language_pair(
+    source: Language,
+    target: Language,
+    supported: &[(Language, Language)],
+) -> Result<(), TranslationError>;
+```
+
+## 错误类型
+
+```rust
+[derive(Debug, thiserror::Error)]
+pub enum TranslationError {
+    #[error("unsupported language pair: {source:?} -> {target:?}")]
+    UnsupportedPair { source: Language, target: Language },
+    #[error("api request failed: {0}")]
+    ApiRequest(String),
+    #[error("api timeout after {0:?}")]
+    Timeout(Duration),
+    #[error("api rate limited")]
+    RateLimited,
+    #[error("api unauthorized: check api key")]
+    Unauthorized,
+    #[error("model load failed: {0}")]
+    ModelLoad(String),
+    #[error("inference failed: {0}")]
+    Inference(String),
+    #[error("cancelled")]
+    Cancelled,
+    #[error("response parse error: {0}")]
+    ParseResponse(String),
+}
+```
+
+## 内部文件结构
+
+```text
+crates/vtrans-translation/
+├── Cargo.toml
+├── README.md
+├── src/
+│   ├── lib.rs              # re-export
+│   ├── api.rs               # ApiTranslationProvider
+│   ├── local_onnx.rs        # LocalTranslationProvider
+│   ├── prompt.rs            # Prompt 模板构建
+│   ├── retry.rs             # 重试逻辑
+│   └── validate.rs          # 语言对校验
+├── examples/
+│   └── translation_verify.rs
+└── tests/
+```
+
+## 测试计划
+
+| 测试项 | 类型 | 说明 |
+|--------|------|------|
+| 语言对校验 | 单元 | Auto 源语言合法，不支持对返回错误 |
+| Prompt 构建 | 单元 | 只要求译文，不含解释 |
+| 超时映射 | 单元 | 超时返回 Timeout 错误 |
+| 401 映射 | 单元 | HTTP 401 返回 Unauthorized |
+| 429 映射 | 单元 | HTTP 429 返回 RateLimited |
+| 重试逻辑 | 单元 | max_retries 次后放弃 |
+| 取消传播 | 单元 | CancellationToken 触发后返回 Cancelled |
+| 响应解析 | 单元 | JSON 响应提取译文 |
+| 验证 CLI | 手动 | examples/translation_verify 对测试文本翻译 |
+
+## 验收标准
+
+- [ ] API Provider 可翻译中/日/英
+- [ ] Local Provider 可加载 ONNX 模型并翻译
+- [ ] 超时正确返回 Timeout
+- [ ] 取消正确返回 Cancelled
+- [ ] 401 返回 Unauthorized
+- [ ] 重试不超过 max_retries 次
+- [ ] API Key 从 CredentialManager 读取，不写明文
+- [ ] Local 模型加载失败给出明确错误，不自动切换 API
+- [ ] README.md 完整
+
+## 开发注意事项
+
+- API Provider 使用 reqwest，默认 rustls-tls
+- 请求超时用 tokio::time::timeout 包装
+- CancellationToken 用 tokio_util::sync::CancellationToken
+- 重试使用指数退避（1s, 2s, 4s），429 不立即重试
+- Local Provider 使用 ort crate，与 OCR 共用 runtime
+- Prompt 模板：固定前缀 + 原文，明确要求"只输出译文"
+- 日志记录 provider_id、elapsed_ms、source/target（不记录完整原文和译文）

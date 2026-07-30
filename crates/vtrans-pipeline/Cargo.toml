@@ -1,0 +1,26 @@
+[package]
+name = "vtrans-pipeline"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pipeline orchestration for VTrans"
+
+[dependencies]
+vtrans-core = { workspace = true }
+vtrans-capture = { workspace = true }
+vtrans-ocr = { workspace = true }
+vtrans-text = { workspace = true }
+vtrans-translation = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+mockall = { workspace = true }
+tokio-test = { workspace = true }
+
+[lints]
+workspace = true

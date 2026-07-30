@@ -1,0 +1,74 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vtrans-core",
+    "crates/vtrans-config",
+    "crates/vtrans-security",
+    "crates/vtrans-capture",
+    "crates/vtrans-ocr",
+    "crates/vtrans-text",
+    "crates/vtrans-translation",
+    "crates/vtrans-models",
+    "crates/vtrans-pipeline",
+    "crates/vtrans-app",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["VTrans Team"]
+license = "MIT OR Apache-2.0"
+repository = ""
+description = "Windows screen translation tool with OCR and multi-engine translation"
+
+[workspace.dependencies]
+tokio = { version = "1.39", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-appender = "0.2"
+thiserror = "1"
+anyhow = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
+image = "0.25"
+ort = { version = "2", default-features = false, features = ["download-binaries"] }
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Capture",
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_System_Memory",
+] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+directories = "5"
+windows-sys = "0.59"
+pretty_assertions = "1"
+mockall = "0.13"
+tokio-test = "0.4"
+vtrans-core = { path = "crates/vtrans-core" }
+vtrans-config = { path = "crates/vtrans-config" }
+vtrans-security = { path = "crates/vtrans-security" }
+vtrans-capture = { path = "crates/vtrans-capture" }
+vtrans-ocr = { path = "crates/vtrans-ocr" }
+vtrans-text = { path = "crates/vtrans-text" }
+vtrans-translation = { path = "crates/vtrans-translation" }
+vtrans-models = { path = "crates/vtrans-models" }
+vtrans-pipeline = { path = "crates/vtrans-pipeline" }
+vtrans-app = { path = "crates/vtrans-app" }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

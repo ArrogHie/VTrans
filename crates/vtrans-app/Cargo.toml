@@ -1,0 +1,29 @@
+[package]
+name = "vtrans-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Application layer for VTrans"
+
+[dependencies]
+vtrans-core = { workspace = true }
+vtrans-config = { workspace = true }
+vtrans-security = { workspace = true }
+vtrans-capture = { workspace = true }
+vtrans-ocr = { workspace = true }
+vtrans-text = { workspace = true }
+vtrans-translation = { workspace = true }
+vtrans-models = { workspace = true }
+vtrans-pipeline = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+directories = { workspace = true }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+
+[lints]
+workspace = true

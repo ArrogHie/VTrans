@@ -1,0 +1,24 @@
+[package]
+name = "vtrans-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Screen capture for VTrans"
+
+[dependencies]
+vtrans-core = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+image = { workspace = true }
+windows = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+mockall = { workspace = true }
+
+[lints]
+workspace = true

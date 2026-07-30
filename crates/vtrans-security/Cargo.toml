@@ -1,0 +1,19 @@
+[package]
+name = "vtrans-security"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Credential management for VTrans"
+
+[dependencies]
+vtrans-core = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+windows = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+
+[lints]
+workspace = true

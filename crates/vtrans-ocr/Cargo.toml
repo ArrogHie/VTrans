@@ -1,0 +1,25 @@
+[package]
+name = "vtrans-ocr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OCR recognition for VTrans"
+
+[dependencies]
+vtrans-core = { workspace = true }
+vtrans-models = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+image = { workspace = true }
+ort = { workspace = true }
+ndarray = "0.16"
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+# Auto-detect text files
+* text=auto
+
+# Source files
+*.rs text
+*.toml text
+*.json text
+*.md text
+*.ts text
+*.tsx text
+*.css text
+
+# Optional: use Git LFS for model files
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+*.model filter=lfs diff=lfs merge=lfs -text
