@@ -5,6 +5,10 @@ use tracing_subscriber::{fmt, EnvFilter, prelude::*};
 
 /// Initialize tracing with console + rolling file output.
 ///
+/// Uses hourly rotation with a maximum of 5 log files retained.
+/// (tracing-appender does not support size-based rotation; hourly is the
+/// closest practical alternative to the spec's original "10MB rotation".)
+///
 /// Returns a WorkerGuard that must be kept alive for the application lifetime.
 /// Dropping the guard may cause async log writes to be lost.
 ///

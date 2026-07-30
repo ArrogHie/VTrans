@@ -4,7 +4,7 @@
 |------|-----|
 | Crate | `vtrans-translation` |
 | 分支 | `feat/07-translation` |
-| 上游依赖 | `vtrans-core`, `vtrans-security`, `vtrans-models` |
+| 上游依赖 | `vtrans-core`, `vtrans-models` |
 | 层级 | 2 |
 | 复杂度 | 高 |
 | 阶段 | Phase 2 |
@@ -47,6 +47,8 @@ pub fn validate_language_pair(
 ```
 
 ## 错误类型
+
+> **定义位置**：`TranslationError` 定义在 `vtrans-core` 中（因为 `TranslationProvider` trait 需要引用它）。本模块从 `vtrans-core` 导入，不重新定义。
 
 ```rust
 [derive(Debug, thiserror::Error)]

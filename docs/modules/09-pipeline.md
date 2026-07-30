@@ -55,6 +55,8 @@ impl Pipeline {
 
 ## 错误类型
 
+> **定义位置**：`PipelineError` 定义在本 crate（`vtrans-pipeline`）中，不在 vtrans-core。通过 `#[from]` 从 `CaptureError`、`OcrError`、`TranslationError`（均在 vtrans-core 中定义）自动转换。
+
 ```rust
 [derive(Debug, thiserror::Error)]
 pub enum PipelineError {

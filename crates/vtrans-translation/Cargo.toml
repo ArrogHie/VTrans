@@ -8,7 +8,6 @@ description = "Translation providers for VTrans"
 
 [dependencies]
 vtrans-core = { workspace = true }
-vtrans-security = { workspace = true }
 vtrans-models = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

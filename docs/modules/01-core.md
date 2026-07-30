@@ -46,7 +46,11 @@ pub enum CoreError {
 }
 ```
 
-各下游 crate 的错误类型（OcrError, TranslationError 等）在本 crate 中仅声明为类型别名或留空，具体变体由各 crate 自行定义。
+**错误类型归属规则**：
+
+- `CoreError`：定义在本 crate，用于类型校验和序列化错误。
+- `CaptureError`、`OcrError`、`TranslationError`：定义在本 crate，因为对应的 Provider trait 需要引用它们。各下游实现 crate（vtrans-capture、vtrans-ocr、vtrans-translation）直接从 vtrans-core 导入，不重新定义。变体在 Phase 0 冻结，后续新增变体需走变更评审。
+- `ConfigError`、`SecurityError`、`TextError`、`ModelError`、`PipelineError`、`AppError`：由各自下游 crate 自行定义，不在本 crate 中声明。
 
 ### 日志初始化 (logging.rs)
 
@@ -54,7 +58,7 @@ pub enum CoreError {
 pub fn init_logging(log_dir: &Path, level: &str) -> Result<WorkerGuard>;
 ```
 
-初始化 tracing-subscriber：控制台 + 滚动文件（10MB 轮转，保留 5 个）。返回 WorkerGuard 确保异步刷新。各 crate 调用 tracing::info!/warn!/error! 即可，无需自行初始化。
+初始化 tracing-subscriber：控制台 + 滚动文件（按小时轮转，保留 5 个）。返回 WorkerGuard 确保异步刷新。各 crate 调用 tracing::info!/warn!/error! 即可，无需自行初始化。
 
 ## 内部文件结构
 

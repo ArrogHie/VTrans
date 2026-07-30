@@ -21,7 +21,7 @@ VTrans 是一款 Windows 桠面屏幕翻译工具，支持手动框选翻译和�
 | 04 | 屏幕采集 | vtrans-capture | feat/04-capture | core | 2 |
 | 05 | OCR | vtrans-ocr | feat/05-ocr | core, models | 2 |
 | 06 | 文本标准化 | vtrans-text | feat/06-text | core | 1 |
-| 07 | 翻译引擎 | vtrans-translation | feat/07-translation | core, security, models | 2 |
+| 07 | 翻译引擎 | vtrans-translation | feat/07-translation | core, models | 2 |
 | 08 | 模型管理 | vtrans-models | feat/08-models | core | 1 |
 | 09 | 流水线 | vtrans-pipeline | feat/09-pipeline | core, capture, ocr, text, translation | 3 |
 | 10 | 应用层 | vtrans-app | feat/10-app | 全部 | 4 |
@@ -52,7 +52,6 @@ graph TD
     core --> ocr
     models --> ocr
     core --> translation
-    security --> translation
     models --> translation
     core --> pipeline
     capture --> pipeline
@@ -75,6 +74,19 @@ graph TD
 | 01 vtrans-core | 核心类型、错误类型、Provider traits、日志初始化 | workspace 可编译 |
 
 此阶段产出是所有后续模块的基础。Agent 在 feat/01-core 分支完成后合并到 main，其他 Agent 从 main 拉取最新代码开始各自分支。
+
+### Phase 0.5：契约冻结（审查，不分配 Agent）
+
+Phase 0 合并后、Phase 1 启动前，进行一次架构审查，确保以下契约冻结：
+
+1. 所有跨模块类型（Language、ScreenRegion、CapturedImage、OcrResult 等）已在 vtrans-core 中定义且 serde 表示确定。
+2. 所有 Provider trait（OcrProvider、TranslationProvider、CaptureSource、CaptureSession）签名固定。
+3. 所有 trait 相关错误类型（CaptureError、OcrError、TranslationError）变体完整，覆盖各模块文档中定义的所有情况。
+4. AppConfig schema 包含所有模块需要的配置字段（capture、ocr、translation、hotkeys、log_level、model_dir）。
+5. ModelManifest schema 覆盖 OCR 和 translation 模块的需求。
+6. PipelineDeps 形状确定。
+
+冻结后 core 的修改需走变更评审，通知所有下游 Agent rebase。
 
 ### Phase 1：独立模块（4 Agents 并行）
 
@@ -126,7 +138,7 @@ graph TD
 
 日志格式：
 - 开发环境：控制台输出，带时间戳和着色
-- 生产环境：滚动日志文件，10MB 轮转，保留 5 个文件
+- 生产环境：滚动日志文件，按小时轮转，保留 5 个文件
 - 日志路径：Tauri AppConfig 目录下的 logs/ 子目录
 
 敏感数据红线：
@@ -150,17 +162,16 @@ graph TD
 
 错误命名约定：
 ```
-vtrans-core:       CoreError
+vtrans-core:       CoreError, CaptureError, OcrError, TranslationError
 vtrans-config:      ConfigError
 vtrans-security:    SecurityError
-vtrans-capture:     CaptureError
-vtrans-ocr:         OcrError
 vtrans-text:        TextError
-vtrans-translation: TranslationError
 vtrans-models:      ModelError
 vtrans-pipeline:    PipelineError
 vtrans-app:         AppError
 ```
+
+> **说明**：`CaptureError`、`OcrError`、`TranslationError` 定义在 vtrans-core 中，因为对应的 Provider trait 需要引用它们。各实现 crate 从 vtrans-core 导入，不重新定义。其余错误类型由各自 crate 自行定义。
 
 ### 5.3 测试规范
 

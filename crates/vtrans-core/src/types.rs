@@ -2,9 +2,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Language {
+    #[serde(rename = "auto")]
     Auto,
+    #[serde(rename = "zh-CN")]
     ChineseSimplified,
+    #[serde(rename = "ja")]
     Japanese,
+    #[serde(rename = "en")]
     English,
 }
 

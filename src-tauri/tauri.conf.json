@@ -27,10 +27,19 @@
         "resizable": true,
         "visible": false,
         "alwaysOnTop": true
+      },
+      {
+        "label": "selector",
+        "title": "Select Region",
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "fullscreen": true,
+        "visible": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
     }
   },
   "bundle": {

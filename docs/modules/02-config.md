@@ -23,6 +23,9 @@ pub struct AppConfig {
     pub ocr: OcrConfig,
     pub translation: TranslationConfig,
     pub result_window: ResultWindowConfig,
+    pub hotkeys: HotkeyConfig,
+    pub log_level: String,           // 默认 "info"
+    pub model_dir: Option<PathBuf>,  // None = 使用默认路径
     pub version: u32,
 }
 
@@ -41,10 +44,19 @@ pub struct TranslationConfig {
     pub source_language: Language, // 默认 Auto
     pub target_language: Language, // 载 ChineseSimplified
     pub timeout_seconds: u32,      // 默认 30
+    pub api_endpoint: String,      // 默认 "https://api.openai.com/v1/chat/completions"
+    pub api_model: String,         // 默认 "gpt-4o-mini"
+    pub max_retries: u32,          // 默认 3
 }
 
 pub struct ResultWindowConfig {
     pub always_on_top: bool,       // 默认 true
+}
+
+pub struct HotkeyConfig {
+    pub select_and_translate: String,  // 默认 "Alt+Shift+A"
+    pub live_translate: String,        // 默认 "Alt+Shift+R"
+    pub stop_live: String,             // 默认 "Alt+Shift+S"
 }
 
 /// 配置管理器

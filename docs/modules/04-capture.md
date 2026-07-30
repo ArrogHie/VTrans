@@ -45,6 +45,8 @@ pub fn logical_to_physical(x: f32, scale: f32) -> i32;
 
 ## 错误类型
 
+> **定义位置**：`CaptureError` 定义在 `vtrans-core` 中（因为 `CaptureSource` trait 需要引用它）。本模块从 `vtrans-core` 导入，不重新定义。
+
 ```rust
 [derive(Debug, thiserror::Error)]
 pub enum CaptureError {

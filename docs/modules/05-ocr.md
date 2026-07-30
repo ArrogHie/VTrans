@@ -44,6 +44,8 @@ impl PaddleOcrProvider {
 
 ## 错误类型
 
+> **定义位置**：`OcrError` 定义在 `vtrans-core` 中（因为 `OcrProvider` trait 需要引用它）。本模块从 `vtrans-core` 导入，不重新定义。
+
 ```rust
 [derive(Debug, thiserror::Error)]
 pub enum OcrError {
