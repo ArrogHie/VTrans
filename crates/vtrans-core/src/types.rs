@@ -84,16 +84,24 @@ pub struct TranslationResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PipelineMode {
+    #[serde(rename = "single")]
     SingleCapture,
+    #[serde(rename = "live")]
     LiveRegion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PipelineStatus {
+    #[serde(rename = "idle")]
     Idle,
+    #[serde(rename = "capturing")]
     Capturing,
+    #[serde(rename = "ocr_in_progress")]
     OcrInProgress,
+    #[serde(rename = "translating")]
     Translating,
+    #[serde(rename = "completed")]
     Completed,
+    #[serde(rename = "error")]
     Error(String),
 }
