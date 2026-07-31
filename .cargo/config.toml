@@ -1,0 +1,10 @@
+# Cargo mirror configuration for faster downloads in China.
+# Uses the Tsinghua (TUNA) sparse mirror for crates.io.
+[source.crates-io]
+replace-with = "tuna"
+
+[source.tuna]
+registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+
+[net]
+git-fetch-with-cli = true
