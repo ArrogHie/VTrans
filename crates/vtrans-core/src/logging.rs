@@ -21,7 +21,14 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 /// appender cannot be initialized.
 #[tracing::instrument(skip(log_dir))]
 pub fn init_logging(log_dir: &Path, level: &str) -> Result<WorkerGuard, std::io::Error> {
-    std::fs::create_dir_all(log_dir)?;
+    if let Err(e) = std::fs::create_dir_all(log_dir) {
+        tracing::error!(
+            error = %e,
+            log_dir = %log_dir.display(),
+            "failed to create log directory"
+        );
+        return Err(e);
+    }
 
     let file_appender = RollingFileAppender::builder()
         .rotation(Rotation::HOURLY)
@@ -29,7 +36,14 @@ pub fn init_logging(log_dir: &Path, level: &str) -> Result<WorkerGuard, std::io:
         .filename_suffix("log")
         .max_log_files(5)
         .build(log_dir)
-        .map_err(std::io::Error::other)?;
+        .map_err(|e| {
+            let io_err = std::io::Error::other(e);
+            tracing::error!(
+                error = %io_err,
+                "failed to initialize rolling file appender"
+            );
+            io_err
+        })?;
 
     let (non_blocking_file, guard) = tracing_appender::non_blocking(file_appender);
 
