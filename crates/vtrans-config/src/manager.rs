@@ -60,6 +60,15 @@ impl ConfigManager {
     ///
     /// Returns [`ConfigError::Io`] when the config directory cannot be
     /// created.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vtrans_config::ConfigManager;
+    ///
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// let manager = ConfigManager::new(dir.path()).unwrap();
+    /// ```
     #[tracing::instrument(skip(config_dir))]
     pub fn new(config_dir: &Path) -> Result<Self, ConfigError> {
         fs::create_dir_all(config_dir).map_err(|e| {
@@ -79,6 +88,16 @@ impl ConfigManager {
     }
 
     /// Returns the resolved config file path.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vtrans_config::ConfigManager;
+    ///
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// let manager = ConfigManager::new(dir.path()).unwrap();
+    /// assert!(manager.config_path().ends_with("config.json"));
+    /// ```
     #[must_use]
     pub fn config_path(&self) -> &Path {
         &self.config_path
@@ -95,6 +114,17 @@ impl ConfigManager {
     /// [`ConfigError::Validation`] for content that violates validation
     /// rules, and [`ConfigError::UnsupportedVersion`] when the file version
     /// is newer than this build supports.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vtrans_config::ConfigManager;
+    ///
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// let manager = ConfigManager::new(dir.path()).unwrap();
+    /// let config = manager.load().unwrap(); // creates defaults on first run
+    /// assert_eq!(config.log_level, "info");
+    /// ```
     #[tracing::instrument(skip(self))]
     pub fn load(&self) -> Result<AppConfig, ConfigError> {
         self.migrate()
@@ -113,6 +143,17 @@ impl ConfigManager {
     /// [`ConfigError::Validation`] for content that violates validation
     /// rules, and [`ConfigError::UnsupportedVersion`] when the file version
     /// is newer than this build supports.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vtrans_config::ConfigManager;
+    ///
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// let manager = ConfigManager::new(dir.path()).unwrap();
+    /// let config = manager.migrate().unwrap();
+    /// assert_eq!(config.version, vtrans_config::CURRENT_CONFIG_VERSION);
+    /// ```
     #[tracing::instrument(skip(self))]
     pub fn migrate(&self) -> Result<AppConfig, ConfigError> {
         let Some(raw) = self.read_raw()? else {
@@ -126,7 +167,7 @@ impl ConfigManager {
         };
 
         let from_version = raw_version(&raw);
-        let config = migrate_value(raw)?;
+        let config = self.migrate_value_logged(raw)?;
         if from_version < CURRENT_CONFIG_VERSION {
             info!(
                 from_version,
@@ -142,7 +183,10 @@ impl ConfigManager {
     /// Validates and persists the given config.
     ///
     /// The write is atomic: content is written to a temporary file in the
-    /// same directory, synced, and renamed over the target.
+    /// same directory, synced, and renamed over the target. Concurrent
+    /// `save` calls are atomic but unordered (last writer wins); use
+    /// [`update`](Self::update) when a change depends on the currently
+    /// persisted state.
     ///
     /// # Errors
     ///
@@ -213,9 +257,21 @@ impl ConfigManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let raw = self.read_strict()?;
-        let mut config = migrate_value(raw)?;
+        let mut config = self.migrate_value_logged(raw)?;
         f(&mut config);
         self.save(&config)
+    }
+
+    /// Migrates raw config JSON, logging any failure with file context.
+    fn migrate_value_logged(&self, raw: Value) -> Result<AppConfig, ConfigError> {
+        migrate_value(raw).map_err(|e| {
+            warn!(
+                error = %e,
+                config_path = %self.config_path.display(),
+                "config migration or validation failed"
+            );
+            e
+        })
     }
 
     /// Reads the raw JSON of the config file, if it exists.
