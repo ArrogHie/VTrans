@@ -22,6 +22,11 @@ fn init_logging_installs_subscriber_and_writes_log_file() {
 
     tracing::info!("integration test log line");
 
+    // A second initialization must return an error instead of panicking on
+    // the already-installed global subscriber.
+    let second = init_logging(&unique_log_dir(), "info");
+    assert!(second.is_err(), "second init_logging call should fail");
+
     // Dropping the guard flushes pending writes through the non-blocking
     // worker, ensuring the rolling appender has created its log file.
     drop(guard);

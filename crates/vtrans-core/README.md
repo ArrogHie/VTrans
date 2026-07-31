@@ -36,7 +36,7 @@ impl ScreenRegion {
     pub fn is_valid(&self) -> bool;
 }
 
-pub enum PixelFormat { Rgba8, Bgra8 }
+pub enum PixelFormat { Rgba8, Bgra8 } // serde: "rgba8" / "bgra8"
 
 pub struct CapturedImage { pub width: u32, pub height: u32, pub format: PixelFormat, pub data: Vec<u8> }
 impl CapturedImage {
@@ -113,8 +113,8 @@ cargo fmt -p vtrans-core -- --check
 
 - `CapturedImage` 不实现 `Serialize`，因此无法直接通过 Tauri IPC 传输图像；图像应留在 Rust 侧，前端只接收文本和状态。
 - `tracing-appender` 不支持按大小轮转，日志按小时轮转，保留 5 个文件（与规格中"10MB 轮转"的原始要求最接近的可行替代）。
-- `init_logging` 只能调用一次；重复调用会触发 `tracing_subscriber` 全局注册断言。
-- `mask_sensitive` 按字节长度截断，仅适用于 ASCII 为主的密钥；非 ASCII 敏感串建议先经外部编码处理。
+- `init_logging` 只能成功调用一次；重复调用返回 `Err`，不会 panic，但首次成功后的全局 subscriber 不可替换。
+- `mask_sensitive` 按字符数处理且对多字节 UTF-8 输入安全；但掩码仅隐藏首尾各 4 个字符，密钥若短于 9 个字符会被整体替换为 `****`。
 
 ## 详细规格
 

@@ -14,11 +14,12 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 ///
 /// # Arguments
 /// * `log_dir` - Directory for log files (created if missing).
-/// * `level` - Log level filter, e.g. `"info"`, `"debug"`.
+/// * `level` - Log level filter, e.g. `"info"`, `"debug"`. The `RUST_LOG`
+///   environment variable takes precedence when it contains a valid filter.
 ///
 /// # Errors
-/// Returns `io::Error` if the directory cannot be created or the file
-/// appender cannot be initialized.
+/// Returns `io::Error` if the directory cannot be created, the file
+/// appender cannot be initialized, or a global subscriber is already set.
 #[tracing::instrument(skip(log_dir))]
 pub fn init_logging(log_dir: &Path, level: &str) -> Result<WorkerGuard, std::io::Error> {
     if let Err(e) = std::fs::create_dir_all(log_dir) {
@@ -49,7 +50,7 @@ pub fn init_logging(log_dir: &Path, level: &str) -> Result<WorkerGuard, std::io:
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(env_filter)
         .with(
             fmt::layer()
@@ -57,8 +58,14 @@ pub fn init_logging(log_dir: &Path, level: &str) -> Result<WorkerGuard, std::io:
                 .with_thread_ids(false)
                 .with_writer(std::io::stdout),
         )
-        .with(fmt::layer().with_ansi(false).with_writer(non_blocking_file))
-        .init();
+        .with(fmt::layer().with_ansi(false).with_writer(non_blocking_file));
+
+    if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
+        tracing::warn!(error = %e, "tracing subscriber already initialized");
+        return Err(std::io::Error::other(
+            "tracing subscriber already initialized",
+        ));
+    }
 
     Ok(guard)
 }
@@ -76,11 +83,19 @@ pub fn init_logging(log_dir: &Path, level: &str) -> Result<WorkerGuard, std::io:
 /// ```
 #[must_use]
 pub fn mask_sensitive(s: &str) -> String {
-    if s.len() <= 8 {
+    let char_count = s.chars().count();
+    if char_count <= 8 {
         "****".to_string()
     } else {
-        let prefix = &s[..s.len().min(4)];
-        let suffix = &s[s.len().saturating_sub(4)..];
+        let mut chars = s.chars();
+        let prefix: String = chars.by_ref().take(4).collect();
+        let suffix: String = chars
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         format!("{prefix}****{suffix}")
     }
 }
@@ -133,6 +148,18 @@ mod tests {
         assert!(masked.ends_with("6789"));
     }
 
+    #[test]
+    fn mask_unicode_short() {
+        assert_eq!(mask_sensitive("日本語"), "****");
+    }
+
+    #[test]
+    fn mask_unicode_long() {
+        let masked = mask_sensitive("秘密の鍵123456789");
+        assert!(masked.starts_with("秘密の鍵"));
+        assert!(masked.ends_with("6789"));
+        assert!(masked.contains("****"));
+    }
     #[test]
     fn truncate_short_text() {
         assert_eq!(truncate_for_log("hello"), "hello");

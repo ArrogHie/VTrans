@@ -147,7 +147,8 @@ impl ScreenRegion {
 }
 
 /// Pixel format of a [`CapturedImage`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PixelFormat {
     /// RGBA, 8 bits per channel, 4 bytes per pixel.
     Rgba8,
@@ -203,7 +204,9 @@ impl CapturedImage {
                 "image has zero dimension: {width}x{height}"
             )));
         }
-        let expected = Self::expected_data_len(width, height, format);
+        let expected = Self::checked_expected_data_len(width, height, format).ok_or_else(|| {
+            CoreError::InvalidRegion(format!("image dimensions too large: {width}x{height}"))
+        })?;
         if data.len() != expected {
             return Err(CoreError::InvalidRegion(format!(
                 "data length mismatch: expected {expected} bytes, got {}",
@@ -219,9 +222,25 @@ impl CapturedImage {
     }
 
     /// Computes the expected data buffer length for the given dimensions and pixel format.
+    ///
+    /// Callers must ensure the product of dimensions fits in `usize`; untrusted
+    /// input should go through [`new`](Self::new) or [`validate`](Self::validate),
+    /// which reject overflowing dimensions.
     #[must_use]
     pub const fn expected_data_len(width: u32, height: u32, format: PixelFormat) -> usize {
         (width as usize) * (height as usize) * format.bytes_per_pixel()
+    }
+
+    /// Computes the expected data buffer length, returning `None` on overflow.
+    const fn checked_expected_data_len(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+    ) -> Option<usize> {
+        match (width as usize).checked_mul(height as usize) {
+            Some(pixels) => pixels.checked_mul(format.bytes_per_pixel()),
+            None => None,
+        }
     }
 
     /// Returns the expected data buffer length for this image.
@@ -249,7 +268,13 @@ impl CapturedImage {
     /// # Errors
     /// Returns `CoreError::InvalidRegion` if the data length is incorrect.
     pub fn validate(&self) -> Result<(), CoreError> {
-        let expected = self.data_len();
+        let expected = Self::checked_expected_data_len(self.width, self.height, self.format)
+            .ok_or_else(|| {
+                CoreError::InvalidRegion(format!(
+                    "image dimensions too large: {}x{}",
+                    self.width, self.height
+                ))
+            })?;
         if self.data.len() != expected {
             return Err(CoreError::InvalidRegion(format!(
                 "data length mismatch: expected {expected} bytes, got {}",
@@ -313,7 +338,7 @@ impl OcrResult {
         detected_language: Option<Language>,
         elapsed_ms: u64,
     ) -> Self {
-        let mut sorted = lines.clone();
+        let mut sorted: Vec<&OcrLine> = lines.iter().collect();
         sorted.sort_by_key(|l| l.reading_order);
         let merged_text = sorted
             .iter()
@@ -613,6 +638,38 @@ mod tests {
 
     // ── PixelFormat ──
 
+    #[test]
+    fn pixel_format_serde_roundtrip() {
+        for &fmt in &[PixelFormat::Rgba8, PixelFormat::Bgra8] {
+            let json = serde_json::to_string(&fmt).unwrap();
+            assert_eq!(serde_json::from_str::<PixelFormat>(&json).unwrap(), fmt);
+        }
+        assert_eq!(
+            serde_json::to_string(&PixelFormat::Rgba8).unwrap(),
+            r#""rgba8""#
+        );
+        assert_eq!(
+            serde_json::to_string(&PixelFormat::Bgra8).unwrap(),
+            r#""bgra8""#
+        );
+    }
+
+    #[test]
+    fn captured_image_new_overflow_dimensions() {
+        let err = CapturedImage::new(u32::MAX, u32::MAX, PixelFormat::Rgba8, Vec::new());
+        assert!(matches!(err, Err(CoreError::InvalidRegion(_))));
+    }
+
+    #[test]
+    fn captured_image_validate_overflow_dimensions() {
+        let img = CapturedImage {
+            width: u32::MAX,
+            height: u32::MAX,
+            format: PixelFormat::Rgba8,
+            data: Vec::new(),
+        };
+        assert!(matches!(img.validate(), Err(CoreError::InvalidRegion(_))));
+    }
     #[test]
     fn pixel_format_bytes_and_channels() {
         assert_eq!(PixelFormat::Rgba8.bytes_per_pixel(), 4);

@@ -47,8 +47,10 @@ use crate::types::{
 ///         _options: &OcrOptions,
 ///         cancel: CancellationToken,
 ///     ) -> Result<OcrResult, OcrError> {
-///         cancel.cancelled().await;
-///         Err(OcrError::Cancelled)
+///         if cancel.is_cancelled() {
+///             return Err(OcrError::Cancelled);
+///         }
+///         Ok(OcrResult::empty())
 ///     }
 ///
 ///     fn supported_languages(&self) -> &[Language] {
