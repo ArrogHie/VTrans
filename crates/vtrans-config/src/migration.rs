@@ -30,16 +30,16 @@ const MIGRATIONS: &[Migration] = &[Migration {
     apply: migrate_v0_to_v1,
 }];
 
-/// Reads the schema version stored in raw config JSON.
-///
-/// A missing `version` key is treated as version `0` (legacy file). A
-/// malformed or out-of-range version is normalized to `0` here and is
-/// rejected with a parse error by [`migrate_value`] via [`VersionProbe`].
-pub(crate) fn raw_version(raw: &Value) -> u32 {
-    raw.get("version")
-        .and_then(Value::as_u64)
-        .and_then(|v| u32::try_from(v).ok())
-        .unwrap_or_default()
+/// The outcome of migrating raw config JSON.
+#[derive(Debug)]
+pub(crate) struct MigratedConfig {
+    /// The migrated, validated config at [`CURRENT_CONFIG_VERSION`].
+    pub config: AppConfig,
+    /// The schema version the file was migrated from (`0` for legacy files).
+    pub from_version: u32,
+    /// `true` when a version migration was applied; the caller should then
+    /// persist the result back to disk.
+    pub migrated: bool,
 }
 
 /// Migrates raw config JSON to the latest schema version and validates it.
@@ -48,7 +48,7 @@ pub(crate) fn raw_version(raw: &Value) -> u32 {
 /// [`ConfigError::UnsupportedVersion`] when the file is newer than this
 /// build supports and [`ConfigError::Validation`] when the migrated config
 /// violates a validation rule.
-pub(crate) fn migrate_value(raw: Value) -> Result<AppConfig, ConfigError> {
+pub(crate) fn migrate_value(raw: Value) -> Result<MigratedConfig, ConfigError> {
     // Probe the version first: a malformed `version` field surfaces as a
     // clear parse error instead of being silently treated as legacy.
     let probe: VersionProbe = serde_json::from_value(raw.clone())?;
@@ -56,12 +56,17 @@ pub(crate) fn migrate_value(raw: Value) -> Result<AppConfig, ConfigError> {
         return Err(ConfigError::UnsupportedVersion(probe.version));
     }
 
+    let migrated = probe.version < CURRENT_CONFIG_VERSION;
     let mut config: AppConfig = serde_json::from_value(raw)?;
-    if probe.version < CURRENT_CONFIG_VERSION {
+    if migrated {
         apply_migrations(&mut config, probe.version)?;
     }
     config.validate()?;
-    Ok(config)
+    Ok(MigratedConfig {
+        config,
+        from_version: probe.version,
+        migrated,
+    })
 }
 
 /// Applies every migration step needed to reach [`CURRENT_CONFIG_VERSION`].
@@ -109,7 +114,7 @@ mod tests {
         let raw = serde_json::json!({
             "capture": { "interval_ms": 1000 }
         });
-        let config = migrate_value(raw).unwrap();
+        let config = migrate_value(raw).unwrap().config;
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
         assert_eq!(config.capture.interval_ms, 1000);
         assert!((config.capture.difference_threshold - 0.03).abs() < f32::EPSILON);
@@ -127,7 +132,7 @@ mod tests {
             "version": 0,
             "translation": { "provider": "local", "target_language": "ja" }
         });
-        let config = migrate_value(raw).unwrap();
+        let config = migrate_value(raw).unwrap().config;
         assert_eq!(config.version, CURRENT_CONFIG_VERSION);
         assert_eq!(config.translation.provider, "local");
         assert_eq!(config.translation.target_language, Language::Japanese);
@@ -140,7 +145,7 @@ mod tests {
             "version": 1,
             "capture": { "interval_ms": 700 }
         });
-        let config = migrate_value(raw).unwrap();
+        let config = migrate_value(raw).unwrap().config;
         assert_eq!(config.version, 1);
         assert_eq!(config.capture.interval_ms, 700);
     }
@@ -178,20 +183,27 @@ mod tests {
     }
 
     #[test]
-    fn raw_version_missing_key_is_zero() {
-        let raw = serde_json::json!({});
-        assert_eq!(raw_version(&raw), 0);
+    fn migrated_flag_is_true_for_v0() {
+        let raw = serde_json::json!({ "version": 0 });
+        let migrated = migrate_value(raw).unwrap();
+        assert!(migrated.migrated);
+        assert_eq!(migrated.from_version, 0);
+        assert_eq!(migrated.config.version, CURRENT_CONFIG_VERSION);
     }
 
     #[test]
-    fn raw_version_reads_numeric_key() {
+    fn migrated_flag_is_false_for_current_version() {
         let raw = serde_json::json!({ "version": 1 });
-        assert_eq!(raw_version(&raw), 1);
+        let migrated = migrate_value(raw).unwrap();
+        assert!(!migrated.migrated);
+        assert_eq!(migrated.from_version, 1);
     }
 
     #[test]
-    fn raw_version_tolerates_malformed_key() {
-        let raw = serde_json::json!({ "version": "one" });
-        assert_eq!(raw_version(&raw), 0);
+    fn versionless_file_is_reported_as_v0() {
+        let raw = serde_json::json!({});
+        let migrated = migrate_value(raw).unwrap();
+        assert!(migrated.migrated);
+        assert_eq!(migrated.from_version, 0);
     }
 }

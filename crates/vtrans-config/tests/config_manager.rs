@@ -158,6 +158,38 @@ fn versionless_fixture_is_migrated_and_persisted() {
 }
 
 #[test]
+fn update_migrates_v0_file_before_applying_mutation() {
+    let dir = tempdir().unwrap();
+    let fixture = fs::read_to_string(Path::new(FIXTURES_DIR).join("config_v0.json")).unwrap();
+    write_config(dir.path(), &fixture);
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    manager.update(|c| c.capture.interval_ms = 1500).unwrap();
+
+    let loaded = manager.load().unwrap();
+    assert_eq!(loaded.capture.interval_ms, 1500);
+    // Fields from the v0 fixture survive the migration + mutation cycle.
+    assert_eq!(loaded.translation.provider, "local");
+    assert_eq!(loaded.translation.target_language, Language::Japanese);
+    assert_eq!(loaded.version, CURRENT_CONFIG_VERSION);
+}
+
+#[test]
+fn load_does_not_rewrite_current_version_file() {
+    let dir = tempdir().unwrap();
+    // Compact v1 JSON: loading must not touch the file when it is already
+    // at the current version (no pretty-printing, no field expansion).
+    let raw = r#"{"version":1,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
+    write_config(dir.path(), raw);
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    manager.load().unwrap();
+
+    let on_disk = fs::read_to_string(dir.path().join("config.json")).unwrap();
+    assert_eq!(on_disk, raw);
+}
+
+#[test]
 fn concurrent_updates_do_not_lose_mutations() {
     const THREADS: usize = 8;
 

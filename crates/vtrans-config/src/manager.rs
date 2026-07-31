@@ -17,7 +17,7 @@ use std::sync::RwLock;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
-use crate::migration::{migrate_value, raw_version};
+use crate::migration::{migrate_value, MigratedConfig};
 use crate::schema::{AppConfig, CURRENT_CONFIG_VERSION};
 use crate::ConfigError;
 
@@ -166,18 +166,17 @@ impl ConfigManager {
             return Ok(config);
         };
 
-        let from_version = raw_version(&raw);
-        let config = self.migrate_value_logged(raw)?;
-        if from_version < CURRENT_CONFIG_VERSION {
+        let migrated = self.migrate_value_logged(raw)?;
+        if migrated.migrated {
             info!(
-                from_version,
+                from_version = migrated.from_version,
                 to_version = CURRENT_CONFIG_VERSION,
                 config_path = %self.config_path.display(),
                 "config migrated"
             );
-            self.save(&config)?;
+            self.save(&migrated.config)?;
         }
-        Ok(config)
+        Ok(migrated.config)
     }
 
     /// Validates and persists the given config.
@@ -257,18 +256,18 @@ impl ConfigManager {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let raw = self.read_strict()?;
-        let mut config = self.migrate_value_logged(raw)?;
+        let mut config = self.migrate_value_logged(raw)?.config;
         f(&mut config);
         self.save(&config)
     }
 
     /// Migrates raw config JSON, logging any failure with file context.
-    fn migrate_value_logged(&self, raw: Value) -> Result<AppConfig, ConfigError> {
+    fn migrate_value_logged(&self, raw: Value) -> Result<MigratedConfig, ConfigError> {
         migrate_value(raw).map_err(|e| {
             warn!(
                 error = %e,
                 config_path = %self.config_path.display(),
-                "config migration or validation failed"
+                "failed to load, migrate, or validate config"
             );
             e
         })
