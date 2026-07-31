@@ -10,7 +10,7 @@ description = "Credential management for VTrans"
 vtrans-core = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-windows = { workspace = true }
+windows = { workspace = true, features = ["Win32_Security_Credentials"] }
 
 [dev-dependencies]
 mockall = { workspace = true }
