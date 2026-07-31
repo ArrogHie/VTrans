@@ -7,4 +7,4 @@ pub mod preprocess;
 pub mod provider;
 pub mod recognize;
 
-pub use provider::PaddleOcrProvider;
+// TODO(feat/05-ocr): re-export PaddleOcrProvider once implemented.

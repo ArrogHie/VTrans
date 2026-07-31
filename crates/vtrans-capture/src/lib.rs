@@ -6,5 +6,4 @@ pub mod monitor;
 pub mod session;
 pub mod source;
 
-pub use monitor::MonitorInfo;
-pub use source::WindowsCaptureSource;
+// TODO(feat/04-capture): re-export MonitorInfo and WindowsCaptureSource once implemented.

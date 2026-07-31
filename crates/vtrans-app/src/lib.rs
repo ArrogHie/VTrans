@@ -6,4 +6,4 @@ pub mod hotkeys;
 pub mod setup;
 pub mod state;
 
-pub use state::AppState;
+// TODO(feat/10-app): re-export AppState once implemented.

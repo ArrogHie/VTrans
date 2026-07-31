@@ -5,5 +5,4 @@ pub mod dedup;
 pub mod live;
 pub mod single;
 
-pub use live::Pipeline;
-pub use single::run_single_capture;
+// TODO(feat/09-pipeline): re-export Pipeline and run_single_capture once implemented.
