@@ -112,7 +112,9 @@ impl WindowsCredentialStore {
 impl CredentialStore for WindowsCredentialStore {
     fn store(&self, target: &str, secret: &[u8]) -> Result<(), SecurityError> {
         let blob_size = u32::try_from(secret.len()).map_err(|_| {
-            SecurityError::OperationFailed("credential blob exceeds 4 GiB limit".to_string())
+            let message = "credential blob exceeds the 4 GiB limit".to_string();
+            warn!(error = %message, target = %target, "credential blob is too large to store");
+            SecurityError::OperationFailed(message)
         })?;
         let target_wide = to_wide(target);
         let empty_wide = to_wide("");
@@ -209,10 +211,12 @@ impl CredentialStore for WindowsCredentialStore {
         }
         .map_err(|e| map_windows_error(&e, "CredEnumerateW"))?;
 
-        let count = usize::try_from(count).map_err(|_| {
-            SecurityError::OperationFailed("credential count out of range".to_string())
-        })?;
-        let targets = {
+        let targets = (|| -> Result<Vec<String>, SecurityError> {
+            let count = usize::try_from(count).map_err(|_| {
+                let message = "credential count out of range".to_string();
+                warn!(error = %message, "credential enumeration returned an invalid count");
+                SecurityError::OperationFailed(message)
+            })?;
             // SAFETY: a successful CredEnumerateW guarantees `credentials`
             // points to an array of exactly `count` pointers.
             let slice = unsafe { std::slice::from_raw_parts(credentials, count) };
@@ -239,13 +243,14 @@ impl CredentialStore for WindowsCredentialStore {
                         .to_string(),
                 );
             }
-            targets
-        };
+            Ok(targets)
+        })();
 
-        // SAFETY: CredFree releases the array allocated by CredEnumerateW.
+        // SAFETY: CredFree releases the array allocated by CredEnumerateW on
+        // both the success and the error path, so no allocation leaks.
         unsafe { CredFree(credentials.cast::<core::ffi::c_void>()) };
 
-        Ok(targets)
+        targets
     }
 }
 
@@ -315,7 +320,9 @@ fn to_wide(value: &str) -> Vec<u16> {
 /// when this function returns an error.
 fn read_blob(credential: &CREDENTIALW) -> Result<Vec<u8>, SecurityError> {
     let blob_size = usize::try_from(credential.CredentialBlobSize).map_err(|_| {
-        SecurityError::OperationFailed("credential blob size is out of range".to_string())
+        let message = "credential blob size is out of range".to_string();
+        warn!(error = %message, "credential blob size is out of range");
+        SecurityError::OperationFailed(message)
     })?;
     if blob_size == 0 {
         return Ok(Vec::new());

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::credential_store::{CredentialStore, WindowsCredentialStore};
 use crate::{mask_key, SecurityError};
@@ -163,9 +163,10 @@ impl CredentialManager {
         match self.store.load(&stored_target)? {
             Some(blob) => {
                 let api_key = String::from_utf8(blob).map_err(|e| {
-                    SecurityError::OperationFailed(format!(
-                        "stored credential for target '{target}' is not valid UTF-8: {e}"
-                    ))
+                    let message =
+                        format!("stored credential for target '{target}' is not valid UTF-8: {e}");
+                    warn!(error = %message, "stored credential is not valid UTF-8");
+                    SecurityError::OperationFailed(message)
                 })?;
                 debug!(target = %target, masked_key = %mask_key(&api_key), "api key loaded");
                 Ok(Some(api_key))
