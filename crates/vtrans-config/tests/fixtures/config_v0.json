@@ -1,0 +1,9 @@
+{
+  "capture": {
+    "interval_ms": 1000
+  },
+  "translation": {
+    "provider": "local",
+    "target_language": "ja"
+  }
+}
