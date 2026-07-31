@@ -558,6 +558,23 @@ mod tests {
         assert_eq!(TextNormalizer::clean("   \n  "), "");
     }
 
+    #[test]
+    fn clean_is_idempotent() {
+        let inputs = [
+            "ＨＰ\u{3000}１００  \u{200b}攻撃力\n  アップ",
+            "a\r\nb\rc",
+            "  x  \t y  ",
+            "あ，い．う～",
+            "a\n\nb\n",
+            "",
+        ];
+        for input in inputs {
+            let once = TextNormalizer::clean(input);
+            let twice = TextNormalizer::clean(&once);
+            assert_eq!(once, twice, "clean is not idempotent for {input:?}");
+        }
+    }
+
     // ── merge_lines ──
 
     #[test]

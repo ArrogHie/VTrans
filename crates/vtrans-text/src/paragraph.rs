@@ -286,6 +286,35 @@ mod tests {
     }
 
     #[test]
+    fn split_never_panics_and_upholds_invariants() {
+        // A deterministic stress sweep over pathological inputs: the splitter
+        // must never panic and every chunk must be non-empty and within the
+        // limit, for every limit from 1 upward.
+        let inputs = [
+            "こんにちは。また明日。さようなら。",
+            "The quick brown fox jumps over the lazy dog. Really? Yes!",
+            "a\tb\u{3000}c  \u{200b}d",
+            "line1\nline2\n\nline3\n",
+            "no-break-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "。！？；",
+            "1234567890 1234567890 1234567890",
+            "\u{feff}\u{200b}   \u{200c}",
+        ];
+        for input in inputs {
+            for max_len in 1..=12 {
+                let chunks = split_paragraphs(input, max_len);
+                for chunk in &chunks {
+                    assert!(!chunk.is_empty(), "empty chunk for {input:?}");
+                    assert!(
+                        chunk.chars().count() <= max_len,
+                        "chunk too long for {input:?} with max_len {max_len}: {chunk:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn zero_max_len_is_unlimited() {
         assert_eq!(split_paragraphs("long text", 0), vec!["long text"]);
         assert_eq!(split_paragraphs("a\nb", 0), vec!["a", "b"]);
