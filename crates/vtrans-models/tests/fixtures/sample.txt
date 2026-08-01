@@ -1,0 +1,2 @@
+VTrans model verification test fixture.
+This file has a known content for SHA-256 hash testing.

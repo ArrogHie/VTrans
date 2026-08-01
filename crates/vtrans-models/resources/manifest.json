@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "ocr": {
+    "det": {
+      "id": "ppocr-det-v4",
+      "path": "ocr/det.onnx",
+      "sha256": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+      "size_bytes": 4745517
+    },
+    "rec_ja": {
+      "id": "ppocr-rec-ja",
+      "path": "ocr/rec_ja.onnx",
+      "sha256": "e1075a67dba758ecfc7ebc78a10ae61c95ac8fb66a9c86fab5541e33f085cb7a",
+      "size_bytes": 9753335
+    },
+    "rec_en": {
+      "id": "ppocr-rec-en",
+      "path": "ocr/rec_en.onnx",
+      "sha256": "e8770c967605983d1570cdf5352041dfb68fa0c21664f49f47b155abd3e0e318",
+      "size_bytes": 7653044
+    },
+    "rec_multi": null,
+    "dicts": {
+      "ja": "ocr/dict_ja.txt",
+      "en": "ocr/dict_en.txt"
+    },
+    "preprocess_params": {
+      "image_size": [960, 960],
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "det_threshold": 0.3,
+      "unclip_ratio": 2.0
+    }
+  },
+  "translation": {
+    "model": {
+      "id": "opus-mt-en-zh-int8",
+      "path": "translation/model.onnx",
+      "sha256": "6a9d4d0b42f5ad0de0a91b9f81a1283078b264ed9c96a3341f76d631caec79f9",
+      "size_bytes": 403368390
+    },
+    "tokenizer": {
+      "id": "opus-mt-en-zh-tokenizer",
+      "path": "translation/tokenizer.json",
+      "sha256": "a16e74563c61b5a1602d3aba56cd54f0f066ba64de374c83855120a2cc31359a",
+      "size_bytes": 4259760
+    },
+    "supported_pairs": [
+      ["en", "zh-CN"]
+    ],
+    "max_length": 512,
+    "inference_params": {
+      "max_batch_size": 1,
+      "num_beams": 4
+    }
+  }
+}
