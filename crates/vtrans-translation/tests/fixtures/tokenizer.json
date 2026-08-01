@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [
+    { "id": 0, "content": "[UNK]", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+    { "id": 1, "content": "<s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true },
+    { "id": 2, "content": "</s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true }
+  ],
+  "normalizer": { "type": "NFC" },
+  "pre_tokenizer": { "type": "Whitespace" },
+  "post_processor": null,
+  "decoder": { "type": "BPEDecoder", "suffix": "</w>" },
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": "[UNK]",
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": "</w>",
+    "fuse_unk": false,
+    "byte_fallback": false,
+    "vocab": {
+      "[UNK]": 0,
+      "<s>": 1,
+      "</s>": 2,
+      "hello": 3,
+      "world": 4,
+      "你好": 5,
+      "こんにちは": 6
+    },
+    "merges": []
+  }
+}
