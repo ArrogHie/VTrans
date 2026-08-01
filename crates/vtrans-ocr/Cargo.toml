@@ -12,14 +12,14 @@ vtrans-models = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 image = { workspace = true }
-ort = { workspace = true }
+ort = { workspace = true, features = ["std"] }
 ndarray = "0.16"
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true
