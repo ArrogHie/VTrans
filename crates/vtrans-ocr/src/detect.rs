@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use ndarray::{Array2, Array4, ArrayViewD};
 
-use ort::session::Session;
+use ort::session::{RunOptions, Session};
 use ort::value::Tensor;
 
 use vtrans_core::error::OcrError;
@@ -90,17 +90,22 @@ impl Detector {
     ///
     /// ```no_run
     /// use ndarray::Array4;
-    /// use ort::session::Session;
+    /// use ort::session::{RunOptions, Session};
     /// use vtrans_ocr::detect::Detector;
     ///
     /// let session = Session::builder()?.commit_from_file("det.onnx")?;
     /// let detector = Detector::new(session)?;
     /// let tensor = Array4::<f32>::zeros((1, 3, 64, 64));
-    /// let probability = detector.run(&tensor)?;
+    /// let run_options = RunOptions::new()?;
+    /// let probability = detector.run(&tensor, &run_options)?;
     /// assert_eq!(probability.ndim(), 2);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn run(&self, input: &Array4<f32>) -> Result<Array2<f32>, OcrError> {
+    pub fn run(
+        &self,
+        input: &Array4<f32>,
+        run_options: &RunOptions,
+    ) -> Result<Array2<f32>, OcrError> {
         let mut session = self
             .session
             .lock()
@@ -110,7 +115,10 @@ impl Detector {
         let tensor = Tensor::from_array((shape, data))
             .map_err(|e| OcrError::OrtRuntime(format!("create detection input: {e}")))?;
         let outputs = session
-            .run(ort::inputs![self.input_name.as_str() => tensor])
+            .run_with_options(
+                ort::inputs![self.input_name.as_str() => tensor],
+                run_options,
+            )
             .map_err(|e| OcrError::OrtRuntime(format!("detection inference failed: {e}")))?;
 
         let value = outputs.get(self.output_name.as_str()).ok_or_else(|| {
@@ -148,9 +156,11 @@ impl Detector {
 /// ```
 pub fn extract_probability_map(array: &ArrayViewD<f32>) -> Result<Array2<f32>, OcrError> {
     let (height, width) = match array.shape() {
-        [height, width] | [1, height, width] | [1, 1, height, width] | [1, height, width, 1] => {
-            (*height, *width)
-        }
+        [height, width]
+        | [1, height, width]
+        | [1, 1, height, width]
+        | [height, width, 1]
+        | [1, height, width, 1] => (*height, *width),
         shape => {
             return Err(OcrError::Postprocess(format!(
                 "unsupported detection output shape: {shape:?}"
@@ -194,6 +204,12 @@ mod tests {
     #[test]
     fn extracts_last_channel_map() {
         let map = extract_probability_map(&array_from(&[1, 4, 5, 1], 0.5).view()).unwrap();
+        assert_eq!(map.dim(), (4, 5));
+    }
+
+    #[test]
+    fn extracts_unbatched_last_channel_map() {
+        let map = extract_probability_map(&array_from(&[4, 5, 1], 0.5).view()).unwrap();
         assert_eq!(map.dim(), (4, 5));
     }
 

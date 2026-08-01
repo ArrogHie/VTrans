@@ -512,12 +512,7 @@ pub fn warp_perspective(
     let mut output = RgbImage::new(dst_width, dst_height);
     let src = order_polygon(src);
     if polygon_area(&src) < 0.5 {
-        return image::imageops::resize(
-            rgb,
-            dst_width,
-            dst_height,
-            image::imageops::FilterType::Triangle,
-        );
+        return warp_fallback_crop(rgb, &src, dst_width, dst_height);
     }
 
     let dst = [
@@ -558,6 +553,54 @@ pub fn warp_perspective(
         }
     }
     output
+}
+
+/// Crop the source quad's bounding box and resize it for degenerate quads.
+fn warp_fallback_crop(
+    rgb: &RgbImage,
+    src: &[Point; 4],
+    dst_width: u32,
+    dst_height: u32,
+) -> RgbImage {
+    let max_x = rgb.width().saturating_sub(1) as f32;
+    let max_y = rgb.height().saturating_sub(1) as f32;
+    let min_x = src
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .clamp(0.0, max_x);
+    let min_y = src
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .clamp(0.0, max_y);
+    let crop_x = min_x as u32;
+    let crop_y = min_y as u32;
+    let width = ((max_x.min(
+        src.iter()
+            .map(|point| point[0])
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil(),
+    ) - min_x
+        + 1.0)
+        .max(1.0)) as u32;
+    let height = ((max_y.min(
+        src.iter()
+            .map(|point| point[1])
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil(),
+    ) - min_y
+        + 1.0)
+        .max(1.0)) as u32;
+    let crop = image::imageops::crop_imm(rgb, crop_x, crop_y, width, height).to_image();
+    image::imageops::resize(
+        &crop,
+        dst_width,
+        dst_height,
+        image::imageops::FilterType::Triangle,
+    )
 }
 
 /// Rotate an image 90 degrees clockwise.
@@ -629,6 +672,25 @@ mod tests {
         let src = [[0.0, 0.0], [3.0, 0.0], [3.0, 3.0], [0.0, 3.0]];
         let warped = warp_perspective(&image, src, 4, 4);
         assert_eq!(warped.get_pixel(0, 0).0, [12, 34, 56]);
+    }
+
+    #[test]
+    fn warp_degenerate_quad_falls_back_to_crop() {
+        let mut image = RgbImage::new(8, 8);
+        for x in 0..8 {
+            for y in 0..8 {
+                image.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        image.put_pixel(1, 1, image::Rgb([0, 0, 0]));
+        image.put_pixel(2, 1, image::Rgb([0, 0, 0]));
+        image.put_pixel(3, 1, image::Rgb([0, 0, 0]));
+        let degenerate = [[1.0, 1.0], [3.0, 1.0], [3.0, 1.0], [1.0, 1.0]];
+        let warped = warp_perspective(&image, degenerate, 4, 4);
+        assert_eq!(warped.dimensions(), (4, 4));
+        // The crop path keeps black pixels instead of stretching the full
+        // white image, which would produce an all-white output.
+        assert!(warped.pixels().any(|pixel| pixel.0 == [0, 0, 0]));
     }
 
     #[test]

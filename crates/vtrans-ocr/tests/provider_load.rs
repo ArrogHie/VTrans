@@ -98,8 +98,23 @@ fn corrupt_model_returns_model_load() {
 }
 
 #[test]
-fn from_manager_reports_integrity_failures() {
+fn from_manager_reports_missing_dictionary() {
     let dir = tempdir().unwrap();
+    write_manifest(
+        dir.path(),
+        r#"{ "ja": "ocr/dict_ja.txt", "en": "ocr/dict_en.txt" }"#,
+    );
+    let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+    let result = PaddleOcrProvider::from_manager(&manager);
+    assert!(matches!(result, Err(OcrError::InvalidManifest(_))));
+}
+
+#[test]
+fn from_manager_requires_ocr_model_files() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("ocr")).unwrap();
+    fs::write(dir.path().join("ocr/dict_ja.txt"), "a\nb\n").unwrap();
+    fs::write(dir.path().join("ocr/dict_en.txt"), "a\nb\n").unwrap();
     write_manifest(
         dir.path(),
         r#"{ "ja": "ocr/dict_ja.txt", "en": "ocr/dict_en.txt" }"#,

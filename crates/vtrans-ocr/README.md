@@ -90,10 +90,13 @@ cargo run --example ocr_verify -- `
 - 识别模型预处理参数（32 高、最大 320 宽、mean/std 0.5）使用 PP-OCR
   标准值；`vtrans-models` 的 manifest schema 目前只提供检测模型参数。
 - 未实现方向分类器；竖排文本会旋转 90° 后送入识别模型，质量可后续优化。
+- 混合横排/竖排布局按方向分组排序，组间以版面位置决定先后，复杂混排
+  的阅读顺序仍可能不完美。
 - `Language::Auto` 在存在 `rec_multi` 时使用多语言模型，否则回退日文模型。
 - 当前使用 greedy CTC 解码，未实现 beam search。
 - 单次推理串行化（ONNX `Session::run` 需要独占访问），同一 provider 的
-  并发识别请求会排队。
+  并发识别请求会排队；取消请求会尝试终止正在执行的 ONNX run。
+- `from_manager` 只校验 OCR 模型条目，不要求翻译模型文件已就绪。
 
 ## 详细规格
 

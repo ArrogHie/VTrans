@@ -145,6 +145,9 @@ pub fn boxes_from_map(
             let polygon =
                 scale_polygon(&polygon, ratio_x, ratio_y, original_width, original_height);
             let (box_width, box_height) = box_dimensions(&polygon);
+            if box_width < 1.0 || box_height < 1.0 {
+                continue;
+            }
             boxes.push(DetectedBox {
                 polygon,
                 score,
@@ -160,7 +163,8 @@ pub fn boxes_from_map(
 ///
 /// Horizontal text is sorted top-to-bottom and then left-to-right. Vertical
 /// text is sorted right-to-left by column and then top-to-bottom within each
-/// column. The orientation with the majority of boxes wins.
+/// column. Mixed layouts keep each orientation's own order and start with
+/// the higher reading group.
 ///
 /// # Example
 ///
@@ -181,17 +185,58 @@ pub fn boxes_from_map(
 /// ```
 #[must_use]
 pub fn sort_boxes(boxes: Vec<DetectedBox>, options: &OcrOptions) -> Vec<DetectedBox> {
-    let vertical_count = boxes
-        .iter()
-        .filter(|b| options.detect_vertical && b.height > b.width * 1.5)
-        .count();
     let mut boxes = boxes;
-    if vertical_count * 2 > boxes.len() {
+    let vertical_count = boxes.iter().filter(|b| is_vertical(b, options)).count();
+    if vertical_count == 0 {
+        sort_horizontal(&mut boxes);
+    } else if vertical_count == boxes.len() {
         sort_vertical(&mut boxes);
     } else {
-        sort_horizontal(&mut boxes);
+        boxes = sort_mixed(boxes, options);
     }
     boxes
+}
+
+/// Returns `true` for boxes whose height clearly exceeds their width.
+fn is_vertical(box_: &DetectedBox, options: &OcrOptions) -> bool {
+    options.detect_vertical && box_.height > box_.width * 1.5
+}
+
+/// Sort a mixed horizontal/vertical layout while preserving each
+/// orientation's reading order.
+fn sort_mixed(boxes: Vec<DetectedBox>, options: &OcrOptions) -> Vec<DetectedBox> {
+    let mut horizontal = Vec::new();
+    let mut vertical = Vec::new();
+    for box_ in boxes {
+        if is_vertical(&box_, options) {
+            vertical.push(box_);
+        } else {
+            horizontal.push(box_);
+        }
+    }
+
+    sort_horizontal(&mut horizontal);
+    sort_vertical(&mut vertical);
+    if vertical.is_empty() {
+        return horizontal;
+    }
+    if horizontal.is_empty() {
+        return vertical;
+    }
+
+    let h_center = polygon_center(&horizontal[0].polygon);
+    let v_center = polygon_center(&vertical[0].polygon);
+    // The earlier reading group starts higher on the page; ties prefer the
+    // rightmost vertical column, matching Japanese vertical text flow.
+    let h_start = h_center[1] - h_center[0] / 1000.0;
+    let v_start = v_center[1] - v_center[0] / 1000.0;
+    if v_start <= h_start {
+        vertical.extend(horizontal);
+        vertical
+    } else {
+        horizontal.extend(vertical);
+        horizontal
+    }
 }
 
 /// Sort boxes by row (top to bottom) then by column (left to right).
@@ -538,6 +583,20 @@ mod tests {
     }
 
     #[test]
+    fn boxes_from_map_drops_collinear_components() {
+        let mut probability = Array2::<f32>::zeros((4, 4));
+        probability[[1, 1]] = 0.9;
+        probability[[1, 2]] = 0.9;
+        probability[[1, 3]] = 0.9;
+        let params = DetectionParams {
+            threshold: 0.5,
+            unclip_ratio: 1.5,
+            min_box_area: 3.0,
+        };
+        assert!(boxes_from_map(&probability, params, 1.0, 1.0, 4, 4).is_empty());
+    }
+
+    #[test]
     fn horizontal_sort_reads_left_to_right_top_to_bottom() {
         let options = OcrOptions {
             detect_vertical: false,
@@ -575,6 +634,46 @@ mod tests {
             centers,
             vec![[104.0, 10.0], [104.0, 40.0], [4.0, 10.0], [4.0, 40.0]]
         );
+    }
+
+    #[test]
+    fn mixed_sort_starts_with_higher_group() {
+        let options = OcrOptions {
+            detect_vertical: true,
+            ..OcrOptions::default()
+        };
+        let horizontal = text_box(0.0, 60.0, 30.0, 10.0);
+        let vertical_top = text_box(100.0, 10.0, 8.0, 20.0);
+        let vertical_bottom = text_box(100.0, 40.0, 8.0, 20.0);
+        let sorted = sort_boxes(
+            vec![
+                horizontal.clone(),
+                vertical_top.clone(),
+                vertical_bottom.clone(),
+            ],
+            &options,
+        );
+        assert_eq!(sorted[0], vertical_top);
+        assert_eq!(sorted[1], vertical_bottom);
+        assert_eq!(sorted[2], horizontal);
+    }
+
+    #[test]
+    fn mixed_sort_keeps_horizontal_row_order() {
+        let options = OcrOptions {
+            detect_vertical: true,
+            ..OcrOptions::default()
+        };
+        let left = text_box(0.0, 0.0, 30.0, 10.0);
+        let right = text_box(40.0, 0.0, 30.0, 10.0);
+        let vertical = text_box(100.0, 60.0, 8.0, 20.0);
+        let sorted = sort_boxes(
+            vec![left.clone(), vertical.clone(), right.clone()],
+            &options,
+        );
+        assert_eq!(sorted[0], left);
+        assert_eq!(sorted[1], right);
+        assert_eq!(sorted[2], vertical);
     }
 
     #[test]

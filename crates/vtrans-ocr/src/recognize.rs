@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use image::RgbImage;
 use ndarray::{Array2, ArrayViewD};
 
-use ort::session::Session;
+use ort::session::{RunOptions, Session};
 use ort::value::Tensor;
 
 use vtrans_core::error::OcrError;
@@ -100,17 +100,22 @@ impl Recognizer {
     ///
     /// ```no_run
     /// use image::RgbImage;
-    /// use ort::session::Session;
+    /// use ort::session::{RunOptions, Session};
     /// use vtrans_ocr::recognize::Recognizer;
     ///
     /// let session = Session::builder()?.commit_from_file("rec.onnx")?;
     /// let recognizer = Recognizer::new(session, vec![String::new(), "a".to_string()])?;
     /// let crop = RgbImage::from_pixel(32, 32, image::Rgb([0, 0, 0]));
-    /// let line = recognizer.run(&crop)?;
+    /// let run_options = RunOptions::new()?;
+    /// let line = recognizer.run(&crop, &run_options)?;
     /// assert!(!line.text.is_empty() || line.confidence == 0.0);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn run(&self, rgb: &RgbImage) -> Result<RecognizedLine, OcrError> {
+    pub fn run(
+        &self,
+        rgb: &RgbImage,
+        run_options: &RunOptions,
+    ) -> Result<RecognizedLine, OcrError> {
         let tensor = prepare_rec_input(rgb);
         let shape = tensor.shape().to_vec();
         let data: Vec<f32> = tensor.iter().copied().collect();
@@ -121,7 +126,7 @@ impl Recognizer {
         let input = Tensor::from_array((shape, data))
             .map_err(|e| OcrError::OrtRuntime(format!("create recognition input: {e}")))?;
         let outputs = session
-            .run(ort::inputs![self.input_name.as_str() => input])
+            .run_with_options(ort::inputs![self.input_name.as_str() => input], run_options)
             .map_err(|e| OcrError::OrtRuntime(format!("recognition inference failed: {e}")))?;
         let value = outputs.get(self.output_name.as_str()).ok_or_else(|| {
             OcrError::Inference("recognition model returned no outputs".to_string())

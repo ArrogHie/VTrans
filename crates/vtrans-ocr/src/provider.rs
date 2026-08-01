@@ -15,11 +15,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use image::RgbImage;
 use tokio_util::sync::CancellationToken;
 
 use ort::ep;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::{builder::GraphOptimizationLevel, RunOptions, Session};
 
 use vtrans_core::error::OcrError;
 use vtrans_core::traits::OcrProvider;
@@ -141,8 +140,8 @@ impl PaddleOcrProvider {
 
     /// Load the provider from a [`ModelManager`].
     ///
-    /// The manager's `verify_integrity` pass checks every model SHA-256 and
-    /// dictionary file once before any ONNX session is created.
+    /// Only the OCR entries (detection, recognition, and their dictionaries)
+    /// are verified before loading; translation models are not required.
     ///
     /// # Errors
     ///
@@ -162,17 +161,7 @@ impl PaddleOcrProvider {
     /// ```
     #[tracing::instrument(skip(manager))]
     pub fn from_manager(manager: &ModelManager) -> Result<Self, OcrError> {
-        let report = manager
-            .verify_integrity()
-            .map_err(|e| OcrError::ModelLoad(e.to_string()))?;
-        if !report.is_ok() {
-            tracing::error!(
-                checked = report.checked,
-                failed = report.failed.len(),
-                "model integrity verification failed"
-            );
-            return Err(OcrError::ModelLoad(report.failed.join("; ")));
-        }
+        verify_manifest_files(manager.manifest(), manager.manifest_dir())?;
         Self::load(manager.manifest(), manager.manifest_dir())
     }
 
@@ -302,21 +291,29 @@ impl OcrProvider for PaddleOcrProvider {
             return Err(OcrError::Cancelled);
         }
         let (recognizer, detected_language) = self.select_recognizer(options.language)?;
-        let rgb = rgb_region(image, region)?;
+        let run_options = Arc::new(
+            RunOptions::new()
+                .map_err(|e| OcrError::OrtRuntime(format!("create ONNX run options: {e}")))?,
+        );
+        let run_options_for_task = Arc::clone(&run_options);
         let det = Arc::clone(&self.det);
         let preprocess = self.preprocess.clone();
         let options = options.clone();
         let cancel_for_task = cancel.clone();
+        let image = image.clone();
+        let region = region.clone();
 
         let handle = tokio::task::spawn_blocking(move || {
             run_ocr_pipeline(
                 det,
                 recognizer,
-                rgb,
+                image,
+                region,
                 preprocess,
                 options,
                 detected_language,
                 cancel_for_task,
+                run_options_for_task,
             )
         });
 
@@ -329,7 +326,8 @@ impl OcrProvider for PaddleOcrProvider {
                 }
             },
             () = cancel.cancelled() => {
-                tracing::warn!("OCR cancelled while inference was running");
+                let _ = run_options.terminate();
+                tracing::warn!("OCR cancelled and ONNX run terminated");
                 Err(OcrError::Cancelled)
             }
         }
@@ -337,26 +335,33 @@ impl OcrProvider for PaddleOcrProvider {
 }
 
 /// Execute the full OCR pipeline on a blocking thread.
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value
+)]
 fn run_ocr_pipeline(
     det: Arc<Detector>,
     recognizer: Arc<Recognizer>,
-    rgb: RgbImage,
+    image: CapturedImage,
+    region: ScreenRegion,
     preprocess: PreprocessParams,
     options: OcrOptions,
     detected_language: Option<Language>,
     cancel: CancellationToken,
+    run_options: Arc<RunOptions>,
 ) -> Result<OcrResult, OcrError> {
     let started = Instant::now();
     if cancel.is_cancelled() {
         return Err(OcrError::Cancelled);
     }
+    let rgb = rgb_region(&image, &region)?;
 
     let det_input = det_preprocess(&rgb, &preprocess)?;
     if cancel.is_cancelled() {
         return Err(OcrError::Cancelled);
     }
-    let probability = det.run(&det_input.tensor)?;
+    let probability = det.run(&det_input.tensor, &run_options)?;
     if cancel.is_cancelled() {
         return Err(OcrError::Cancelled);
     }
@@ -397,7 +402,7 @@ fn run_ocr_pipeline(
             .clamp(REC_HEIGHT as f32, REC_MAX_WIDTH as f32) as u32;
         let crop = warp_perspective(&rgb, box_.polygon, target_width, REC_HEIGHT);
         let crop = if vertical { rotate_90_cw(&crop) } else { crop };
-        let line = recognizer.run(&crop)?;
+        let line = recognizer.run(&crop, &run_options)?;
         tracing::debug!(
             reading_order,
             confidence = line.confidence,
@@ -448,15 +453,23 @@ fn load_session(path: &Path, id: &str) -> Result<Session, OcrError> {
             OcrError::ModelLoad(e.to_string())
         })?
         .with_intra_threads(2)
-        .map_err(|e| {
-            tracing::error!(model_id = id, error = %e, "failed to configure inference threads");
-            OcrError::ModelLoad(e.to_string())
-        })?
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                model_id = id,
+                error = %e,
+                "failed to configure inference threads, using defaults"
+            );
+            e.recover()
+        })
         .with_optimization_level(GraphOptimizationLevel::All)
-        .map_err(|e| {
-            tracing::error!(model_id = id, error = %e, "failed to configure graph optimization");
-            OcrError::ModelLoad(e.to_string())
-        })?
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                model_id = id,
+                error = %e,
+                "failed to enable full graph optimization, using default level"
+            );
+            e.recover()
+        })
         .commit_from_file(path)
         .map_err(|e| {
             tracing::error!(
