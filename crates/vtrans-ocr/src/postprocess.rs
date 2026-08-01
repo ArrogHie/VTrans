@@ -29,6 +29,15 @@ pub struct DetectionParams {
     pub min_box_area: f32,
 }
 
+/// Default minimum connected-component area used by the `PaddleOCR` det
+/// post-processor (`min_box_area = 3.0`).
+///
+/// The frozen `PreprocessParams` manifest schema has no field for this value,
+/// so it stays a code constant for now. If it needs to be tunable, add it to
+/// the manifest schema through a change review and wire it through
+/// [`DetectionParams`].
+pub const DEFAULT_MIN_BOX_AREA: f32 = 3.0;
+
 /// A detected text box in original image coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectedBox {

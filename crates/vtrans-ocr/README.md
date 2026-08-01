@@ -89,6 +89,8 @@ cargo run --example ocr_verify -- `
   `from_manifest_dir` 或 `from_manager`。
 - 识别模型预处理参数（32 高、最大 320 宽、mean/std 0.5）使用 PP-OCR
   标准值；`vtrans-models` 的 manifest schema 目前只提供检测模型参数。
+- 检测最小连通域面积使用 PaddleOCR 默认值 `3.0`（`DEFAULT_MIN_BOX_AREA`）；
+  manifest schema 冻结时未含该字段，如需调参需先变更 schema。
 - 未实现方向分类器；竖排文本会旋转 90° 后送入识别模型，质量可后续优化。
 - 混合横排/竖排布局按方向分组排序，组间以版面位置决定先后，复杂混排
   的阅读顺序仍可能不完美。

@@ -27,7 +27,9 @@ use vtrans_models::{ModelEntry, ModelManager, ModelManifest, PreprocessParams};
 
 use crate::detect::Detector;
 use crate::geometry::{rotate_90_cw, warp_perspective};
-use crate::postprocess::{boxes_from_map, merge_lines, sort_boxes, DetectionParams};
+use crate::postprocess::{
+    boxes_from_map, merge_lines, sort_boxes, DetectionParams, DEFAULT_MIN_BOX_AREA,
+};
 use crate::preprocess::{det_preprocess, rgb_region, REC_HEIGHT, REC_MAX_WIDTH};
 use crate::recognize::Recognizer;
 
@@ -369,7 +371,7 @@ fn run_ocr_pipeline(
     let params = DetectionParams {
         threshold: preprocess.det_threshold,
         unclip_ratio: preprocess.unclip_ratio,
-        min_box_area: 3.0,
+        min_box_area: DEFAULT_MIN_BOX_AREA,
     };
     let boxes = boxes_from_map(
         &probability,
