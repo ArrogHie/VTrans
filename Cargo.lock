@@ -5498,6 +5498,7 @@ dependencies = [
 name = "vtrans-pipeline"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "mockall",
  "pretty_assertions",
  "thiserror 1.0.69",

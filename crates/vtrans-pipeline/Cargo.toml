@@ -18,9 +18,11 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 pretty_assertions = { workspace = true }
 mockall = { workspace = true }
 tokio-test = { workspace = true }
 
 [lints]
 workspace = true
+
