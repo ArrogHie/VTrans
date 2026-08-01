@@ -9,6 +9,7 @@
 //! modules work through the safe abstractions defined here.
 
 use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 
 use vtrans_core::types::{CapturedImage, PixelFormat};
 use vtrans_core::CaptureError;
@@ -19,7 +20,9 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::Direct3D11::{IDirect3DDevice, IDirect3DSurface};
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
+use windows::Win32::Graphics::Direct3D::{
+    D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0,
+};
 use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, D3D11_SDK_VERSION};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
@@ -82,13 +85,13 @@ fn ensure_winrt_initialized() -> Result<(), CaptureError> {
 /// capture operations.
 pub(crate) struct D3D11Context {
     device: ID3D11Device,
-    context: ID3D11DeviceContext,
+    context: Arc<Mutex<ID3D11DeviceContext>>,
     winrt_device: IDirect3DDevice,
 }
 
-// SAFETY: COM/WinRT objects are reference-counted and safe to share
-// across threads in the Multi-Threaded Apartment (MTA). Tokio runs on
-// the MTA, so these types are Send + Sync in practice.
+// SAFETY: The D3D11 immediate context is guarded by a `Mutex`; the device
+// and `WinRT` device are reference-counted and safe to share across threads
+// in the Multi-Threaded Apartment (MTA).
 unsafe impl Send for D3D11Context {}
 unsafe impl Sync for D3D11Context {}
 
@@ -101,13 +104,12 @@ impl D3D11Context {
     /// be created or the `WinRT` interop fails.
     #[tracing::instrument]
     pub(crate) fn new() -> Result<Self, CaptureError> {
-        ensure_winrt_initialized()?;
         let (device, context) = create_d3d11_device()?;
         let winrt_device = create_winrt_device(&device)?;
         tracing::debug!("D3D11 context initialized for graphics capture");
         Ok(Self {
             device,
-            context,
+            context: Arc::new(Mutex::new(context)),
             winrt_device,
         })
     }
@@ -115,7 +117,7 @@ impl D3D11Context {
     pub(crate) fn device(&self) -> ID3D11Device {
         self.device.clone()
     }
-    pub(crate) fn context(&self) -> ID3D11DeviceContext {
+    pub(crate) fn context(&self) -> Arc<Mutex<ID3D11DeviceContext>> {
         self.context.clone()
     }
     pub(crate) fn winrt_device(&self) -> IDirect3DDevice {
@@ -124,6 +126,20 @@ impl D3D11Context {
 }
 
 fn create_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext), CaptureError> {
+    let mut last_error: Option<CaptureError> = None;
+    for driver in [D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP] {
+        match create_d3d11_device_with_driver(driver) {
+            Ok(ok) => return Ok(ok),
+            Err(e) => last_error = Some(e),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| init_failed("D3D11CreateDevice", "no D3D11 driver available")))
+}
+
+fn create_d3d11_device_with_driver(
+    driver: D3D_DRIVER_TYPE,
+) -> Result<(ID3D11Device, ID3D11DeviceContext), CaptureError> {
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
     let mut feature_level = D3D_FEATURE_LEVEL_11_0;
@@ -133,7 +149,7 @@ fn create_d3d11_device() -> Result<(ID3D11Device, ID3D11DeviceContext), CaptureE
     let result = unsafe {
         D3D11CreateDevice(
             None,
-            D3D_DRIVER_TYPE_HARDWARE,
+            driver,
             None,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             Some(&[D3D_FEATURE_LEVEL_11_0]),
@@ -192,14 +208,14 @@ pub(crate) struct FrameGrabber {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     device: ID3D11Device,
-    context: ID3D11DeviceContext,
+    context: Arc<Mutex<ID3D11DeviceContext>>,
     closed: bool,
 }
 
-// SAFETY: COM/WinRT objects are reference-counted and safe to share
-// across threads in the MTA.
+// SAFETY: COM/WinRT objects are reference-counted and can be moved to a
+// different thread. The session object is not shared, so `Sync` is not
+// required.
 unsafe impl Send for FrameGrabber {}
-unsafe impl Sync for FrameGrabber {}
 
 impl FrameGrabber {
     /// Creates a new `FrameGrabber` for the given monitor.
@@ -293,8 +309,11 @@ impl Drop for FrameGrabber {
 fn extract_pixels_from_frame(
     frame: &Direct3D11CaptureFrame,
     device: &ID3D11Device,
-    context: &ID3D11DeviceContext,
+    context: &Mutex<ID3D11DeviceContext>,
 ) -> Result<CapturedImage, CaptureError> {
+    let context = context
+        .lock()
+        .map_err(|_| frame_failed("device context lock", "mutex poisoned"))?;
     let surface: IDirect3DSurface = frame
         .Surface()
         .map_err(|e| frame_failed("frame.Surface", e))?;
@@ -396,8 +415,8 @@ pub(crate) fn crop_image(
     if width == 0 || height == 0 || x >= image.width || y >= image.height {
         return None;
     }
-    let end_x = (x + width).min(image.width);
-    let end_y = (y + height).min(image.height);
+    let end_x = x.saturating_add(width).min(image.width);
+    let end_y = y.saturating_add(height).min(image.height);
     let crop_w = end_x - x;
     let crop_h = end_y - y;
     if crop_w == 0 || crop_h == 0 {

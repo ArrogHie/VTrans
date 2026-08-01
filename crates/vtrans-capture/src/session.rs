@@ -20,6 +20,11 @@ const FRAME_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Poll interval used while waiting for the next graphics-capture frame.
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
+/// How long a cached frame may be replayed before the session waits for a
+/// fresh frame again. This bounds stale-frame delivery if the display is
+/// disconnected or the capture stream stops.
+const CACHED_FRAME_MAX_AGE: Duration = Duration::from_secs(30);
+
 /// Continuous capture session for a specific screen region.
 ///
 /// Created by [`WindowsCaptureSource::start_session`](crate::WindowsCaptureSource::start_session).
@@ -30,6 +35,7 @@ pub(crate) struct WindowsCaptureSession {
     region: ScreenRegion,
     stopped: bool,
     last_frame: Option<CapturedImage>,
+    last_frame_at: Option<Instant>,
 }
 
 impl WindowsCaptureSession {
@@ -40,6 +46,7 @@ impl WindowsCaptureSession {
             region,
             stopped: false,
             last_frame: None,
+            last_frame_at: None,
         }
     }
 }
@@ -59,10 +66,12 @@ impl CaptureSession for WindowsCaptureSession {
             }
 
             let Some(full_frame) = self.grabber.try_get_next_frame()? else {
-                // Replay the previous frame when the screen has not changed;
-                // callers can decide whether it needs reprocessing.
-                if let Some(last) = &self.last_frame {
-                    return Ok(Some(last.clone()));
+                // Replay the previous frame for a bounded period when the
+                // screen has not changed; callers decide whether to reprocess.
+                if let (Some(last), Some(captured_at)) = (&self.last_frame, &self.last_frame_at) {
+                    if captured_at.elapsed() <= CACHED_FRAME_MAX_AGE {
+                        return Ok(Some(last.clone()));
+                    }
                 }
                 if Instant::now() >= deadline {
                     tracing::warn!(
@@ -98,6 +107,7 @@ impl CaptureSession for WindowsCaptureSession {
                 }
             })?;
             self.last_frame = Some(cropped.clone());
+            self.last_frame_at = Some(Instant::now());
 
             tracing::debug!(
                 w = cropped.width,
