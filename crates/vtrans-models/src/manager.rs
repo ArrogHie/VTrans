@@ -28,6 +28,7 @@ use crate::ModelError;
 /// .unwrap();
 /// println!("manifest version: {}", manager.manifest().version);
 /// ```
+#[derive(Debug)]
 pub struct ModelManager {
     /// The parsed manifest.
     manifest: ModelManifest,
@@ -83,11 +84,16 @@ impl ModelManager {
     /// (they have no hash in the manifest). Results are aggregated into a
     /// [`VerifyReport`].
     ///
+    /// All failures (missing files, hash mismatches, I/O errors) are
+    /// recorded as human-readable strings in the report's `failed` list.
+    /// The method always returns `Ok(report)`; it never returns `Err`.
+    ///
     /// # Errors
-    /// Returns [`ModelError::Io`] only if a file cannot be read despite
-    /// existing (e.g. permission error). Individual missing files or hash
-    /// mismatches are recorded in the report's `failed` list, not returned
-    /// as `Err`.
+    ///
+    /// This method currently always returns `Ok`. The `Result` return type
+    /// is retained for forward compatibility if future versions need to
+    /// propagate fatal errors. All file-level failures are recorded in
+    /// [`VerifyReport::failed`].
     #[tracing::instrument(skip(self))]
     pub fn verify_integrity(&self) -> Result<VerifyReport, ModelError> {
         let mut report = VerifyReport::new();
@@ -155,6 +161,12 @@ impl ModelManager {
     /// Pass `None` to indicate loading is complete or idle. Values should be
     /// in `[0.0, 1.0]`.
     pub fn set_load_progress(&mut self, progress: Option<f32>) {
+        if let Some(p) = progress {
+            debug_assert!(
+                (0.0..=1.0).contains(&p),
+                "load_progress should be in [0.0, 1.0], got {p}"
+            );
+        }
         self.load_progress = progress;
     }
 }
@@ -242,12 +254,22 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("manifest.json"),
-            r#"{"version": 99, "ocr": null, "translation": null}"#,
+            r#"{
+  "version": 99,
+  "ocr": {
+    "det": { "id": "det", "path": "ocr/det.onnx", "sha256": "abc", "size_bytes": 1 },
+    "rec_ja": { "id": "rj", "path": "ocr/rec_ja.onnx", "sha256": "def", "size_bytes": 2 },
+    "rec_en": { "id": "re", "path": "ocr/rec_en.onnx", "sha256": "ghi", "size_bytes": 3 },
+    "rec_multi": null,
+    "dicts": {},
+    "preprocess_params": { "image_size": [960, 960], "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "det_threshold": 0.3, "unclip_ratio": 2.0 }
+  },
+  "translation": null
+}"#,
         )
         .unwrap();
         let result = ModelManager::from_manifest_dir(dir.path());
-        // Will fail on either Parse (ocr is null) or UnsupportedVersion.
-        assert!(result.is_err());
+        assert!(matches!(result, Err(ModelError::UnsupportedVersion(99))));
     }
 
     #[test]
