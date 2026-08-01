@@ -111,6 +111,10 @@ impl ApiTranslationProvider {
     }
 
     /// Execute one request attempt with timeout and cancellation.
+    ///
+    /// The timeout and cancellation token cover both sending the request and
+    /// reading the response body, so a server that stalls after headers cannot
+    /// keep the caller waiting past the configured timeout.
     async fn execute_once(
         &self,
         request: &TranslationRequest,
@@ -118,25 +122,33 @@ impl ApiTranslationProvider {
     ) -> Result<String, TranslationError> {
         let system_prompt = build_system_prompt(request.source, request.target);
         let body = build_request_body(&self.model, &system_prompt, &request.text);
-        let response = tokio::select! {
-            () = cancel.cancelled() => return Err(TranslationError::Cancelled),
-            outcome = tokio::time::timeout(
-                self.timeout,
-                self.client
-                    .post(&self.endpoint)
-                    .bearer_auth(&self.api_key)
-                    .json(&body)
-                    .send(),
-            ) => match outcome {
-                Err(_) => Err(TranslationError::Timeout(self.timeout)),
-                Ok(Err(error)) if error.is_timeout() => {
-                    Err(TranslationError::Timeout(self.timeout))
+        tokio::select! {
+            () = cancel.cancelled() => Err(TranslationError::Cancelled),
+            outcome = tokio::time::timeout(self.timeout, self.send_request(&body)) => {
+                match outcome {
+                    Err(_) => Err(TranslationError::Timeout(self.timeout)),
+                    Ok(result) => result,
                 }
-                Ok(Err(error)) => Err(TranslationError::ApiRequest(error.to_string())),
-                Ok(Ok(response)) => Ok(response),
-            },
-        };
-        let response = response?;
+            }
+        }
+    }
+
+    /// Send one request and read its response body.
+    async fn send_request(&self, body: &ApiRequestBody<'_>) -> Result<String, TranslationError> {
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    TranslationError::Timeout(self.timeout)
+                } else {
+                    TranslationError::ApiRequest(error.to_string())
+                }
+            })?;
         let status = response.status();
 
         if let Some(error) = status_error(status) {

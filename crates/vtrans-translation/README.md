@@ -108,6 +108,7 @@ cargo run --example translation_verify -- `
 - API Provider 当前固定发送 OpenAI-compatible chat completions JSON；其他 API 格式需要新增适配器或可配置请求模板。
 - 本地 Provider 要求模型输出最后一个解码位置的 logits，输入包含 `input_ids`、`decoder_input_ids`，可选 `attention_mask`；其他模型结构需扩展 `ModelIo` 探测逻辑。
 - 本地推理使用贪婪解码，manifest 中的 `num_beams` 与 `max_batch_size` 目前仅校验非零，未实际启用 beam search 或批处理。
+- 本地 Provider 不向模型注入 `source`/`target` 语言信息，`supported_pairs` 目前仅用于校验；需要语言条件化（如语言 token）的模型应扩展 `ModelManifest` schema 或由模型自行处理。
 - 每次解码步把完整生成序列送入模型，未实现 KV cache；生成长度较长时延迟较高。
 - `max_length` 会截断源 token 与生成序列，超长文本不做分块。
 - 本地模型加载失败返回 `TranslationError::ModelLoad`，不会自动回退到 API Provider。

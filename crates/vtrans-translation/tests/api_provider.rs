@@ -96,6 +96,28 @@ async fn spawn_hanging_server() -> (String, JoinHandle<()>) {
 
     (format!("http://{address}"), handle)
 }
+/// Spawn a server that sends response headers but never sends the body.
+async fn spawn_stalled_body_server() -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buffer = [0_u8; 8192];
+                let _ = socket.read(&mut buffer).await;
+                let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(headers.as_bytes()).await;
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+
+    (format!("http://{address}"), handle)
+}
 
 /// Build the provider used by retry tests: zero backoff, bounded retries.
 fn retry_provider(endpoint: &str, retries: u32) -> ApiTranslationProvider {
@@ -192,6 +214,33 @@ async fn timeout_returns_timeout() {
 #[tokio::test]
 async fn cancellation_returns_cancelled() {
     let (endpoint, server) = spawn_hanging_server().await;
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let request = request();
+    let provider = provider(&endpoint, Duration::from_secs(30), 0);
+
+    let handle = tokio::spawn(async move { provider.translate(&request, cancel_clone).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel.cancel();
+    let error = handle.await.unwrap().unwrap_err();
+    assert!(matches!(error, vtrans_core::TranslationError::Cancelled));
+    server.abort();
+}
+
+#[tokio::test]
+async fn timeout_returns_timeout_when_body_stalled() {
+    let (endpoint, server) = spawn_stalled_body_server().await;
+    let error = provider(&endpoint, Duration::from_millis(200), 0)
+        .translate(&request(), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, vtrans_core::TranslationError::Timeout(_)));
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancellation_returns_cancelled_when_body_stalled() {
+    let (endpoint, server) = spawn_stalled_body_server().await;
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let request = request();

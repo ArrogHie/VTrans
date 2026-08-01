@@ -22,12 +22,32 @@ use vtrans_models::{ModelManager, ModelManifest, TranslationModelGroup};
 
 use crate::validate::validate_language_pair;
 
+/// Validate a language pair for the local provider.
+///
+/// The local provider cannot auto-detect the source language; `Auto` is only
+/// accepted when the manifest explicitly declares an `(Auto, target)` pair.
+fn validate_local_pair(
+    source: Language,
+    target: Language,
+    supported: &[(Language, Language)],
+) -> Result<(), TranslationError> {
+    validate_language_pair(source, target, supported)?;
+    if source.is_auto() && !supported.contains(&(Language::Auto, target)) {
+        return Err(TranslationError::UnsupportedPair {
+            src: source,
+            target,
+        });
+    }
+    Ok(())
+}
+
 /// A local ONNX translation provider.
 ///
 /// The provider loads one encoder-decoder ONNX model and a Hugging Face
 /// tokenizer (`tokenizer.json`) from a [`ModelManifest`]. Generation uses
 /// greedy decoding with cooperative cancellation; beam search configuration
-/// is accepted but not yet used.
+/// is accepted but not yet used. Language pairs from the manifest are used
+/// for validation only; the model itself must handle multilingual generation.
 ///
 /// Model files are verified with SHA-256 before loading. A model load
 /// failure is reported as [`TranslationError::ModelLoad`] and never falls
@@ -213,7 +233,7 @@ impl TranslationProvider for LocalTranslationProvider {
         cancel: CancellationToken,
     ) -> Result<TranslationResult, TranslationError> {
         let started = Instant::now();
-        validate_language_pair(request.source, request.target, &self.supported_pairs)?;
+        validate_local_pair(request.source, request.target, &self.supported_pairs)?;
         if cancel.is_cancelled() {
             return Err(TranslationError::Cancelled);
         }
@@ -664,6 +684,10 @@ fn run_one_step(
 }
 
 /// Pick the argmax token from the last sequence position.
+///
+/// The last `vocab_size` elements are used, so the function is correct for
+/// any logits layout whose final dimension is the vocabulary, including
+/// shapes with leading batch dimensions.
 fn select_next_token(logits: &[f32], shape: &[usize]) -> Result<i64, TranslationError> {
     let vocab_size = *shape.last().ok_or_else(|| {
         TranslationError::Inference("logits output has no dimensions".to_string())
@@ -673,23 +697,15 @@ fn select_next_token(logits: &[f32], shape: &[usize]) -> Result<i64, Translation
             "logits output has zero vocab size".to_string(),
         ));
     }
-    let seq_len = if shape.len() >= 2 {
-        shape[shape.len() - 2]
-    } else {
-        1
-    };
-    let expected_len = seq_len
-        .checked_mul(vocab_size)
-        .ok_or_else(|| TranslationError::Inference("logits dimensions overflow".to_string()))?;
-    if logits.len() < expected_len {
+    if logits.is_empty() || logits.len() % vocab_size != 0 {
         return Err(TranslationError::Inference(format!(
-            "logits length {} is smaller than expected {expected_len}",
+            "logits length {} is not a multiple of vocab size {vocab_size}",
             logits.len()
         )));
     }
 
-    let row_start = seq_len.saturating_sub(1).saturating_mul(vocab_size);
-    let row = &logits[row_start..row_start + vocab_size];
+    let row_start = logits.len() - vocab_size;
+    let row = &logits[row_start..];
     let best_index = row
         .iter()
         .enumerate()
@@ -828,6 +844,32 @@ mod tests {
     fn select_next_token_rejects_short_logits() {
         let error = select_next_token(&[0.1, 0.2], &[1, 2, 3]).unwrap_err();
         assert!(matches!(error, TranslationError::Inference(_)));
+    }
+    #[test]
+    fn select_next_token_uses_last_batch_row() {
+        let logits = vec![
+            0.1, 0.2, 0.3, // batch 0, seq 0
+            0.4, 0.5, 0.6, // batch 0, seq 1
+            0.7, 0.8, 0.9, // batch 1, seq 0
+            0.2, 0.9, 0.1, // batch 1, seq 1
+        ];
+        let token = select_next_token(&logits, &[2, 1, 2, 3]).unwrap();
+        assert_eq!(token, 1);
+    }
+
+    #[test]
+    fn local_pair_requires_explicit_auto_source() {
+        let supported = [(Language::English, Language::Japanese)];
+        assert!(validate_local_pair(Language::English, Language::Japanese, &supported).is_ok());
+        assert!(matches!(
+            validate_local_pair(Language::Auto, Language::Japanese, &supported),
+            Err(TranslationError::UnsupportedPair { .. })
+        ));
+
+        let supported_with_auto = [(Language::Auto, Language::Japanese)];
+        assert!(
+            validate_local_pair(Language::Auto, Language::Japanese, &supported_with_auto).is_ok()
+        );
     }
 
     #[test]
