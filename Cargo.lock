@@ -5538,17 +5538,12 @@ name = "vtrans-translation"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "mockall",
  "ort",
- "pretty_assertions",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "tempfile",
- "thiserror 1.0.69",
  "tokenizers",
  "tokio",
- "tokio-test",
  "tokio-util",
  "tracing",
  "vtrans-core",
