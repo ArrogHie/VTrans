@@ -2,17 +2,22 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Pause, Play, Pin, PinOff, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ResultCard } from "../components/ResultCard";
-import { startLiveTranslation, stopLiveTranslation } from "../services/tauri";
+import {
+  publishFrontendLiveConfig,
+  publishFrontendLivePaused,
+  startLiveTranslation,
+  stopLiveTranslation,
+} from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
 
 export function ResultWindow() {
   const ocrResult = useAppStore((state) => state.ocrResult);
   const translationResult = useAppStore((state) => state.translationResult);
   const mode = useAppStore((state) => state.mode);
-  const selectedRegion = useAppStore((state) => state.selectedRegion);
-  const config = useAppStore((state) => state.config);
+  const liveConfig = useAppStore((state) => state.liveConfig);
+  const livePaused = useAppStore((state) => state.livePaused);
+  const setLivePaused = useAppStore((state) => state.setLivePaused);
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
-  const [paused, setPaused] = useState(false);
 
   useEffect(() => {
     void getCurrentWindow().setAlwaysOnTop(alwaysOnTop).catch(() => undefined);
@@ -20,25 +25,25 @@ export function ResultWindow() {
 
   const close = () => void getCurrentWindow().hide();
   const togglePause = async () => {
-    if (paused) {
-      if (!selectedRegion) return;
+    if (livePaused) {
+      if (!liveConfig) return;
       try {
-        await startLiveTranslation({
-          region: selectedRegion,
-          capture_interval_ms: config.capture.interval_ms,
-          difference_threshold: config.capture.difference_threshold,
-        });
-        setPaused(false);
+        await startLiveTranslation(liveConfig);
+        setLivePaused(false);
+        await publishFrontendLiveConfig(liveConfig);
       } catch {
         // Keep the paused state when the backend rejects a resume request.
       }
       return;
     }
     try {
+      setLivePaused(true);
+      await publishFrontendLivePaused();
       await stopLiveTranslation();
-      setPaused(true);
+      // The shared store drives the button in every WebView.
+      setLivePaused(true);
     } catch {
-      // The main window remains the source of truth when no live task exists.
+      setLivePaused(false);
     }
   };
 
@@ -54,8 +59,8 @@ export function ResultWindow() {
             {alwaysOnTop ? <Pin size={16} /> : <PinOff size={16} />}
           </button>
           {mode === "live" && (
-            <button type="button" onClick={() => void togglePause()} className="icon-button" title={paused ? "继续" : "暂停"}>
-              {paused ? <Play size={16} /> : <Pause size={16} />}
+            <button type="button" onClick={() => void togglePause()} className="icon-button" title={livePaused ? "继续" : "暂停"}>
+              {livePaused ? <Play size={16} /> : <Pause size={16} />}
             </button>
           )}
           <button type="button" onClick={close} className="icon-button" title="关闭"><X size={16} /></button>

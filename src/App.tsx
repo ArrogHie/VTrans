@@ -1,6 +1,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect } from "react";
-import { listenToFrontendOcrResult, subscribeToBackendEvents } from "./services/events";
+import {
+  listenToFrontendLiveConfig,
+  listenToFrontendLivePaused,
+  listenToFrontendLiveStopped,
+  listenToFrontendOcrResult,
+  subscribeToBackendEvents,
+  type Unlisten,
+} from "./services/events";
 import { getIpcErrorMessage, showResultWindow } from "./services/tauri";
 import { useAppStore } from "./stores/appStore";
 import { MainWindow } from "./windows/MainWindow";
@@ -27,6 +34,8 @@ function useBackendEvents() {
   const setStatus = useAppStore((state) => state.setStatus);
   const setMode = useAppStore((state) => state.setMode);
   const setOcrResult = useAppStore((state) => state.setOcrResult);
+  const setLiveConfig = useAppStore((state) => state.setLiveConfig);
+  const setLivePaused = useAppStore((state) => state.setLivePaused);
   const setTranslationResult = useAppStore((state) => state.setTranslationResult);
   const setModelProgress = useAppStore((state) => state.setModelProgress);
   const setSelectedRegion = useAppStore((state) => state.setSelectedRegion);
@@ -35,54 +44,74 @@ function useBackendEvents() {
   useEffect(() => {
     let disposed = false;
     let cleanup: (() => void) | undefined;
-    let unlistenFrontendResult: (() => void) | undefined;
-    void subscribeToBackendEvents({
-      capture_status_changed: ({ status }) => {
-        if (status === "capturing") {
+
+    const register = async () => {
+      const unlisteners = await Promise.all<Unlisten>([
+        subscribeToBackendEvents({
+          capture_status_changed: ({ status }) => {
+            if (status === "capturing") {
+              setMode("live");
+              setStatus("capturing");
+            }
+          },
+          ocr_started: () => setStatus("ocr_in_progress"),
+          ocr_completed: ({ result }) => {
+            setOcrResult(result);
+            setStatus("completed");
+            void showResultWindow();
+          },
+          translation_started: () => setStatus("translating"),
+          translation_completed: ({ result }) => {
+            setTranslationResult(result);
+            setStatus("completed");
+            void showResultWindow();
+          },
+          pipeline_error: ({ message }) => setError(message),
+          live_session_stopped: () => {
+            setStatus("idle");
+            if (!useAppStore.getState().livePaused) setMode("single");
+          },
+          model_loading_progress: ({ progress }) => setModelProgress(progress),
+          region_selected: ({ result }) => setSelectedRegion(result),
+        }),
+        listenToFrontendOcrResult((result) => {
+          setOcrResult(result);
+          setStatus("completed");
+          void showResultWindow();
+        }),
+        listenToFrontendLiveConfig((config) => {
+          setLiveConfig(config);
+          setLivePaused(false);
+          setSelectedRegion(config.region);
           setMode("live");
-          setStatus("capturing");
-        }
-      },
-      ocr_started: () => setStatus("ocr_in_progress"),
-      ocr_completed: ({ result }) => {
-        setOcrResult(result);
-        setStatus("completed");
-        void showResultWindow();
-      },
-      translation_started: () => setStatus("translating"),
-      translation_completed: ({ result }) => {
-        setTranslationResult(result);
-        setStatus("completed");
-        void showResultWindow();
-      },
-      pipeline_error: ({ message }) => setError(message),
-      live_session_stopped: () => {
-        setMode("single");
-        setStatus("idle");
-      },
-      model_loading_progress: ({ progress }) => setModelProgress(progress),
-      region_selected: ({ result }) => {
-        setSelectedRegion(result);
-      },
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else cleanup = unlisten;
-    }).then(() => listenToFrontendOcrResult((result) => {
-      setOcrResult(result);
-      setStatus("completed");
-      void showResultWindow();
-    })).then((unlisten) => {
-      if (disposed) unlisten();
-      else unlistenFrontendResult = unlisten;
-    }).catch((error) => {
+        }),
+        listenToFrontendLivePaused(() => {
+          setLivePaused(true);
+          setMode("live");
+          setStatus("idle");
+        }),
+        listenToFrontendLiveStopped(() => {
+          setLiveConfig(null);
+          setLivePaused(false);
+          setMode("single");
+          setStatus("idle");
+        }),
+      ]);
+      if (disposed) {
+        for (const unlisten of unlisteners) unlisten();
+      } else {
+        cleanup = () => unlisteners.forEach((unlisten) => unlisten());
+      }
+    };
+
+    void register().catch((error) => {
       if (!disposed) console.warn(`[vtrans] event subscription failed: ${getIpcErrorMessage(error)}`);
     });
     return () => {
       disposed = true;
       cleanup?.();
-      unlistenFrontendResult?.();
     };
-  }, [setError, setMode, setModelProgress, setOcrResult, setSelectedRegion, setStatus, setTranslationResult]);
+  }, [setError, setLiveConfig, setLivePaused, setMode, setModelProgress, setOcrResult, setSelectedRegion, setStatus, setTranslationResult]);
 }
 
 export default App;

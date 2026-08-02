@@ -96,11 +96,9 @@ export interface HotkeyConfig {
 }
 
 export interface VerifyReport {
-  valid: boolean;
-  checked_files?: number;
-  missing_files?: string[];
-  invalid_files?: string[];
-  [key: string]: unknown;
+  checked: number;
+  passed: number;
+  failed: string[];
 }
 
 export interface PipelineErrorPayload {
@@ -149,9 +147,9 @@ export const DEFAULT_CONFIG: AppConfig = {
     source_language: "auto",
     target_language: "zh-CN",
     timeout_seconds: 30,
-    api_endpoint: "",
-    api_model: "",
-    max_retries: 2,
+    api_endpoint: "https://api.openai.com/v1/chat/completions",
+    api_model: "gpt-4o-mini",
+    max_retries: 3,
   },
   result_window: { always_on_top: true },
   hotkeys: {

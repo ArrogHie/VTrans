@@ -7,7 +7,7 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
 - 路由 Tauri 的 `main`、`selector`、`result` 三个窗口。
 - 提供单次翻译和实时翻译的控制面板。
 - 通过拖动框选生成物理像素坐标的 `ScreenRegion`。
-- 监听后端 pipeline/model 事件并同步到 Zustand store。
+- 监听后端 pipeline/model 事件，并在多个 Tauri WebView 间同步结果和实时会话状态。
 - 展示 OCR 原文和翻译结果，支持复制、暂停/继续、置顶和窗口拖动。
 
 ## 依赖关系
@@ -106,7 +106,8 @@ pnpm tauri dev
 ## 已知限制
 
 1. 当前 `vtrans-app::capture_once` 公开命令返回 OCR 结果；单次翻译的译文依赖后续 app 层命令契约完善，前端不会伪造译文。
-2. 结果窗口初始可见性、透明选区和窗口尺寸由 `src-tauri/tauri.conf.json` 管理；前端只负责运行时显示、隐藏和置顶。
-3. `model_dir` 是 Rust 配置中的 `PathBuf`，前端仅回传字符串或 `null`，不会读取模型文件。
-4. 事件监听在每个 webview 中安装，窗口销毁时统一清理；事件到达前关闭的窗口不会补发历史结果。
-5. API Key、完整原文/译文、截图像素和模型原始输出不存储在前端 store，也不会写入浏览器日志。
+2. 完整 `AppConfig` 尚未由当前 app 层通过 IPC 返回，因此 frontend 暂不提供全量“保存设置”按钮，避免用未 hydrate 的默认值覆盖用户配置；OCR 语言和翻译 Provider 通过专用 command 立即保存。源语言/目标语言控件在对应 app IPC 提供前保持禁用。
+3. 结果窗口初始可见性、透明选区和窗口尺寸由 `src-tauri/tauri.conf.json` 管理；前端只负责运行时显示、隐藏和置顶。
+4. `model_dir` 是 Rust 配置中的 `PathBuf`，前端仅回传字符串或 `null`，不会读取模型文件。
+5. 事件监听在每个 webview 中安装，窗口销毁时统一清理；事件到达前关闭的窗口不会补发历史结果。
+6. API Key、完整原文/译文、截图像素和模型原始输出不存储在前端 store，也不会写入浏览器日志。

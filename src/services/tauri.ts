@@ -90,6 +90,21 @@ export function publishFrontendOcrResult(result: OcrResult): Promise<void> {
   return emit("frontend_ocr_result", result);
 }
 
+/** Publishes live-session configuration to the other Tauri webviews. */
+export function publishFrontendLiveConfig(config: PipelineConfig): Promise<void> {
+  return emit("frontend_live_config", config);
+}
+
+/** Marks an intentional pause before stopping the backend live task. */
+export function publishFrontendLivePaused(): Promise<void> {
+  return emit("frontend_live_paused");
+}
+
+/** Marks an intentional stop after the backend live task stops. */
+export function publishFrontendLiveStopped(): Promise<void> {
+  return emit("frontend_live_stopped");
+}
+
 /** Shows and focuses the preconfigured result webview. */
 export async function showResultWindow(): Promise<void> {
   const window = await WebviewWindow.getByLabel("result");

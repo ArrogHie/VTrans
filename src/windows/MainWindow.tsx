@@ -9,8 +9,9 @@ import {
   getAppStatus,
   getIpcErrorMessage,
   loadLocalModels,
+  publishFrontendLiveConfig,
+  publishFrontendLiveStopped,
   publishFrontendOcrResult,
-  saveSettings,
   setOcrLanguage,
   setTranslationProvider,
   showResultWindow,
@@ -37,7 +38,7 @@ const TARGET_LANGUAGES = [
 export function MainWindow() {
   const {
     mode, status, error, selectedRegion, config, modelProgress,
-    setMode, setStatus, setSelectedRegion, setOcrResult, setProvider, updateLanguage,
+    setMode, setStatus, setSelectedRegion, setOcrResult, setProvider, setLiveConfig, setLivePaused, updateLanguage,
   } = useAppStore();
   const [busy, setBusy] = useState(false);
   const [modelMessage, setModelMessage] = useState<string | null>(null);
@@ -83,11 +84,15 @@ export function MainWindow() {
     }
     setBusy(true);
     try {
-      await startLiveTranslation({
+      const liveConfig = {
         region: selectedRegion,
         capture_interval_ms: config.capture.interval_ms,
         difference_threshold: config.capture.difference_threshold,
-      });
+      };
+      await startLiveTranslation(liveConfig);
+      setLiveConfig(liveConfig);
+      setLivePaused(false);
+      void publishFrontendLiveConfig(liveConfig);
       setMode("live");
       setStatus("capturing");
     } catch (ipcError) {
@@ -101,6 +106,9 @@ export function MainWindow() {
     setBusy(true);
     try {
       await stopLiveTranslation();
+      void publishFrontendLiveStopped();
+      setLiveConfig(null);
+      setLivePaused(false);
       setStatus("idle");
       setMode("single");
     } catch (ipcError) {
@@ -123,17 +131,9 @@ export function MainWindow() {
     setModelMessage(null);
     try {
       const report = await loadLocalModels();
-      setModelMessage(report.valid ? "本地模型校验通过" : "本地模型需要检查");
+      setModelMessage(report.failed.length === 0 ? "本地模型校验通过" : "本地模型需要检查");
     } catch (ipcError) {
       setModelMessage(getIpcErrorMessage(ipcError));
-    }
-  };
-  const persistSettings = async () => {
-    try {
-      await saveSettings(config);
-      setModelMessage("设置已保存");
-    } catch (ipcError) {
-      setStatus({ error: getIpcErrorMessage(ipcError) });
     }
   };
 
@@ -171,8 +171,8 @@ export function MainWindow() {
           <h2 className="mb-3 text-sm font-semibold">语言与引擎</h2>
           <div className="flex gap-2">
             <LanguageSelector label="OCR 语言" value={config.ocr.language} options={OCR_LANGUAGES} onChange={(value) => void changeOcrLanguage(value)} />
-            <LanguageSelector label="源语言" value={config.translation.source_language} options={SOURCE_LANGUAGES} onChange={(value) => updateLanguage("source", value as LanguageCode)} />
-            <LanguageSelector label="目标语言" value={config.translation.target_language} options={TARGET_LANGUAGES} onChange={(value) => updateLanguage("target", value as LanguageCode)} />
+            <LanguageSelector label="源语言（待 app IPC）" value={config.translation.source_language} options={SOURCE_LANGUAGES} disabled onChange={() => undefined} />
+            <LanguageSelector label="目标语言（待 app IPC）" value={config.translation.target_language} options={TARGET_LANGUAGES} disabled onChange={() => undefined} />
           </div>
           <div className="mt-4"><ProviderToggle value={config.translation.provider} onChange={(value) => void changeProvider(value)} /></div>
         </section>
@@ -195,7 +195,7 @@ export function MainWindow() {
           </div>
           {modelMessage && <p className="mt-2 text-xs text-slate-500">{modelMessage}</p>}
         </section>
-        <button type="button" onClick={() => void persistSettings()} className="secondary-button w-full"><RefreshCw size={15} />保存设置</button>
+        <div className="flex items-center justify-center gap-2 px-2 text-center text-xs text-slate-400"><RefreshCw size={14} />OCR 语言和翻译引擎会立即保存；其余设置将在配置界面开放后保存。</div>
       </div>
     </main>
   );

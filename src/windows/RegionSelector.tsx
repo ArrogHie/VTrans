@@ -1,17 +1,21 @@
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useState } from "react";
-import { toPhysicalRegion, updateLiveRegion } from "../services/tauri";
+import { cancelRegionSelection, toPhysicalRegion, updateLiveRegion } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
 
 export function RegionSelector() {
   const [start, setStart] = useState<{ x: number; y: number } | null>(null);
   const [end, setEnd] = useState<{ x: number; y: number } | null>(null);
-  const [monitorId, setMonitorId] = useState("primary");
+  const [monitorId, setMonitorId] = useState<string | null>(null);
   const setSelectedRegion = useAppStore((state) => state.setSelectedRegion);
   const [message, setMessage] = useState("拖动鼠标框选要翻译的区域");
 
   const confirmSelection = useCallback(async () => {
     if (!start || !end) return;
+    if (!monitorId) {
+      setMessage("无法识别当前显示器，请关闭后重试");
+      return;
+    }
     const region = toPhysicalRegion(monitorId, start, end);
     if (!region) {
       setMessage("选区太小，请重新拖动");
@@ -29,10 +33,16 @@ export function RegionSelector() {
   useEffect(() => {
     let active = true;
     void currentMonitor().then((monitor) => {
-      if (active && monitor?.name) setMonitorId(monitor.name);
+      if (active && monitor?.name) {
+        setMonitorId(monitor.name);
+      } else if (active) {
+        setMessage("无法识别当前显示器，请关闭后重试");
+      }
     });
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") void getCurrentWindow().hide();
+      if (event.key === "Escape") {
+        void cancelRegionSelection().finally(() => getCurrentWindow().hide());
+      }
       else if (event.key === "Enter") void confirmSelection();
     };
     window.addEventListener("keydown", onKeyDown);

@@ -5,6 +5,7 @@ import type {
   LanguageCode,
   Mode,
   OcrResult,
+  PipelineConfig,
   PipelineStatus,
   ProviderId,
   ScreenRegion,
@@ -22,6 +23,8 @@ interface AppState {
   modelProgress: number | null;
   config: AppConfig;
   hydrated: boolean;
+  liveConfig: PipelineConfig | null;
+  livePaused: boolean;
   setMode: (mode: Mode) => void;
   setStatus: (status: PipelineStatus) => void;
   setOcrResult: (result: OcrResult | null) => void;
@@ -30,6 +33,8 @@ interface AppState {
   setError: (error: string | null) => void;
   setModelProgress: (progress: number | null) => void;
   setConfig: (config: AppConfig) => void;
+  setLiveConfig: (config: PipelineConfig | null) => void;
+  setLivePaused: (paused: boolean) => void;
   updateLanguage: (kind: "ocr" | "source" | "target", language: LanguageCode) => void;
   setProvider: (provider: ProviderId) => void;
   applyStatus: (status: AppStatus) => void;
@@ -46,6 +51,8 @@ export const useAppStore = create<AppState>((set) => ({
   modelProgress: null,
   config: structuredClone(DEFAULT_CONFIG),
   hydrated: false,
+  liveConfig: null,
+  livePaused: false,
   setMode: (mode) => set({ mode, error: null }),
   setStatus: (status) => set({ status, error: typeof status === "object" ? status.error : null }),
   setOcrResult: (ocrResult) => set({ ocrResult }),
@@ -54,6 +61,8 @@ export const useAppStore = create<AppState>((set) => ({
   setError: (error) => set({ error, status: error ? { error } : "idle" }),
   setModelProgress: (modelProgress) => set({ modelProgress }),
   setConfig: (config) => set({ config, hydrated: true }),
+  setLiveConfig: (liveConfig) => set({ liveConfig }),
+  setLivePaused: (livePaused) => set({ livePaused }),
   updateLanguage: (kind, language) =>
     set((state) => {
       if (kind === "ocr") return { config: { ...state.config, ocr: { ...state.config.ocr, language } } };
@@ -78,12 +87,13 @@ export const useAppStore = create<AppState>((set) => ({
       config: { ...state.config, translation: { ...state.config.translation, provider } },
     })),
   applyStatus: (status) =>
-    set({
+    set((state) => ({
       status: status.pipeline_status,
+      mode: status.live_running ? "live" : state.mode,
       selectedRegion: status.selected_region,
       modelProgress: status.model_progress,
       hydrated: true,
-    }),
+    })),
   resetResults: () => set({ ocrResult: null, translationResult: null, error: null }),
 }));
 
