@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use ort::ep;
-use ort::session::{builder::GraphOptimizationLevel, RunOptions, Session};
+use ort::session::{builder::GraphOptimizationLevel, RunOptions, Session, SessionInputValue};
 use ort::value::Tensor;
 use tokenizers::Tokenizer;
 use tokio::task::spawn_blocking;
@@ -40,6 +40,13 @@ fn validate_local_pair(
     }
     Ok(())
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelKind {
+    /// Decoder-loop model: feed `decoder_input_ids` per step and read logits.
+    Stepwise,
+    /// Whole-graph generation model: feed generation params and read sequences.
+    Generation,
+}
 
 /// A local ONNX translation provider.
 ///
@@ -70,6 +77,7 @@ pub struct LocalTranslationProvider {
     tokenizer: Arc<Mutex<Tokenizer>>,
     supported_pairs: Vec<(Language, Language)>,
     max_length: usize,
+    num_beams: usize,
     special: SpecialTokens,
     io: ModelIo,
 }
@@ -172,11 +180,14 @@ impl LocalTranslationProvider {
         let session = load_session(&models_dir.join(&group.model.path), &group.model.id)?;
         let io = ModelIo::from_session(&session)?;
         let special = SpecialTokens::from_tokenizer(&tokenizer);
+        let num_beams = normalize_num_beams(group.inference_params.num_beams);
 
         info!(
             model_id = %group.model.id,
+            model_kind = ?io.kind,
             supported_pairs = group.supported_pairs.len(),
             max_length = group.max_length,
+            num_beams,
             elapsed_ms = elapsed_millis(started),
             "local translation provider initialized"
         );
@@ -187,6 +198,7 @@ impl LocalTranslationProvider {
             tokenizer: Arc::new(Mutex::new(tokenizer)),
             supported_pairs: group.supported_pairs.clone(),
             max_length: group.max_length,
+            num_beams,
             special,
             io,
         })
@@ -197,8 +209,10 @@ impl fmt::Debug for LocalTranslationProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalTranslationProvider")
             .field("model_id", &self.model_id)
+            .field("model_kind", &self.io.kind)
             .field("supported_pairs", &self.supported_pairs)
             .field("max_length", &self.max_length)
+            .field("num_beams", &self.num_beams)
             .field("session", &self.session)
             .field("tokenizer", &self.tokenizer)
             .field("special", &self.special)
@@ -245,15 +259,19 @@ impl TranslationProvider for LocalTranslationProvider {
         let tokenizer = Arc::clone(&self.tokenizer);
         let text = request.text.clone();
         let max_length = self.max_length;
+        let num_beams = self.num_beams;
+        let kind = self.io.kind;
         let special = self.special;
         let io = self.io.clone();
         let cancel_for_task = cancel.clone();
         let run_options_for_task = Arc::clone(&run_options);
         let job = GenerationJob {
+            kind,
             session,
             tokenizer,
             text,
             max_length,
+            num_beams,
             special,
             io,
             run_options: run_options_for_task,
@@ -293,13 +311,44 @@ impl TranslationProvider for LocalTranslationProvider {
     }
 }
 
-/// Input/output names expected from an encoder-decoder ONNX model.
+/// Input/output names expected from an ONNX translation model.
 #[derive(Debug, Clone)]
 struct ModelIo {
+    kind: ModelKind,
     input_ids: String,
     attention_mask: Option<String>,
-    decoder_input_ids: String,
-    logits: String,
+    decoder_input_ids: Option<String>,
+    logits: Option<String>,
+    generation_params: Option<GenerationParams>,
+    sequences_output: Option<String>,
+}
+
+/// Names of generation parameters for whole-graph models.
+#[derive(Debug, Clone)]
+struct GenerationParams {
+    num_beams: String,
+    min_length: String,
+    max_length: String,
+    length_penalty: String,
+    repetition_penalty: String,
+}
+
+impl GenerationParams {
+    fn probe(input_names: &[String]) -> Option<Self> {
+        let find = |needle: &str| {
+            input_names
+                .iter()
+                .find(|name| name.contains(needle))
+                .cloned()
+        };
+        Some(Self {
+            num_beams: find("num_beams")?,
+            min_length: find("min_length")?,
+            max_length: find("max_length")?,
+            length_penalty: find("length_penalty")?,
+            repetition_penalty: find("repetition_penalty")?,
+        })
+    }
 }
 
 impl ModelIo {
@@ -326,55 +375,86 @@ impl ModelIo {
                 "translation model exposes no outputs".to_string(),
             ));
         }
+        probe_io(&input_names, &output_names)
+    }
+}
 
-        let input_ids = input_names
-            .iter()
-            .find(|name| name.contains("input_ids") && !name.contains("decoder"))
-            .cloned()
-            .ok_or_else(|| {
-                TranslationError::ModelLoad(format!(
-                    "translation model input names must include an encoder input_ids-like tensor, got {input_names:?}"
-                ))
-            })?;
-        let decoder_input_ids = input_names
-            .iter()
-            .find(|name| name.contains("decoder_input_ids"))
-            .cloned()
-            .ok_or_else(|| {
-                TranslationError::ModelLoad(format!(
-                    "translation model input names must include decoder_input_ids, got {input_names:?}"
-                ))
-            })?;
-        let attention_mask = input_names
-            .iter()
-            .find(|name| name.contains("attention_mask"))
-            .cloned();
-        let logits = output_names
-            .iter()
-            .find(|name| name.contains("logits"))
-            .or_else(|| output_names.first())
-            .cloned()
-            .ok_or_else(|| {
-                TranslationError::ModelLoad(
-                    "translation model exposes no usable output".to_string(),
-                )
-            })?;
+/// Classify a translation model as generation or stepwise based on I/O names.
+fn probe_io(input_names: &[String], output_names: &[String]) -> Result<ModelIo, TranslationError> {
+    let input_ids = input_names
+        .iter()
+        .find(|name| name.contains("input_ids") && !name.contains("decoder"))
+        .cloned()
+        .ok_or_else(|| {
+            TranslationError::ModelLoad(format!("translation model input names must include an encoder input_ids-like tensor, got {input_names:?}"))
+        })?;
+    let attention_mask = input_names
+        .iter()
+        .find(|name| name.contains("attention_mask"))
+        .cloned();
 
+    let generation_params = GenerationParams::probe(input_names);
+    let sequences_output = output_names
+        .iter()
+        .find(|name| name.contains("sequences"))
+        .cloned()
+        .or_else(|| (output_names.len() == 1).then(|| output_names[0].clone()));
+
+    if let (Some(generation_params), Some(sequences_output)) = (generation_params, sequences_output)
+    {
         debug!(
             input_ids = %input_ids,
-            decoder_input_ids = %decoder_input_ids,
             attention_mask = ?attention_mask,
-            logits = %logits,
-            "translation model io names"
+            sequences_output = %sequences_output,
+            "detected generation translation model"
         );
-
-        Ok(Self {
+        return Ok(ModelIo {
+            kind: ModelKind::Generation,
             input_ids,
             attention_mask,
-            decoder_input_ids,
-            logits,
-        })
+            decoder_input_ids: None,
+            logits: None,
+            generation_params: Some(generation_params),
+            sequences_output: Some(sequences_output),
+        });
     }
+
+    let decoder_input_ids = input_names
+        .iter()
+        .find(|name| name.contains("decoder_input_ids"))
+        .cloned();
+    let logits = output_names
+        .iter()
+        .find(|name| name.contains("logits"))
+        .cloned()
+        .or_else(|| output_names.first().cloned());
+
+    if let (Some(decoder_input_ids), Some(logits)) = (decoder_input_ids, logits) {
+        debug!(
+            input_ids = %input_ids,
+            attention_mask = ?attention_mask,
+            decoder_input_ids = %decoder_input_ids,
+            logits = %logits,
+            "detected stepwise translation model"
+        );
+        return Ok(ModelIo {
+            kind: ModelKind::Stepwise,
+            input_ids,
+            attention_mask,
+            decoder_input_ids: Some(decoder_input_ids),
+            logits: Some(logits),
+            generation_params: None,
+            sequences_output: None,
+        });
+    }
+
+    Err(TranslationError::ModelLoad(format!(
+        "unsupported translation model I/O; generation expects inputs \\
+         [input_ids, attention_mask, num_beams, min_length, max_length, \\
+         length_penalty, repetition_penalty] and a sequences output; stepwise \\
+         expects [input_ids, attention_mask, decoder_input_ids] and a logits \\
+         output; actual inputs {input_names:?}, outputs {output_names:?}"
+    )))
 }
 
 /// Special token ids required by greedy generation.
@@ -506,11 +586,6 @@ fn validate_group(group: &TranslationModelGroup) -> Result<(), TranslationError>
             "translation model group max_length must be greater than zero".to_string(),
         ));
     }
-    if group.inference_params.num_beams == 0 {
-        return Err(TranslationError::ModelLoad(
-            "translation model group num_beams must be greater than zero".to_string(),
-        ));
-    }
     if group.inference_params.max_batch_size == 0 {
         return Err(TranslationError::ModelLoad(
             "translation model group max_batch_size must be greater than zero".to_string(),
@@ -537,23 +612,35 @@ fn verify_translation_files(
 
 /// Everything needed to run one local generation job on a blocking thread.
 struct GenerationJob {
+    kind: ModelKind,
     session: Arc<Mutex<Session>>,
     tokenizer: Arc<Mutex<Tokenizer>>,
     text: String,
     max_length: usize,
+    num_beams: usize,
     special: SpecialTokens,
     io: ModelIo,
     run_options: Arc<RunOptions>,
     cancel: CancellationToken,
 }
 
-/// Tokenize, run greedy generation, and decode the translated text.
+/// Dispatch to the I/O contract detected at load time.
 fn generate_translation(job: GenerationJob) -> Result<String, TranslationError> {
+    match job.kind {
+        ModelKind::Stepwise => run_stepwise_translation(job),
+        ModelKind::Generation => run_generation_translation(job),
+    }
+}
+
+/// Run decoder-loop inference one token at a time.
+fn run_stepwise_translation(job: GenerationJob) -> Result<String, TranslationError> {
     let GenerationJob {
+        kind: _,
         session,
         tokenizer,
         text,
         max_length,
+        num_beams: _,
         special,
         io,
         run_options,
@@ -563,27 +650,7 @@ fn generate_translation(job: GenerationJob) -> Result<String, TranslationError> 
         return Err(TranslationError::Cancelled);
     }
 
-    let source_ids = {
-        let tokenizer = tokenizer
-            .lock()
-            .map_err(|_| TranslationError::Inference("tokenizer mutex poisoned".to_string()))?;
-        let encoding = tokenizer.encode(text.as_str(), true).map_err(|error| {
-            TranslationError::Inference(format!("tokenization failed: {error}"))
-        })?;
-        encoding
-            .get_ids()
-            .iter()
-            .map(|&id| i64::from(id))
-            .collect::<Vec<i64>>()
-    };
-
-    if source_ids.is_empty() {
-        return Err(TranslationError::Inference(
-            "tokenizer produced no source ids".to_string(),
-        ));
-    }
-    let source_ids = truncate_ids(&source_ids, max_length);
-    let attention_mask = vec![1_i64; source_ids.len()];
+    let (source_ids, attention_mask) = tokenize_source(&tokenizer, &text, max_length)?;
     let mut generated = vec![special.decoder_start_id];
 
     while generated.len() < max_length {
@@ -610,13 +677,188 @@ fn generate_translation(job: GenerationJob) -> Result<String, TranslationError> 
     debug!(
         source_tokens = source_ids.len(),
         generated_tokens = generated.len(),
-        "local translation generation finished"
+        "stepwise translation generation finished"
     );
+    decode_generated_ids(&tokenizer, &generated)
+}
 
+/// Run whole-graph generation and decode the first returned sequence.
+fn run_generation_translation(job: GenerationJob) -> Result<String, TranslationError> {
+    let GenerationJob {
+        kind: _,
+        session,
+        tokenizer,
+        text,
+        max_length,
+        num_beams,
+        special,
+        io,
+        run_options,
+        cancel,
+    } = job;
+    if cancel.is_cancelled() {
+        return Err(TranslationError::Cancelled);
+    }
+
+    let (source_ids, attention_mask) = tokenize_source(&tokenizer, &text, max_length)?;
+    if cancel.is_cancelled() {
+        return Err(TranslationError::Cancelled);
+    }
+
+    let generation_params = io.generation_params.as_ref().ok_or_else(|| {
+        TranslationError::Inference("generation model io is missing generation params".to_string())
+    })?;
+    let sequences_output = io.sequences_output.as_ref().ok_or_else(|| {
+        TranslationError::Inference("generation model io is missing sequences output".to_string())
+    })?;
+
+    let mut session = session
+        .lock()
+        .map_err(|_| TranslationError::Inference("ONNX session mutex poisoned".to_string()))?;
+    let mut inputs: Vec<(String, SessionInputValue<'_>)> = Vec::with_capacity(7);
+    let input_shape = vec![1_usize, source_ids.len()];
+    inputs.push((
+        io.input_ids.clone(),
+        Tensor::from_array((input_shape, source_ids.clone()))
+            .map_err(|error| {
+                TranslationError::Inference(format!("create encoder input tensor: {error}"))
+            })?
+            .into(),
+    ));
+    if let Some(name) = &io.attention_mask {
+        let mask_shape = vec![1_usize, attention_mask.len()];
+        inputs.push((
+            name.clone(),
+            Tensor::from_array((mask_shape, attention_mask.clone()))
+                .map_err(|error| {
+                    TranslationError::Inference(format!("create attention mask tensor: {error}"))
+                })?
+                .into(),
+        ));
+    }
+
+    let beams = i64::try_from(normalize_num_beams(num_beams))
+        .map_err(|_| TranslationError::Inference("num_beams out of range".to_string()))?;
+    let max_len = i64::try_from(max_length)
+        .map_err(|_| TranslationError::Inference("max_length out of range".to_string()))?;
+    push_i64_param(
+        &mut inputs,
+        &generation_params.num_beams,
+        beams,
+        "num_beams",
+    )?;
+    push_i64_param(&mut inputs, &generation_params.min_length, 0, "min_length")?;
+    push_i64_param(
+        &mut inputs,
+        &generation_params.max_length,
+        max_len,
+        "max_length",
+    )?;
+    push_f32_param(
+        &mut inputs,
+        &generation_params.length_penalty,
+        1.0,
+        "length_penalty",
+    )?;
+    push_f32_param(
+        &mut inputs,
+        &generation_params.repetition_penalty,
+        1.0,
+        "repetition_penalty",
+    )?;
+
+    let outputs = session
+        .run_with_options(inputs, &run_options)
+        .map_err(|error| TranslationError::Inference(format!("ONNX inference failed: {error}")))?;
+    let value = outputs.get(sequences_output.as_str()).ok_or_else(|| {
+        TranslationError::Inference("translation model returned no sequences output".to_string())
+    })?;
+    let (shape, data) = value
+        .try_extract_tensor::<i64>()
+        .map_err(|error| TranslationError::Inference(format!("extract sequences: {error}")))?;
+    let shape: Vec<usize> = shape
+        .iter()
+        .map(|&dimension| usize::try_from(dimension).unwrap_or(0))
+        .collect();
+    let sequence = extract_first_sequence(data, &shape)?;
+    let sequence = truncate_at_eos(&sequence, special.eos_id);
+
+    debug!(
+        source_tokens = source_ids.len(),
+        sequence_tokens = sequence.len(),
+        "generation translation finished"
+    );
+    decode_generated_ids(&tokenizer, &sequence)
+}
+
+/// Push a scalar `i64` generation parameter tensor into the inputs vector.
+fn push_i64_param(
+    inputs: &mut Vec<(String, SessionInputValue<'_>)>,
+    name: &str,
+    value: i64,
+    label: &str,
+) -> Result<(), TranslationError> {
+    inputs.push((
+        name.to_string(),
+        Tensor::from_array((vec![1_usize], vec![value]))
+            .map_err(|error| {
+                TranslationError::Inference(format!("create {label} tensor: {error}"))
+            })?
+            .into(),
+    ));
+    Ok(())
+}
+
+/// Push a scalar `f32` generation parameter tensor into the inputs vector.
+fn push_f32_param(
+    inputs: &mut Vec<(String, SessionInputValue<'_>)>,
+    name: &str,
+    value: f32,
+    label: &str,
+) -> Result<(), TranslationError> {
+    inputs.push((
+        name.to_string(),
+        Tensor::from_array((vec![1_usize], vec![value]))
+            .map_err(|error| {
+                TranslationError::Inference(format!("create {label} tensor: {error}"))
+            })?
+            .into(),
+    ));
+    Ok(())
+}
+
+/// Tokenize source text and build its attention mask.
+fn tokenize_source(
+    tokenizer: &Mutex<Tokenizer>,
+    text: &str,
+    max_length: usize,
+) -> Result<(Vec<i64>, Vec<i64>), TranslationError> {
     let tokenizer = tokenizer
         .lock()
         .map_err(|_| TranslationError::Inference("tokenizer mutex poisoned".to_string()))?;
-    let ids: Vec<u32> = generated
+    let encoding = tokenizer
+        .encode(text, true)
+        .map_err(|error| TranslationError::Inference(format!("tokenization failed: {error}")))?;
+    let source_ids: Vec<i64> = encoding.get_ids().iter().map(|&id| i64::from(id)).collect();
+    if source_ids.is_empty() {
+        return Err(TranslationError::Inference(
+            "tokenizer produced no source ids".to_string(),
+        ));
+    }
+    let source_ids = truncate_ids(&source_ids, max_length);
+    let attention_mask = vec![1_i64; source_ids.len()];
+    Ok((source_ids, attention_mask))
+}
+
+/// Decode generated ids and reject empty translations.
+fn decode_generated_ids(
+    tokenizer: &Mutex<Tokenizer>,
+    ids: &[i64],
+) -> Result<String, TranslationError> {
+    let tokenizer = tokenizer
+        .lock()
+        .map_err(|_| TranslationError::Inference("tokenizer mutex poisoned".to_string()))?;
+    let ids: Vec<u32> = ids
         .iter()
         .map(|&id| u32::try_from(id).unwrap_or(0))
         .collect();
@@ -632,6 +874,39 @@ fn generate_translation(job: GenerationJob) -> Result<String, TranslationError> 
     Ok(translated)
 }
 
+/// Take the first sequence from `[batch*beams, seq]`, `[batch, return, seq]`,
+/// or flat `[seq]` output.
+fn extract_first_sequence(data: &[i64], shape: &[usize]) -> Result<Vec<i64>, TranslationError> {
+    let seq_len = *shape.last().ok_or_else(|| {
+        TranslationError::Inference("sequences output has no dimensions".to_string())
+    })?;
+    if seq_len == 0 {
+        return Err(TranslationError::Inference(
+            "sequences output has zero sequence length".to_string(),
+        ));
+    }
+    if data.is_empty() || data.len() % seq_len != 0 {
+        return Err(TranslationError::Inference(format!(
+            "sequences data length {} is not a multiple of sequence length {seq_len}",
+            data.len()
+        )));
+    }
+    Ok(data[..seq_len].to_vec())
+}
+
+/// Cut a generated sequence at the first EOS token (exclusive).
+fn truncate_at_eos(ids: &[i64], eos_id: i64) -> Vec<i64> {
+    match ids.iter().position(|&id| id == eos_id) {
+        Some(position) => ids[..position].to_vec(),
+        None => ids.to_vec(),
+    }
+}
+
+/// Map manifest beam count to a value the graph accepts (0 or 1 = greedy).
+fn normalize_num_beams(num_beams: usize) -> usize {
+    usize::max(1, num_beams)
+}
+
 /// Run one decoder step and return the next token id.
 fn run_one_step(
     session: &Mutex<Session>,
@@ -641,6 +916,12 @@ fn run_one_step(
     generated: &[i64],
     run_options: &RunOptions,
 ) -> Result<i64, TranslationError> {
+    let decoder_input_ids = io.decoder_input_ids.as_ref().ok_or_else(|| {
+        TranslationError::Inference("stepwise model io is missing decoder_input_ids".to_string())
+    })?;
+    let logits = io.logits.as_ref().ok_or_else(|| {
+        TranslationError::Inference("stepwise model io is missing logits output".to_string())
+    })?;
     let mut session = session
         .lock()
         .map_err(|_| TranslationError::Inference("ONNX session mutex poisoned".to_string()))?;
@@ -664,12 +945,12 @@ fn run_one_step(
             })?;
         inputs.push((name.clone(), mask_tensor));
     }
-    inputs.push((io.decoder_input_ids.clone(), decoder_tensor));
+    inputs.push((decoder_input_ids.clone(), decoder_tensor));
 
     let outputs = session
         .run_with_options(inputs, run_options)
         .map_err(|error| TranslationError::Inference(format!("ONNX inference failed: {error}")))?;
-    let value = outputs.get(io.logits.as_str()).ok_or_else(|| {
+    let value = outputs.get(logits.as_str()).ok_or_else(|| {
         TranslationError::Inference("translation model returned no logits output".to_string())
     })?;
     let (shape, data) = value
@@ -889,5 +1170,301 @@ mod tests {
             load_tokenizer(&path),
             Err(TranslationError::ModelLoad(_))
         ));
+    }
+
+    #[test]
+    fn probe_detects_generation_model() {
+        let inputs = vec![
+            "input_ids".to_string(),
+            "attention_mask".to_string(),
+            "num_beams".to_string(),
+            "min_length".to_string(),
+            "max_length".to_string(),
+            "length_penalty".to_string(),
+            "repetition_penalty".to_string(),
+        ];
+        let outputs = vec!["sequences".to_string()];
+        let io = probe_io(&inputs, &outputs).unwrap();
+        assert_eq!(io.kind, ModelKind::Generation);
+        assert!(io.generation_params.is_some());
+        assert!(io.sequences_output.is_some());
+        assert!(io.decoder_input_ids.is_none());
+    }
+
+    #[test]
+    fn probe_detects_stepwise_model() {
+        let inputs = vec![
+            "input_ids".to_string(),
+            "attention_mask".to_string(),
+            "decoder_input_ids".to_string(),
+        ];
+        let outputs = vec!["logits".to_string()];
+        let io = probe_io(&inputs, &outputs).unwrap();
+        assert_eq!(io.kind, ModelKind::Stepwise);
+        assert!(io.decoder_input_ids.is_some());
+        assert!(io.logits.is_some());
+        assert!(io.generation_params.is_none());
+    }
+
+    #[test]
+    fn probe_error_lists_both_supported_forms() {
+        let inputs = vec!["input_ids".to_string()];
+        let outputs = vec!["unexpected".to_string()];
+        let error = probe_io(&inputs, &outputs).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("generation expects inputs"));
+        assert!(message.contains("stepwise"));
+        assert!(message.contains("input_ids"));
+    }
+
+    #[test]
+    fn extract_first_sequence_supports_multiple_beams() {
+        let data = vec![1, 3, 4, 2, 5, 6, 7, 8];
+        assert_eq!(
+            extract_first_sequence(&data, &[2, 4]).unwrap(),
+            vec![1, 3, 4, 2]
+        );
+    }
+
+    #[test]
+    fn extract_first_sequence_supports_return_dimension() {
+        let data = vec![1, 3, 4, 2, 5, 6, 7, 8, 9, 10, 11, 12];
+        assert_eq!(
+            extract_first_sequence(&data, &[1, 2, 3]).unwrap(),
+            vec![1, 3, 4]
+        );
+    }
+
+    #[test]
+    fn truncate_at_eos_stops_at_first_eos() {
+        assert_eq!(truncate_at_eos(&[1, 3, 4, 2, 5], 2), vec![1, 3, 4]);
+        assert_eq!(truncate_at_eos(&[1, 3, 4], 2), vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn normalize_num_beams_maps_zero_and_one_to_greedy() {
+        assert_eq!(normalize_num_beams(0), 1);
+        assert_eq!(normalize_num_beams(1), 1);
+        assert_eq!(normalize_num_beams(4), 4);
+    }
+
+    #[test]
+    fn validate_group_accepts_zero_beams_for_graph() {
+        let mut group = make_translation_group(vec![(Language::English, Language::Japanese)], 128);
+        group.inference_params.num_beams = 0;
+        assert!(validate_group(&group).is_ok());
+    }
+
+    fn encode_varint(value: u64, out: &mut Vec<u8>) {
+        let mut value = value;
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn encode_key(field: u32, wire_type: u8, out: &mut Vec<u8>) {
+        encode_varint((u64::from(field) << 3) | u64::from(wire_type), out);
+    }
+
+    fn encode_varint_field(field: u32, value: u64, out: &mut Vec<u8>) {
+        encode_key(field, 0, out);
+        encode_varint(value, out);
+    }
+
+    fn encode_len_field(field: u32, bytes: &[u8], out: &mut Vec<u8>) {
+        encode_key(field, 2, out);
+        encode_varint(bytes.len() as u64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    fn encode_string_field(field: u32, value: &str, out: &mut Vec<u8>) {
+        encode_len_field(field, value.as_bytes(), out);
+    }
+
+    fn encode_message_field(field: u32, value: &[u8], out: &mut Vec<u8>) {
+        encode_len_field(field, value, out);
+    }
+
+    // Casts are correct: protobuf varints encode int64 as unsigned two's complement.
+    #[allow(clippy::cast_sign_loss)]
+    fn encode_tensor_int64(name: &str, dims: &[i64], data: &[i64]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &dim in dims {
+            encode_varint_field(1, dim as u64, &mut out);
+        }
+        encode_varint_field(2, 7, &mut out); // TensorProto::INT64
+        for &value in data {
+            encode_varint_field(7, value as u64, &mut out);
+        }
+        encode_string_field(8, name, &mut out);
+        out
+    }
+
+    // Casts are correct: protobuf varints encode int64 as unsigned two's complement.
+    #[allow(clippy::cast_sign_loss)]
+    fn encode_tensor_float(name: &str, dims: &[i64], data: &[f32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for &dim in dims {
+            encode_varint_field(1, dim as u64, &mut out);
+        }
+        encode_varint_field(2, 1, &mut out); // TensorProto::FLOAT
+        let mut payload = Vec::with_capacity(data.len() * 4);
+        for value in data {
+            payload.extend_from_slice(&value.to_le_bytes());
+        }
+        encode_len_field(4, &payload, &mut out); // packed float_data
+        encode_string_field(8, name, &mut out);
+        out
+    }
+
+    // Casts are correct: protobuf varints encode int64 as unsigned two's complement.
+    #[allow(clippy::cast_sign_loss)]
+    fn encode_type(elem_type: i64, shape: &[Option<i64>]) -> Vec<u8> {
+        let mut tensor = Vec::new();
+        encode_varint_field(1, elem_type as u64, &mut tensor);
+        if !shape.is_empty() {
+            let mut shape_msg = Vec::new();
+            for dim in shape {
+                let mut dim_msg = Vec::new();
+                match dim {
+                    Some(value) => encode_varint_field(1, *value as u64, &mut dim_msg),
+                    None => encode_string_field(2, "seq", &mut dim_msg),
+                }
+                encode_message_field(1, &dim_msg, &mut shape_msg);
+            }
+            encode_message_field(2, &shape_msg, &mut tensor);
+        }
+        let mut out = Vec::new();
+        encode_message_field(1, &tensor, &mut out);
+        out
+    }
+
+    fn encode_value_info(name: &str, type_msg: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_string_field(1, name, &mut out);
+        encode_message_field(2, type_msg, &mut out);
+        out
+    }
+
+    fn encode_node(name: &str, op_type: &str, inputs: &[&str], outputs: &[&str]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for input in inputs {
+            encode_string_field(1, input, &mut out);
+        }
+        for output in outputs {
+            encode_string_field(2, output, &mut out);
+        }
+        encode_string_field(3, name, &mut out);
+        encode_string_field(4, op_type, &mut out);
+        out
+    }
+
+    fn encode_model(graph: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        encode_varint_field(1, 8, &mut out); // ir_version
+        let mut opset = Vec::new();
+        encode_string_field(1, "ai.onnx", &mut opset);
+        encode_varint_field(2, 17, &mut opset);
+        encode_message_field(8, &opset, &mut out);
+        encode_message_field(7, graph, &mut out);
+        out
+    }
+
+    fn generation_model_bytes() -> Vec<u8> {
+        let inputs = vec![
+            encode_value_info("input_ids", &encode_type(7, &[Some(1), None])),
+            encode_value_info("attention_mask", &encode_type(7, &[Some(1), None])),
+            encode_value_info("num_beams", &encode_type(7, &[Some(1)])),
+            encode_value_info("min_length", &encode_type(7, &[Some(1)])),
+            encode_value_info("max_length", &encode_type(7, &[Some(1)])),
+            encode_value_info("length_penalty", &encode_type(1, &[Some(1)])),
+            encode_value_info("repetition_penalty", &encode_type(1, &[Some(1)])),
+        ];
+        let initializer = encode_tensor_int64("fixed_sequence", &[1, 5], &[1, 3, 7, 4, 2]);
+        let node = encode_node("identity", "Identity", &["fixed_sequence"], &["sequences"]);
+        let output = encode_value_info("sequences", &encode_type(7, &[Some(1), Some(5)]));
+        let mut graph = Vec::new();
+        encode_message_field(1, &node, &mut graph);
+        encode_message_field(5, &initializer, &mut graph);
+        for input in &inputs {
+            encode_message_field(11, input, &mut graph);
+        }
+        encode_message_field(12, &output, &mut graph);
+        encode_model(&graph)
+    }
+
+    fn stepwise_model_bytes() -> Vec<u8> {
+        let inputs = vec![
+            encode_value_info("input_ids", &encode_type(7, &[Some(1), None])),
+            encode_value_info("attention_mask", &encode_type(7, &[Some(1), None])),
+            encode_value_info("decoder_input_ids", &encode_type(7, &[Some(1), None])),
+        ];
+        let initializer =
+            encode_tensor_float("fixed_logits", &[1, 1, 5], &[0.1, 0.2, 0.1, 0.9, 0.1]);
+        let node = encode_node("identity", "Identity", &["fixed_logits"], &["logits"]);
+        let output = encode_value_info("logits", &encode_type(1, &[Some(1), Some(1), Some(5)]));
+        let mut graph = Vec::new();
+        encode_message_field(1, &node, &mut graph);
+        encode_message_field(5, &initializer, &mut graph);
+        for input in &inputs {
+            encode_message_field(11, input, &mut graph);
+        }
+        encode_message_field(12, &output, &mut graph);
+        encode_model(&graph)
+    }
+
+    fn provider_from_dummy(session: Session, max_length: usize) -> LocalTranslationProvider {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tokenizer.json");
+        let tokenizer = Tokenizer::from_file(path).unwrap();
+        let special = SpecialTokens::from_tokenizer(&tokenizer);
+        let io = ModelIo::from_session(&session).unwrap();
+        LocalTranslationProvider {
+            model_id: "dummy".to_string(),
+            session: Arc::new(Mutex::new(session)),
+            tokenizer: Arc::new(Mutex::new(tokenizer)),
+            supported_pairs: vec![(Language::English, Language::Japanese)],
+            max_length,
+            num_beams: 4,
+            special,
+            io,
+        }
+    }
+
+    #[tokio::test]
+    async fn generation_dummy_model_translates() {
+        let bytes = generation_model_bytes();
+        let session = Session::builder()
+            .unwrap()
+            .commit_from_memory(&bytes)
+            .unwrap();
+        let provider = provider_from_dummy(session, 16);
+        let request = TranslationRequest::new("hello", Language::English, Language::Japanese);
+        let result = provider
+            .translate(&request, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.translated_text, "hello world");
+    }
+
+    #[tokio::test]
+    async fn stepwise_dummy_model_translates() {
+        let bytes = stepwise_model_bytes();
+        let session = Session::builder()
+            .unwrap()
+            .commit_from_memory(&bytes)
+            .unwrap();
+        let provider = provider_from_dummy(session, 2);
+        let request = TranslationRequest::new("hello", Language::English, Language::Japanese);
+        let result = provider
+            .translate(&request, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result.translated_text, "hello");
     }
 }

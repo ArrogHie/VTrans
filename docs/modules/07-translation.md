@@ -127,3 +127,62 @@ crates/vtrans-translation/
 - Local Provider 使用 ort crate，与 OCR 共用 runtime
 - Prompt 模板：固定前缀 + 原文，明确要求"只输出译文"
 - 日志记录 provider_id、elapsed_ms、source/target（不记录完整原文和译文）
+
+## 本地 ONNX 接口契约
+
+`LocalTranslationProvider` 在加载时探测模型的 I/O 形态，自动选择推理路径。支持两种接口，**生成型为主**，逐 token 兼容保留防回归。
+
+### 生成型（Generation，推荐）
+
+整图生成接口，beam search 由 ONNX 图内实现，单次 `session.run` 完成全部解码。
+
+**输入张量**
+
+| 名称 | 类型 | 形状 | 说明 |
+|------|------|------|------|
+| `input_ids` | int64 | `[1, src_len]` | 源语言 token ids |
+| `attention_mask` | int64 | `[1, src_len]` | 全 1（无 padding） |
+| `num_beams` | int64 | `[1]` | beam 数，0/1 退化为 greedy |
+| `min_length` | int64 | `[1]` | 固定传 0 |
+| `max_length` | int64 | `[1]` | 取 manifest `max_length` |
+| `length_penalty` | float32 | `[1]` | 固定传 1.0 |
+| `repetition_penalty` | float32 | `[1]` | 固定传 1.0 |
+
+输入名通过子串匹配探测（如 `num_beams`、`max_length`），不要求精确名。
+
+**输出张量**
+
+| 名称 | 类型 | 形状 | 说明 |
+|------|------|------|------|
+| `sequences` | int64 | `[batch*beams, seq_len]` 或 `[1, seq_len]` | 生成序列 |
+
+输出名取包含 `sequences` 的张量，或唯一输出。取第一条序列解码。
+
+**解码流程**：从 tokenizer 的 `eos_id` 截断 → 剥离 pad/bos 等特殊 token → `tokenizer.decode` → trim → 空则返回 `Inference("decoder produced empty translation")`。
+
+### 逐 token 型（Stepwise，兼容）
+
+Decoder-loop 接口，每步喂入 `decoder_input_ids` 读取 `logits`，客户端做 greedy argmax。
+
+**输入张量**：`input_ids`、`attention_mask`、`decoder_input_ids`
+**输出张量**：`logits`（取最后一行 argmax）
+
+### I/O 探测规则
+
+1. 优先探测生成型：输入含 `num_beams`/`min_length`/`max_length`/`length_penalty`/`repetition_penalty` 且输出含 `sequences`（或唯一输出）。
+2. 回退逐 token 型：输入含 `decoder_input_ids` 且输出含 `logits`（或唯一输出）。
+3. 两者均不匹配时，错误信息列出两种形态的期望输入名清单。
+4. 探测结果在 `debug!` 日志中记录，包含 `model_kind`、各张量名。
+
+### 取消语义
+
+生成型 `session.run` 是长阻塞操作，通过 `spawn_blocking` + `RunOptions::terminate()` 实现协作取消。`CancellationToken` 触发时调用 `terminate()` 中断 ONNX run，返回 `TranslationError::Cancelled`。
+
+### manifest 参数映射
+
+| manifest 字段 | ONNX 输入 | 说明 |
+|---------------|----------|------|
+| `inference_params.num_beams` | `num_beams` | 0 或 1 传 1（greedy），≥2 启用 beam search |
+| `max_length` | `max_length` | 解码最大长度，与图内 `max_length` 语义对齐 |
+
+`min_length`、`length_penalty`、`repetition_penalty` 固定传默认值（0、1.0、1.0），显式喂齐避免依赖图内默认。

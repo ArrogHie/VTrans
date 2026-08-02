@@ -155,10 +155,10 @@ impl TranslationProvider for LocalTranslationProvider {
 
 | 限制 | 缓解方式 |
 |------|----------|
-| `num_beams` 与 `max_batch_size` 仅校验非零，未实现 beam search 与批处理 | 当前保持贪婪解码，manifest 预留参数 |
-| 未实现 KV cache，每步把完整生成序列送入模型 | 屏幕文本通常较短，后续优化 |
+| `max_batch_size` 仅校验非零，未实现批处理 | 屏幕翻译逐段单次调用，批处理收益有限 |
+| 逐 token 路径未实现 KV cache，每步把完整生成序列送入模型 | 生成型路径由图内单次 run 完成，逐 token 仅作兼容回退 |
 | 本地模型语言条件化需要扩展 `ModelManifest` schema | 由 `vtrans-models` 与架构评审确认后增加语言 token 配置 |
-| 长文本不分块 | 消费方先使用 `vtrans-text` 切段 |
+| 长文本不分块 | 消费方切块：`vtrans-pipeline` 已按整段单次调用 + 超长切块策略实现 |
 
 **设计使然**
 
@@ -168,6 +168,8 @@ impl TranslationProvider for LocalTranslationProvider {
 | 仅支持 Hugging Face `tokenizer.json` | 与 `vtrans-models` 的 manifest 约定一致 |
 | API 响应格式固定 | 非 OpenAI-compatible 厂商需要新增适配器 |
 | 本地 Provider 不注入 `source` / `target` | 语言行为由模型自身决定，manifest 仅声明能力 |
+| beam search 由 ONNX 图内实现 | 生成型接口将 `num_beams` 传入图内，客户端不做 beam search 逻辑 |
+| 逐 token 路径仅做 greedy decoding | 兼容旧模型；生成型路径为推荐接口 |
 
 ## 9. 构建与测试（两类读者）
 
