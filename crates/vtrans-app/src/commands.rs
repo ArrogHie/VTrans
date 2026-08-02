@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
 use vtrans_core::{Language, OcrResult, PipelineMode, ScreenRegion};
 use vtrans_pipeline::{PipelineError, PipelineEvent};
 
@@ -61,13 +62,36 @@ pub(crate) async fn select_region(
         state.cancel_region_selection().await;
         return Err(AppError::Tauri(error.to_string()));
     }
-    match receiver.await {
-        Ok(region) => {
+    match timeout(Duration::from_secs(300), receiver).await {
+        Ok(Ok(region)) => {
             let _ = window.hide();
             Ok(region)
         }
-        Err(_) => Err(AppError::NotInitialized),
+        Ok(Err(_)) => Err(AppError::NotInitialized),
+        Err(_) => {
+            state.cancel_region_selection().await;
+            let _ = window.hide();
+            Err(AppError::Tauri("region selection timed out".to_string()))
+        }
     }
+}
+
+/// Cancels the pending region selection and hides the selector window.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+///
+/// # Errors
+///
+/// Returns an application error when the selector window cannot be accessed.
+pub async fn cancel_region_selection(state: State<'_, AppState>) -> Result<(), AppError> {
+    state.cancel_region_selection().await;
+    let app = state.app_handle()?;
+    if let Some(window) = app.get_webview_window("selector") {
+        window
+            .hide()
+            .map_err(|error| AppError::Tauri(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Runs one capture, OCR, and translation pipeline pass and returns OCR text.
@@ -283,7 +307,12 @@ pub async fn load_local_models(
     let app = state.app_handle()?;
     state.set_model_progress(Some(0.0));
     emit_model_loading_progress(&app, "manifest", 0.0);
-    let report = state.verify_models();
+    let model_manager = std::sync::Arc::clone(&state.model_manager);
+    let report = tokio::task::spawn_blocking(move || {
+        model_manager.verify_integrity().map_err(AppError::from)
+    })
+    .await
+    .map_err(|error| AppError::Tauri(format!("model verification task failed: {error}")))?;
     state.set_model_progress(Some(1.0));
     emit_model_loading_progress(&app, "manifest", 1.0);
     report
@@ -329,6 +358,7 @@ pub fn invoke_handler<R: tauri::Runtime>(
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         start_region_selection,
+        cancel_region_selection,
         capture_once,
         start_live_translation,
         stop_live_translation,

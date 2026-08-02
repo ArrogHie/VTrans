@@ -13,6 +13,7 @@ pub const TRANSLATION_COMPLETED: &str = "translation_completed";
 pub const PIPELINE_ERROR: &str = "pipeline_error";
 pub const LIVE_SESSION_STOPPED: &str = "live_session_stopped";
 pub const MODEL_LOADING_PROGRESS: &str = "model_loading_progress";
+pub const REGION_SELECTED: &str = "region_selected";
 
 #[derive(Debug, Serialize)]
 struct StatusPayload<'a> {

@@ -11,7 +11,7 @@ use vtrans_capture::WindowsCaptureSource;
 use vtrans_config::{AppConfig, ConfigManager};
 use vtrans_core::traits::{CaptureSource, OcrProvider, TranslationProvider};
 use vtrans_core::{OcrOptions, PipelineMode, PipelineStatus, ScreenRegion, TranslationRequest};
-use vtrans_models::{ModelManager, VerifyReport};
+use vtrans_models::ModelManager;
 use vtrans_ocr::PaddleOcrProvider;
 use vtrans_pipeline::{Pipeline, PipelineConfig, PipelineDeps};
 use vtrans_security::CredentialManager;
@@ -49,7 +49,7 @@ pub struct AppState {
     pub(crate) ocr_provider: std::sync::RwLock<Arc<dyn OcrProvider>>,
     pub(crate) translation_provider: std::sync::RwLock<Arc<dyn TranslationProvider>>,
     pub(crate) capture_source: Arc<WindowsCaptureSource>,
-    pub(crate) model_manager: ModelManager,
+    pub(crate) model_manager: Arc<ModelManager>,
     selected_region: std::sync::RwLock<Option<ScreenRegion>>,
     pub(crate) live_task: Mutex<Option<JoinHandle<()>>>,
     pub(crate) live_lifecycle: Mutex<()>,
@@ -77,7 +77,7 @@ impl AppState {
             .model_dir
             .clone()
             .unwrap_or_else(|| app_data_dir.join("models"));
-        let model_manager = ModelManager::from_manifest_dir(&model_dir)?;
+        let model_manager = Arc::new(ModelManager::from_manifest_dir(&model_dir)?);
         let capture_source = Arc::new(WindowsCaptureSource::new()?);
         let ocr_provider =
             Arc::new(PaddleOcrProvider::from_manager(&model_manager)?) as Arc<dyn OcrProvider>;
@@ -288,12 +288,6 @@ impl AppState {
             live_running,
             model_progress,
         }
-    }
-
-    pub(crate) fn verify_models(&self) -> Result<VerifyReport, AppError> {
-        self.model_manager
-            .verify_integrity()
-            .map_err(AppError::from)
     }
 
     pub(crate) fn set_model_progress(&self, progress: Option<f32>) {

@@ -7,6 +7,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tracing::{info, warn};
 
 use crate::commands::{select_region, start_live_task, stop_live_task, LiveTranslationConfig};
+use crate::events::REGION_SELECTED;
 use crate::state::AppState;
 use crate::AppError;
 
@@ -68,7 +69,7 @@ fn dispatch_hotkey(app: AppHandle, action: HotkeyAction) {
         match action {
             HotkeyAction::Select => match select_region(app.clone(), state.inner()).await {
                 Ok(region) => {
-                    let _ = app.emit("region_selected", region);
+                    let _ = app.emit(REGION_SELECTED, region);
                 }
                 Err(error) => warn!(error = %error, "region selection hotkey failed"),
             },

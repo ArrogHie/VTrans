@@ -63,6 +63,7 @@ AppState::new 从 app_data_dir/config.json 加载配置，默认从 app_data_dir
 
 ~~~rust
 start_region_selection() -> Result<ScreenRegion, AppError>
+cancel_region_selection() -> Result<(), AppError>
 capture_once(region: ScreenRegion) -> Result<OcrResult, AppError>
 start_live_translation(config: LiveTranslationConfig) -> Result<(), AppError>
 stop_live_translation() -> Result<(), AppError>
@@ -88,6 +89,7 @@ emit_pipeline_event 转发以下事件：
 - pipeline_error
 - live_session_stopped
 - model_loading_progress
+- region_selected
 
 事件只包含标准文本/状态结构，不携带截图图像数据。敏感凭据不会进入事件或日志。
 
@@ -116,6 +118,13 @@ cargo test -p vtrans-app
 cargo check -p vtrans-app --all-targets
 ~~~
 
+编译宿主 Tauri：
+
+~~~powershell
+pnpm build
+cargo check -p vtrans
+~~~
+
 ## 日志与安全
 
 - 所有 command、初始化入口和事件转发入口使用 tracing instrumentation。
@@ -126,7 +135,7 @@ cargo check -p vtrans-app --all-targets
 ## 已知限制
 
 - AppState::new 需要可用的 Windows Graphics Capture 环境、模型 manifest 和对应模型文件；模型未部署时启动会返回 AppError::Model/AppError::Capture。
-- 选区窗口的最终坐标由前端通过 update_live_region 确认；start_region_selection 会等待确认结果，不会伪造坐标。
-- 模型完整性校验目前是同步文件校验，命令本身是 async 但校验仍会占用运行时 worker；后续可迁移到专用 blocking pool。
+- 选区窗口的最终坐标由前端通过 update_live_region 确认；start_region_selection 会等待确认结果，Escape/关闭操作应调用 cancel_region_selection。
+- 模型完整性校验通过 blocking pool 执行，避免大文件 SHA-256 计算阻塞 Tokio worker。
 - 全局快捷键由配置字符串解析，冲突或非法快捷键会在启动时返回 HotkeyFailed；当前没有 UI 内热键冲突编辑器。
 - Tauri capability 文件仍由宿主项目维护；生产构建应按窗口和 command 最小化 capability。

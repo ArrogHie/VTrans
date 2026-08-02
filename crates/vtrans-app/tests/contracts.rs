@@ -1,4 +1,4 @@
-use vtrans_app::events::{CAPTURE_STATUS_CHANGED, OCR_COMPLETED, PIPELINE_ERROR};
+use vtrans_app::events::{CAPTURE_STATUS_CHANGED, OCR_COMPLETED, PIPELINE_ERROR, REGION_SELECTED};
 use vtrans_app::{AppError, AppStatus, LiveTranslationConfig};
 use vtrans_core::{Language, PipelineStatus, ScreenRegion};
 use vtrans_pipeline::PipelineError;
@@ -41,5 +41,6 @@ fn event_names_are_stable() {
     assert_eq!(CAPTURE_STATUS_CHANGED, "capture_status_changed");
     assert_eq!(OCR_COMPLETED, "ocr_completed");
     assert_eq!(PIPELINE_ERROR, "pipeline_error");
+    assert_eq!(REGION_SELECTED, "region_selected");
     assert_eq!(Language::English.code(), "en");
 }

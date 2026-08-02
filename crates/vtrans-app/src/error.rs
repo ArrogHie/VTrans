@@ -22,7 +22,7 @@ pub enum AppError {
 
     /// A core validation or serialization error.
     #[error("core error: {0}")]
-    Core(CoreError),
+    Core(#[source] CoreError),
 
     /// The pipeline failed.
     #[error("pipeline error: {0}")]
