@@ -164,12 +164,10 @@ cargo fmt --all -- --check
 2. 需要交互式 Windows 桌面会话（远程会话 / 无桌面可能初始化失败）；
 3. 屏幕目标区域里先放好要翻译的内容（如打开一个日文网页）。
 
-> 本地翻译模型说明（重要）：当前 manifest 声明的本地翻译模型是 `opus-mt-en-zh`，仅支持
-> `en -> zh-CN`；且下载脚本导出的 ONNX 是「整图生成」型（输入 `num_beams/min_length/...`，
-> 输出 `sequences`），与 `LocalTranslationProvider` 期望的「逐 token 解码」型（输入须含
-> `decoder_input_ids`，输出 `logits`）不兼容。这是 `scripts/download_models.ps1` 与
-> `vtrans-translation` 的集成问题（模块 07，见「已知限制」）。因此全管线验证目前请走 **API 翻译**
-> 路径；本地翻译模式会得到明确诊断并按错误码 2 退出。
+> 本地翻译模型说明（重要）：本项目选定本地翻译模型采用「整图生成」ONNX 接口（速度优先，
+> 见模块 07 的适配方案）；当前 manifest 声明的 `opus-mt-en-zh` 仅支持 `en -> zh-CN`，
+> 且 `vtrans-translation`（模块 07）尚未实现该接口的推理路径。因此全管线验证目前请走
+> **API 翻译** 路径；本地翻译模式会得到明确诊断并按错误码 2 退出，待 07 适配后无需改动即可使用。
 
 单次截屏翻译（API 路径，可验证全管线）：
 
@@ -199,12 +197,15 @@ cargo run -p vtrans-pipeline --example pipeline_verify -- `
 
 ## 8. 已知限制 / 上游集成问题
 
-- **本地翻译模型格式不兼容（模块 07）**：`scripts/download_models.ps1` 用 `teradata-opus-translate`
-  导出的 `translation/model.onnx` 是整图生成接口（输入 `input_ids/attention_mask/num_beams/
-  min_length/max_length/length_penalty/repetition_penalty`，输出 `sequences`），而
-  `LocalTranslationProvider` 实现的是逐 token 解码接口（输入须含 `decoder_input_ids`，输出
-  `logits`）。`pipeline_verify` 会先做语言对预检（基于 manifest `supported_pairs`），再做模型
-  加载并输出可执行建议；待模块 07 统一导出格式与 Provider 实现。
+- **本地翻译模型适配待模块 07 实现（决策已定：整图生成）**：`scripts/download_models.ps1` 导出的
+  `translation/model.onnx` 是整图生成接口（输入 `input_ids/attention_mask/num_beams/
+  min_length/max_length/length_penalty/repetition_penalty`，输出 `sequences`），这是本项目
+  选定并期望的形态（整图推理速度快）。`LocalTranslationProvider` 目前只实现了逐 token 解码接口
+  （输入须含 `decoder_input_ids`，输出 `logits`），需要按 `docs/modules/09-pipeline.md` 配套的
+  07 适配方案补上整图生成推理路径。`pipeline_verify` 会先做语言对预检（基于 manifest
+  `supported_pairs`），再做模型加载并输出可执行建议。
+- 翻译调用策略（管线侧）：整段文本默认**单次调用**（≤2000 字符），只有超长文本才按字符边界
+  切块——最大化减少整图生成推理次数；Provider 会按自身 `max_length` 截断超长输入。
 - 本地模型语言对有限：`opus-mt-en-zh` 仅支持 `en -> zh-CN`；其他语言对请走 API 翻译。
 - 示例 CLI 不读取 `vtrans-security` 凭据，API Key 通过命令行/环境变量注入（应用层才使用
   CredentialManager）。

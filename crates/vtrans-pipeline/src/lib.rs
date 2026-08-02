@@ -509,14 +509,41 @@ pub(crate) fn image_aligned_region(monitor_id: &str, image: &CapturedImage) -> S
     ScreenRegion::new(monitor_id.to_string(), 0, 0, image.width, image.height)
 }
 
-/// Translates `text` through the configured provider, chunking long text
-/// first.
+/// Maximum number of characters sent to the translation provider in one
+/// call. Screen text usually fits well below this limit, so the pipeline
+/// translates it in a single call (fastest with generation-in-graph
+/// models); longer texts are split at character boundaries.
+const MAX_TRANSLATION_CHUNK_CHARS: usize = 2000;
+
+/// Splits `text` into translation chunks: a single chunk when it fits
+/// within [`MAX_TRANSLATION_CHUNK_CHARS`], otherwise hard splits at
+/// character boundaries (never inside a Unicode scalar).
+fn chunk_translation_text(text: &str) -> Vec<String> {
+    if text.chars().count() <= MAX_TRANSLATION_CHUNK_CHARS {
+        return vec![text.to_string()];
+    }
+    text.chars()
+        .collect::<Vec<char>>()
+        .chunks(MAX_TRANSLATION_CHUNK_CHARS)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect()
+}
+
+/// Translates `text` through the configured provider.
 ///
-/// `vtrans-text` splits the text into paragraphs of at most
-/// [`DEFAULT_MAX_PARAGRAPH_LEN`](vtrans_text::DEFAULT_MAX_PARAGRAPH_LEN)
-/// characters, and each chunk is translated sequentially with the same
-/// cancellation token. The chunk translations are joined with `\n` into a
+/// The whole text is sent as a single request whenever it fits within
+/// [`MAX_TRANSLATION_CHUNK_CHARS`] characters - the common case for screen
+/// translation. This keeps the number of provider calls (and therefore the
+/// number of generation-graph runs for local models) as low as possible,
+/// which is the dominant cost for the generation-in-graph ONNX interface
+/// chosen for this project. Only texts longer than the limit are hard-split
+/// at character boundaries; each chunk is translated sequentially with the
+/// same cancellation token. Chunk translations are joined with `\n` into a
 /// single [`TranslationResult`]; `elapsed_ms` is the sum over all chunks.
+///
+/// Note: providers truncate input at their own `max_length` (see the model
+/// manifest); the pipeline limit is a defensive upper bound for the
+/// provider-agnostic text size.
 ///
 /// # Errors
 ///
@@ -529,7 +556,7 @@ pub(crate) async fn translate_text(
     target: Language,
     cancel: CancellationToken,
 ) -> Result<TranslationResult, TranslationError> {
-    let chunks = TextNormalizer::split_paragraphs_default(text);
+    let chunks = chunk_translation_text(text);
     let mut translated = Vec::with_capacity(chunks.len());
     let mut provider_id = String::new();
     let mut total_elapsed_ms = 0;
@@ -566,5 +593,41 @@ pub(crate) fn normalize_result(result: OcrResult, source: Language) -> OcrResult
     OcrResult {
         merged_text: cleaned,
         ..result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_short_text_in_single_call() {
+        assert_eq!(chunk_translation_text("hello world"), vec!["hello world"]);
+        let exactly = "a".repeat(MAX_TRANSLATION_CHUNK_CHARS);
+        assert_eq!(chunk_translation_text(&exactly), vec![exactly]);
+    }
+
+    #[test]
+    fn chunk_long_text_at_character_boundaries() {
+        let text = "x".repeat(2500);
+        let chunks = chunk_translation_text(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), MAX_TRANSLATION_CHUNK_CHARS);
+        assert_eq!(chunks[1].len(), 500);
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn chunk_never_splits_unicode_scalars() {
+        let text = "日".repeat(2500);
+        let chunks = chunk_translation_text(&text);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.chars().all(|c| c == '日')));
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn chunk_empty_text_is_single_call() {
+        assert_eq!(chunk_translation_text(""), vec![""]);
     }
 }

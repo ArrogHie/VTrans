@@ -112,15 +112,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(TranslationError::ModelLoad(message)) => {
             eprintln!("本地翻译模型加载失败: {message}");
             eprintln!();
-            eprintln!("提示：LocalTranslationProvider 期望「逐 token 解码」型 ONNX 导出（输入须含");
-            eprintln!(
-                "      decoder_input_ids，输出 logits）；当前 model.onnx 是「整图生成」型导出"
-            );
-            eprintln!(
-                "      （输入 num_beams/min_length/max_length 等，输出 sequences），格式不兼容。"
-            );
-            eprintln!("      这是 scripts/download_models.ps1 与 vtrans-translation 的集成问题（模块 07）。");
-            eprintln!("      现在可改用 API 翻译验证全管线：--api-endpoint <url> --api-model <name> --api-key <key>");
+            eprintln!("提示：本项目选定本地翻译模型采用「整图生成」ONNX 接口（输入 num_beams/");
+            eprintln!("      min_length/max_length 等，输出 sequences），以追求更快的翻译速度；");
+            eprintln!("      当前 vtrans-translation（模块 07）尚未实现该接口的推理路径，");
+            eprintln!("      待 07 适配后，本地模式无需改动即可使用。");
+            eprintln!("      现在可先用 API 翻译验证全管线：--api-endpoint <url> --api-model <name> --api-key <key>");
             std::process::exit(2);
         }
         Err(error) => return Err(error.into()),
