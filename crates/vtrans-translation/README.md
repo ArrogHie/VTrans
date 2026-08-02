@@ -7,7 +7,7 @@
 本模块只负责把一段文本从源语言翻译成目标语言，并返回标准化的 `TranslationResult`。
 
 边界：
-- 做：翻译请求校验、Prompt 构建、HTTP 请求与重试、ONNX 模型加载与贪婪解码、取消与超时。
+- 做：翻译请求校验、Prompt 构建、HTTP 请求与重试、ONNX 模型加载与生成结果解码、取消与超时。
 - 不做：不管理 API Key（凭据由 `vtrans-security` 保管，应用层读取后传入）；不下载或分发模型文件（属 `vtrans-models`）；不做文本清洗、指纹去重和段落切分（属 `vtrans-text`）；不采集屏幕或识别文字（属 `vtrans-capture`、`vtrans-ocr`）。
 
 ## 2. 依赖关系（消费方 / 负责人）
