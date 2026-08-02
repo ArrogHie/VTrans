@@ -29,11 +29,12 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - tauri 2：commands、managed state、events 和窗口操作。
 - tauri-plugin-global-shortcut 2：全局快捷键注册。
 - tokio：异步命令、pipeline task 和有界事件通道。
+- async-trait：为共享 Provider adapter 实现 core trait。
 - serde/serde_json：IPC payload 和错误序列化。
 - thiserror：错误枚举和错误链。
 - tracing：结构化生命周期和错误日志。
 
-所有依赖使用 MIT 或 Apache-2.0 兼容许可证；本 crate 没有新增 workspace 根依赖。
+所有依赖使用 MIT 或 Apache-2.0 兼容许可证；新增依赖仅在本 crate 的 Cargo.toml 中声明。
 
 ## 公开 API 概要
 
@@ -97,7 +98,7 @@ pub fn init_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), AppError>
 pub fn builder() -> tauri::Builder<tauri::Wry>
 ~~~
 
-桌面入口只需要在 Tauri Builder 中安装本 crate 的 builder/setup，或使用 builder() 的 command、plugin 和 setup 配置。
+src-tauri/src/main.rs 使用 builder()、generate_context!() 和 run() 完成宿主启动；capability 仍由宿主项目维护。
 
 ## 构建与测试
 
@@ -125,7 +126,7 @@ cargo check -p vtrans-app --all-targets
 ## 已知限制
 
 - AppState::new 需要可用的 Windows Graphics Capture 环境、模型 manifest 和对应模型文件；模型未部署时启动会返回 AppError::Model/AppError::Capture。
-- 选区窗口的最终坐标由前端确认并通过 update_live_region 写回；在确认前 start_region_selection 返回 NotInitialized，不会伪造坐标。
+- 选区窗口的最终坐标由前端通过 update_live_region 确认；start_region_selection 会等待确认结果，不会伪造坐标。
 - 模型完整性校验目前是同步文件校验，命令本身是 async 但校验仍会占用运行时 worker；后续可迁移到专用 blocking pool。
 - 全局快捷键由配置字符串解析，冲突或非法快捷键会在启动时返回 HotkeyFailed；当前没有 UI 内热键冲突编辑器。
-- 当前应用层未修改 src-tauri 的 capability 文件；生产构建仍应在 Tauri 配置中按窗口和 command 最小化 capability。
+- Tauri capability 文件仍由宿主项目维护；生产构建应按窗口和 command 最小化 capability。

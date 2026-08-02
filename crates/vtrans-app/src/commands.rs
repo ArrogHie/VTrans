@@ -1,14 +1,15 @@
 //! Tauri command handlers for the `VTrans` frontend.
 
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 use vtrans_core::{Language, OcrResult, PipelineMode, ScreenRegion};
 use vtrans_pipeline::{PipelineError, PipelineEvent};
 
 use crate::error::AppError;
 use crate::events::{emit_model_loading_progress, emit_pipeline_event};
-use crate::state::{AppState, AppStatus};
+use crate::state::AppState;
+use crate::state::AppStatus;
 
 /// Input accepted by `start_live_translation`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,36 +32,42 @@ fn default_difference_threshold() -> f32 {
     0.03
 }
 
-/// Opens the selector window and returns the most recently confirmed region.
+/// Opens the selector window and waits for the frontend to confirm a region.
 ///
-/// Region confirmation is performed by the selector frontend through the
-/// `update_live_region` command. Returning `NotInitialized` while the selector is
-/// still open avoids inventing coordinates on the Rust side.
+/// The frontend completes the pending request by calling `update_live_region`.
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 ///
 /// # Errors
 ///
-/// Returns `AppError::NotInitialized` until the selector confirms a region, or
-/// a Tauri error when the selector window cannot be shown.
+/// Returns an application error when the selector is unavailable, another
+/// selection is pending, or the frontend closes the selection request.
 pub async fn start_region_selection(state: State<'_, AppState>) -> Result<ScreenRegion, AppError> {
     let app = state.app_handle()?;
-    if let Some(window) = app.get_webview_window("selector") {
-        window
-            .show()
-            .map_err(|error| AppError::Tauri(error.to_string()))?;
-        window
-            .set_focus()
-            .map_err(|error| AppError::Tauri(error.to_string()))?;
-    } else {
+    select_region(app, state.inner()).await
+}
+
+pub(crate) async fn select_region(
+    app: AppHandle,
+    state: &AppState,
+) -> Result<ScreenRegion, AppError> {
+    let receiver = state.begin_region_selection().await?;
+    let Some(window) = app.get_webview_window("selector") else {
+        state.cancel_region_selection().await;
         tracing::warn!("selector window is not configured");
         return Err(AppError::NotInitialized);
+    };
+    if let Err(error) = window.show().and_then(|()| window.set_focus()) {
+        state.cancel_region_selection().await;
+        return Err(AppError::Tauri(error.to_string()));
     }
-
-    state.selected_region().ok_or_else(|| {
-        tracing::debug!("region selector opened; waiting for frontend confirmation");
-        AppError::NotInitialized
-    })
+    match receiver.await {
+        Ok(region) => {
+            let _ = window.hide();
+            Ok(region)
+        }
+        Err(_) => Err(AppError::NotInitialized),
+    }
 }
 
 /// Runs one capture, OCR, and translation pipeline pass and returns OCR text.
@@ -103,10 +110,20 @@ pub async fn start_live_translation(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     let app = state.app_handle()?;
+    start_live_task(app, state.inner(), config).await
+}
+
+/// Shared live task starter used by both commands and global shortcuts.
+pub(crate) async fn start_live_task(
+    app: AppHandle,
+    state: &AppState,
+    config: LiveTranslationConfig,
+) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
-    state.set_selected_region(config.region.clone())?;
+    state.set_selected_region(config.region.clone()).await?;
     let pipeline = state.build_pipeline(
         PipelineMode::LiveRegion,
         config.region,
@@ -114,31 +131,40 @@ pub async fn start_live_translation(
         config.difference_threshold,
     )?;
     let pipeline = state.set_pipeline(pipeline);
-    let (event_tx, mut event_rx) = mpsc::channel(32);
-    let app_for_task = app.clone();
-    let task = tokio::spawn(async move {
-        let run = pipeline.run(event_tx);
-        tokio::pin!(run);
-        loop {
-            tokio::select! {
-                result = &mut run => {
-                    if let Err(error) = result {
-                        emit_pipeline_event(&app_for_task, PipelineEvent::Error(error));
-                    }
-                    break;
-                }
-                event = event_rx.recv() => {
-                    match event {
-                        Some(event) => emit_pipeline_event(&app_for_task, event),
-                        None => break,
-                    }
-                }
-            }
-        }
-    });
+    let (event_tx, event_rx) = mpsc::channel(32);
+    let task = tokio::spawn(run_live_task(app, pipeline, event_tx, event_rx));
     *state.live_task.lock().await = Some(task);
     tracing::info!("live translation started");
     Ok(())
+}
+
+async fn run_live_task(
+    app: AppHandle,
+    pipeline: std::sync::Arc<vtrans_pipeline::Pipeline>,
+    event_tx: mpsc::Sender<PipelineEvent>,
+    mut event_rx: mpsc::Receiver<PipelineEvent>,
+) {
+    let run = pipeline.run(event_tx);
+    tokio::pin!(run);
+    loop {
+        tokio::select! {
+            result = &mut run => {
+                if let Err(error) = result {
+                    emit_pipeline_event(&app, PipelineEvent::Error(error));
+                }
+                while let Some(event) = event_rx.recv().await {
+                    emit_pipeline_event(&app, event);
+                }
+                break;
+            }
+            event = event_rx.recv() => {
+                match event {
+                    Some(event) => emit_pipeline_event(&app, event),
+                    None => break,
+                }
+            }
+        }
+    }
 }
 
 /// Stops the live pipeline and waits for its task to finish.
@@ -147,20 +173,39 @@ pub async fn start_live_translation(
 ///
 /// # Errors
 ///
-/// Returns `PipelineError::NotRunning` when no live pipeline is active, or a
-/// task/pipeline error when shutdown cannot complete.
+/// Returns an application error when no live pipeline is active or shutdown
+/// cannot complete.
 pub async fn stop_live_translation(state: State<'_, AppState>) -> Result<(), AppError> {
-    let pipeline = state.pipeline().ok_or(AppError::NotInitialized)?;
+    stop_live_task(state.inner()).await
+}
+
+/// Shared live task stopper used by commands and global shortcuts.
+pub(crate) async fn stop_live_task(state: &AppState) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
+    let pipeline = state.pipeline().ok_or(PipelineError::NotRunning)?;
+    {
+        let mut task = state.live_task.lock().await;
+        if task
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            let _ = task.take();
+        }
+        if task.is_none() {
+            return Err(PipelineError::NotRunning.into());
+        }
+    }
     pipeline.stop().await?;
     if let Some(task) = state.live_task.lock().await.take() {
         task.await
             .map_err(|error| AppError::Tauri(format!("live task join failed: {error}")))?;
     }
+    state.clear_pipeline();
     tracing::info!("live translation stopped");
     Ok(())
 }
 
-/// Updates the active live capture region.
+/// Updates the active live capture region or completes a pending selection.
 #[tauri::command]
 #[tracing::instrument(skip(state, region))]
 ///
@@ -172,7 +217,7 @@ pub async fn update_live_region(
     region: ScreenRegion,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
-    state.set_selected_region(region.clone())?;
+    state.set_selected_region(region.clone()).await?;
     if let Some(pipeline) = state.pipeline() {
         pipeline
             .update_region(region)
@@ -188,11 +233,16 @@ pub async fn update_live_region(
 ///
 /// # Errors
 ///
-/// Returns an application error when the configuration cannot be persisted.
+/// Returns an application error when the configuration cannot be persisted or
+/// a live task is currently running.
 pub async fn set_ocr_language(
     language: Language,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
+    if state.live_task_is_running().await {
+        return Err(PipelineError::AlreadyRunning.into());
+    }
     state.update_config(|config| config.ocr.language = language)?;
     state.clear_pipeline();
     tracing::info!(language = language.code(), "OCR language updated");
@@ -205,12 +255,16 @@ pub async fn set_ocr_language(
 ///
 /// # Errors
 ///
-/// Returns an application error for an unsupported provider or a failed
-/// provider/configuration update.
+/// Returns an application error for an unsupported provider, a failed
+/// provider/configuration update, or an active live task.
 pub async fn set_translation_provider(
     provider_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
+    if state.live_task_is_running().await {
+        return Err(PipelineError::AlreadyRunning.into());
+    }
     state.set_translation_provider_id(&provider_id)?;
     tracing::info!(provider = provider_id, "translation provider selected");
     Ok(())
@@ -241,13 +295,19 @@ pub async fn load_local_models(
 ///
 /// # Errors
 ///
-/// Returns an application error when validation or atomic persistence fails.
+/// Returns an application error when validation or atomic persistence fails,
+/// or a live task is currently running.
 pub async fn save_settings(
     settings: vtrans_config::AppConfig,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
+    if state.live_task_is_running().await {
+        return Err(PipelineError::AlreadyRunning.into());
+    }
+    let provider = state.prepare_translation_provider(&settings)?;
     state.save_config(&settings)?;
-    state.clear_pipeline();
+    state.replace_translation_provider(provider);
     tracing::info!("application settings saved");
     Ok(())
 }

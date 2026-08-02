@@ -17,6 +17,8 @@ vtrans-translation = { workspace = true }
 vtrans-models = { workspace = true }
 vtrans-pipeline = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
+tokio-util = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

@@ -4,12 +4,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tauri::AppHandle;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use vtrans_capture::WindowsCaptureSource;
 use vtrans_config::{AppConfig, ConfigManager};
-use vtrans_core::traits::{OcrProvider, TranslationProvider};
+use vtrans_core::traits::{CaptureSource, OcrProvider, TranslationProvider};
 use vtrans_core::{OcrOptions, PipelineMode, PipelineStatus, ScreenRegion, TranslationRequest};
 use vtrans_models::{ModelManager, VerifyReport};
 use vtrans_ocr::PaddleOcrProvider;
@@ -19,35 +19,55 @@ use vtrans_translation::{ApiTranslationProvider, LocalTranslationProvider};
 
 use crate::error::AppError;
 
+/// A serializable snapshot returned by the `get_app_status` command.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppStatus {
+    /// Current pipeline status.
     pub pipeline_status: PipelineStatus,
+    /// Stable identifier of the configured OCR provider.
     pub ocr_provider: String,
+    /// Stable identifier of the configured translation provider.
     pub translation_provider: String,
+    /// Last selected region, when one has been selected.
     pub selected_region: Option<ScreenRegion>,
+    /// Whether the live task has been started and has not finished.
     pub live_running: bool,
+    /// Current model loading progress, if a load is in progress.
     pub model_progress: Option<f32>,
 }
 
+/// Application-wide state managed by Tauri.
+///
+/// Providers are stored behind Arc and injected into each pipeline through
+/// small trait-object adapters. This avoids reloading ONNX sessions and
+/// recreating the capture backend for every command while preserving the
+/// ownership contract required by `PipelineDeps`.
 pub struct AppState {
     pub(crate) config: std::sync::RwLock<ConfigManager>,
     pub(crate) credentials: CredentialManager,
     pub(crate) pipeline: std::sync::RwLock<Option<Arc<Pipeline>>>,
-    pub(crate) ocr_provider: std::sync::RwLock<Box<dyn OcrProvider>>,
-    pub(crate) translation_provider: std::sync::RwLock<Box<dyn TranslationProvider>>,
-    pub(crate) capture_source: WindowsCaptureSource,
+    pub(crate) ocr_provider: std::sync::RwLock<Arc<dyn OcrProvider>>,
+    pub(crate) translation_provider: std::sync::RwLock<Arc<dyn TranslationProvider>>,
+    pub(crate) capture_source: Arc<WindowsCaptureSource>,
     pub(crate) model_manager: ModelManager,
     selected_region: std::sync::RwLock<Option<ScreenRegion>>,
     pub(crate) live_task: Mutex<Option<JoinHandle<()>>>,
+    pub(crate) live_lifecycle: Mutex<()>,
+    selection_waiter: Mutex<Option<oneshot::Sender<ScreenRegion>>>,
     app_handle: std::sync::RwLock<Option<AppHandle>>,
     model_progress: std::sync::RwLock<Option<f32>>,
 }
 
 impl AppState {
+    /// Constructs the application state and all production providers.
+    ///
+    /// `app_data_dir` is used for config.json and, unless overridden by the
+    /// persisted configuration, for a models/manifest.json directory.
     ///
     /// # Errors
     ///
-    /// Returns an application error when config, models, capture, OCR, or translation cannot initialize.
+    /// Returns an application error when config, models, capture, OCR, or
+    /// translation cannot initialize.
     #[tracing::instrument(skip(app_data_dir))]
     pub fn new(app_data_dir: &Path) -> Result<Self, AppError> {
         let config_manager = ConfigManager::new(app_data_dir)?;
@@ -58,9 +78,9 @@ impl AppState {
             .clone()
             .unwrap_or_else(|| app_data_dir.join("models"));
         let model_manager = ModelManager::from_manifest_dir(&model_dir)?;
-        let capture_source = WindowsCaptureSource::new()?;
+        let capture_source = Arc::new(WindowsCaptureSource::new()?);
         let ocr_provider =
-            Box::new(PaddleOcrProvider::from_manager(&model_manager)?) as Box<dyn OcrProvider>;
+            Arc::new(PaddleOcrProvider::from_manager(&model_manager)?) as Arc<dyn OcrProvider>;
         let translation_provider =
             build_translation_provider(&config, &credentials, &model_manager)?;
         info!(
@@ -79,6 +99,8 @@ impl AppState {
             model_manager,
             selected_region: std::sync::RwLock::new(None),
             live_task: Mutex::new(None),
+            live_lifecycle: Mutex::new(()),
+            selection_waiter: Mutex::new(None),
             app_handle: std::sync::RwLock::new(None),
             model_progress: std::sync::RwLock::new(None),
         })
@@ -94,6 +116,22 @@ impl AppState {
             .unwrap_or_else(poison_inner)
             .clone()
             .ok_or(AppError::NotInitialized)
+    }
+
+    pub(crate) async fn begin_region_selection(
+        &self,
+    ) -> Result<oneshot::Receiver<ScreenRegion>, AppError> {
+        let (sender, receiver) = oneshot::channel();
+        let mut waiter = self.selection_waiter.lock().await;
+        if waiter.is_some() {
+            return Err(AppError::SelectionInProgress);
+        }
+        *waiter = Some(sender);
+        Ok(receiver)
+    }
+
+    pub(crate) async fn cancel_region_selection(&self) {
+        let _ = self.selection_waiter.lock().await.take();
     }
 
     pub(crate) fn load_config(&self) -> Result<AppConfig, AppError> {
@@ -121,9 +159,12 @@ impl AppState {
             .clone()
     }
 
-    pub(crate) fn set_selected_region(&self, region: ScreenRegion) -> Result<(), AppError> {
+    pub(crate) async fn set_selected_region(&self, region: ScreenRegion) -> Result<(), AppError> {
         region.validate().map_err(AppError::from)?;
-        *self.selected_region.write().unwrap_or_else(poison_inner) = Some(region);
+        *self.selected_region.write().unwrap_or_else(poison_inner) = Some(region.clone());
+        if let Some(sender) = self.selection_waiter.lock().await.take() {
+            let _ = sender.send(region);
+        }
         Ok(())
     }
 
@@ -156,15 +197,31 @@ impl AppState {
             ocr_options,
             translation_request,
         );
-        let capture = Box::new(WindowsCaptureSource::new()?) as Box<dyn vtrans_core::CaptureSource>;
-        let ocr =
-            Box::new(PaddleOcrProvider::from_manager(&self.model_manager)?) as Box<dyn OcrProvider>;
-        let translation =
-            build_translation_provider(&config, &self.credentials, &self.model_manager)?;
+        let capture = Box::new(SharedCaptureSource(Arc::clone(&self.capture_source)))
+            as Box<dyn CaptureSource>;
+        let ocr = Box::new(SharedOcrProvider(
+            self.ocr_provider
+                .read()
+                .unwrap_or_else(poison_inner)
+                .clone(),
+        )) as Box<dyn OcrProvider>;
+        let translation = Box::new(SharedTranslationProvider(
+            self.translation_provider
+                .read()
+                .unwrap_or_else(poison_inner)
+                .clone(),
+        )) as Box<dyn TranslationProvider>;
         Ok(Pipeline::new(
             pipeline_config,
             PipelineDeps::new(capture, ocr, translation),
         ))
+    }
+
+    pub(crate) fn prepare_translation_provider(
+        &self,
+        config: &AppConfig,
+    ) -> Result<Arc<dyn TranslationProvider>, AppError> {
+        build_translation_provider(config, &self.credentials, &self.model_manager)
     }
 
     pub(crate) fn set_translation_provider_id(&self, provider_id: &str) -> Result<(), AppError> {
@@ -176,13 +233,13 @@ impl AppState {
         }
         let mut config = self.load_config()?;
         config.translation.provider = provider_id.to_string();
-        let provider = build_translation_provider(&config, &self.credentials, &self.model_manager)?;
+        let provider = self.prepare_translation_provider(&config)?;
         self.save_config(&config)?;
         self.replace_translation_provider(provider);
         Ok(())
     }
 
-    pub(crate) fn replace_translation_provider(&self, provider: Box<dyn TranslationProvider>) {
+    pub(crate) fn replace_translation_provider(&self, provider: Arc<dyn TranslationProvider>) {
         let id = provider.id();
         *self
             .translation_provider
@@ -255,18 +312,84 @@ impl AppState {
     }
 }
 
+#[derive(Clone)]
+struct SharedCaptureSource(Arc<WindowsCaptureSource>);
+
+#[async_trait::async_trait]
+impl CaptureSource for SharedCaptureSource {
+    async fn capture_once(
+        &self,
+        region: &ScreenRegion,
+    ) -> Result<vtrans_core::CapturedImage, vtrans_core::CaptureError> {
+        self.0.capture_once(region).await
+    }
+
+    async fn start_session(
+        &self,
+        region: &ScreenRegion,
+    ) -> Result<Box<dyn vtrans_core::CaptureSession>, vtrans_core::CaptureError> {
+        self.0.start_session(region).await
+    }
+}
+
+#[derive(Clone)]
+struct SharedOcrProvider(Arc<dyn OcrProvider>);
+
+#[async_trait::async_trait]
+impl OcrProvider for SharedOcrProvider {
+    fn id(&self) -> &'static str {
+        self.0.id()
+    }
+
+    async fn recognize(
+        &self,
+        image: &vtrans_core::CapturedImage,
+        region: &ScreenRegion,
+        options: &OcrOptions,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<vtrans_core::OcrResult, vtrans_core::OcrError> {
+        self.0.recognize(image, region, options, cancel).await
+    }
+
+    fn supported_languages(&self) -> &[vtrans_core::Language] {
+        self.0.supported_languages()
+    }
+}
+
+#[derive(Clone)]
+struct SharedTranslationProvider(Arc<dyn TranslationProvider>);
+
+#[async_trait::async_trait]
+impl TranslationProvider for SharedTranslationProvider {
+    fn id(&self) -> &'static str {
+        self.0.id()
+    }
+
+    async fn translate(
+        &self,
+        request: &vtrans_core::TranslationRequest,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<vtrans_core::TranslationResult, vtrans_core::TranslationError> {
+        self.0.translate(request, cancel).await
+    }
+
+    fn supported_pairs(&self) -> &[(vtrans_core::Language, vtrans_core::Language)] {
+        self.0.supported_pairs()
+    }
+}
+
 fn build_translation_provider(
     config: &AppConfig,
     credentials: &CredentialManager,
     model_manager: &ModelManager,
-) -> Result<Box<dyn TranslationProvider>, AppError> {
+) -> Result<Arc<dyn TranslationProvider>, AppError> {
     match config.translation.provider.as_str() {
         "api" => {
             let key = credentials.load("translation")?.unwrap_or_else(|| {
                 warn!("translation API credential is not configured");
                 String::new()
             });
-            Ok(Box::new(ApiTranslationProvider::new(
+            Ok(Arc::new(ApiTranslationProvider::new(
                 &config.translation.api_endpoint,
                 &config.translation.api_model,
                 &key,
@@ -274,7 +397,7 @@ fn build_translation_provider(
                 config.translation.max_retries,
             )))
         }
-        "local" => Ok(Box::new(LocalTranslationProvider::from_manager(
+        "local" => Ok(Arc::new(LocalTranslationProvider::from_manager(
             model_manager,
         )?)),
         provider => {

@@ -5403,6 +5403,7 @@ dependencies = [
 name = "vtrans-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "directories",
  "serde",
  "serde_json",
@@ -5410,6 +5411,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "vtrans-capture",
  "vtrans-config",

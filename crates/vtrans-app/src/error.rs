@@ -16,6 +16,14 @@ pub enum AppError {
     #[error("state not initialized")]
     NotInitialized,
 
+    /// A region selection request is already waiting for frontend confirmation.
+    #[error("region selection already in progress")]
+    SelectionInProgress,
+
+    /// A core validation or serialization error.
+    #[error("core error: {0}")]
+    Core(CoreError),
+
     /// The pipeline failed.
     #[error("pipeline error: {0}")]
     Pipeline(#[from] PipelineError),
@@ -68,7 +76,10 @@ impl serde::Serialize for AppError {
 
 impl From<CoreError> for AppError {
     fn from(error: CoreError) -> Self {
-        Self::InvalidRegion(error.to_string())
+        match error {
+            CoreError::InvalidRegion(message) => Self::InvalidRegion(message),
+            other => Self::Core(other),
+        }
     }
 }
 
@@ -89,7 +100,7 @@ mod tests {
     #[test]
     fn maps_core_validation_errors() {
         let error = AppError::from(CoreError::UnsupportedLanguage(Language::Japanese));
-        assert!(matches!(error, AppError::InvalidRegion(_)));
+        assert!(matches!(error, AppError::Core(_)));
         assert!(error.to_string().contains("unsupported language"));
     }
 }
