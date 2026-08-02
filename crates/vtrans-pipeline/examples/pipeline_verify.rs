@@ -34,6 +34,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use vtrans_capture::WindowsCaptureSource;
 use vtrans_core::types::{Language, OcrOptions, ScreenRegion, TranslationRequest};
+use vtrans_core::TranslationError;
 use vtrans_models::ModelManager;
 use vtrans_ocr::PaddleOcrProvider;
 use vtrans_pipeline::{Pipeline, PipelineConfig, PipelineDeps, PipelineEvent};
@@ -72,7 +73,14 @@ struct CliArgs {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args = parse_args(&args)?;
 
@@ -96,7 +104,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ocr = PaddleOcrProvider::from_manager(&manager)?;
 
     // 3. Translation provider: local ONNX or OpenAI-compatible API.
-    let translation = build_translation(&args, &manager)?;
+    if matches!(args.translation, TranslationChoice::Local) {
+        check_local_pair(&manager, args.language, args.target)?;
+    }
+    let translation = match build_translation(&args, &manager) {
+        Ok(provider) => provider,
+        Err(TranslationError::ModelLoad(message)) => {
+            eprintln!("本地翻译模型加载失败: {message}");
+            eprintln!();
+            eprintln!("提示：LocalTranslationProvider 期望「逐 token 解码」型 ONNX 导出（输入须含");
+            eprintln!(
+                "      decoder_input_ids，输出 logits）；当前 model.onnx 是「整图生成」型导出"
+            );
+            eprintln!(
+                "      （输入 num_beams/min_length/max_length 等，输出 sequences），格式不兼容。"
+            );
+            eprintln!("      这是 scripts/download_models.ps1 与 vtrans-translation 的集成问题（模块 07）。");
+            eprintln!("      现在可改用 API 翻译验证全管线：--api-endpoint <url> --api-model <name> --api-key <key>");
+            std::process::exit(2);
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     // 4. Assemble and run the pipeline.
     let options = OcrOptions {
@@ -146,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn build_translation(
     args: &CliArgs,
     manager: &ModelManager,
-) -> Result<Box<dyn vtrans_core::TranslationProvider>, Box<dyn std::error::Error>> {
+) -> Result<Box<dyn vtrans_core::TranslationProvider>, TranslationError> {
     match &args.translation {
         TranslationChoice::Local => {
             let provider = LocalTranslationProvider::from_manager(manager)?;
@@ -164,6 +192,32 @@ fn build_translation(
             Ok(Box::new(provider))
         }
     }
+}
+
+/// Fails with an actionable message when the local model does not declare
+/// the requested language pair.
+fn check_local_pair(
+    manager: &ModelManager,
+    source: Language,
+    target: Language,
+) -> Result<(), String> {
+    let Some(group) = manager.manifest().translation.as_ref() else {
+        return Err("manifest.json 没有声明 translation 模型组".to_string());
+    };
+    if group.supported_pairs.contains(&(source, target)) {
+        return Ok(());
+    }
+    let pairs: Vec<String> = group
+        .supported_pairs
+        .iter()
+        .map(|(s, t)| format!("{}->{}", s.code(), t.code()))
+        .collect();
+    Err(format!(
+        "本地翻译模型不支持 {}->{}（支持: {}）。请改用 API 翻译：--api-endpoint/--api-model/--api-key。",
+        source.code(),
+        target.code(),
+        pairs.join(", ")
+    ))
 }
 
 /// Picks a centered 800x600 region on the primary monitor (or the first

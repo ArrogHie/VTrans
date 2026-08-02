@@ -159,16 +159,25 @@ cargo fmt --all -- --check
 
 前置条件：
 
-1. 运行 `scripts/download_models.ps1` 下载 OCR（及本地翻译）模型到 `src-tauri/resources/models`，
+1. 运行 `scripts/download_models.ps1` 下载 OCR 模型到 `src-tauri/resources/models`，
    目录下需要有 `manifest.json` 与对应 `.onnx` / 字典文件；
 2. 需要交互式 Windows 桌面会话（远程会话 / 无桌面可能初始化失败）；
 3. 屏幕目标区域里先放好要翻译的内容（如打开一个日文网页）。
 
-单次截屏翻译：
+> 本地翻译模型说明（重要）：当前 manifest 声明的本地翻译模型是 `opus-mt-en-zh`，仅支持
+> `en -> zh-CN`；且下载脚本导出的 ONNX 是「整图生成」型（输入 `num_beams/min_length/...`，
+> 输出 `sequences`），与 `LocalTranslationProvider` 期望的「逐 token 解码」型（输入须含
+> `decoder_input_ids`，输出 `logits`）不兼容。这是 `scripts/download_models.ps1` 与
+> `vtrans-translation` 的集成问题（模块 07，见「已知限制」）。因此全管线验证目前请走 **API 翻译**
+> 路径；本地翻译模式会得到明确诊断并按错误码 2 退出。
+
+单次截屏翻译（API 路径，可验证全管线）：
 
 ```powershell
 cargo run -p vtrans-pipeline --example pipeline_verify -- `
   --models src-tauri/resources/models `
+  --api-endpoint https://api.example.com/v1/chat/completions `
+  --api-model translator --api-key $env:VTRANS_API_KEY `
   --language ja --target zh-CN --mode single `
   --region 100,100,800,400
 ```
@@ -178,23 +187,27 @@ cargo run -p vtrans-pipeline --example pipeline_verify -- `
 ```powershell
 cargo run -p vtrans-pipeline --example pipeline_verify -- `
   --models src-tauri/resources/models `
-  --language ja --target zh-CN --mode live `
-  --interval-ms 500 --threshold 0.02
-```
-
-API 翻译（OCR 仍需模型，翻译走 OpenAI-compatible 接口）：
-
-```powershell
-cargo run -p vtrans-pipeline --example pipeline_verify -- `
-  --models src-tauri/resources/models `
   --api-endpoint https://api.example.com/v1/chat/completions `
   --api-model translator --api-key $env:VTRANS_API_KEY `
-  --language en --target zh-CN --mode single
+  --language ja --target zh-CN --mode live `
+  --interval-ms 500 --threshold 0.02
 ```
 
 预期输出：`[capture]` / `[ocr]` / `--- recognized text ---` / `[translate]` / `--- translated text ---`
 分阶段打印；单次模式结束时打印 `[pipeline] single capture completed`，实时模式按 Ctrl+C 后打印
 `[pipeline] stopped`。若 OCR 无文本，会跳过翻译（符合指纹去重与空文本语义）。
+
+## 8. 已知限制 / 上游集成问题
+
+- **本地翻译模型格式不兼容（模块 07）**：`scripts/download_models.ps1` 用 `teradata-opus-translate`
+  导出的 `translation/model.onnx` 是整图生成接口（输入 `input_ids/attention_mask/num_beams/
+  min_length/max_length/length_penalty/repetition_penalty`，输出 `sequences`），而
+  `LocalTranslationProvider` 实现的是逐 token 解码接口（输入须含 `decoder_input_ids`，输出
+  `logits`）。`pipeline_verify` 会先做语言对预检（基于 manifest `supported_pairs`），再做模型
+  加载并输出可执行建议；待模块 07 统一导出格式与 Provider 实现。
+- 本地模型语言对有限：`opus-mt-en-zh` 仅支持 `en -> zh-CN`；其他语言对请走 API 翻译。
+- 示例 CLI 不读取 `vtrans-security` 凭据，API Key 通过命令行/环境变量注入（应用层才使用
+  CredentialManager）。
 
 ## 详细规格
 
