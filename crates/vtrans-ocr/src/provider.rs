@@ -491,6 +491,10 @@ fn load_session(path: &Path, id: &str) -> Result<Session, OcrError> {
 }
 
 /// Load a recognition session plus its dictionary.
+///
+/// The character table embedded in the ONNX metadata (`character` key) is the
+/// authoritative source for `RapidOCR` PP-OCR models; the manifest dictionary
+/// file is only used as a fallback when that metadata is missing.
 fn load_recognizer(
     models_dir: &Path,
     entry: &ModelEntry,
@@ -501,42 +505,66 @@ fn load_recognizer(
         OcrError::InvalidManifest(format!("missing dictionary for language {language}"))
     })?;
     let session = load_session(&models_dir.join(&entry.path), &entry.id)?;
-    let dict = load_dict(&models_dir.join(dict_path))?;
+    let dict = session
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.custom("character"))
+        .map(|raw| {
+            build_character_dict(
+                raw.lines()
+                    .map(|line| line.trim_end_matches('\r').to_string())
+                    .collect(),
+            )
+        })
+        .or_else(|| load_dict(&models_dir.join(dict_path)).ok())
+        .ok_or_else(|| {
+            OcrError::InvalidManifest(format!("no usable character table for language {language}"))
+        })?;
     Ok(Arc::new(Recognizer::new(session, dict)?))
 }
 
 /// Load a dictionary file, ensuring the CTC blank occupies index 0.
 ///
-/// PP-OCR recognition models output `num_classes = non-blank line count + 1`,
-/// so the dictionary must come from the same model release. The bundled
-/// PP-OCRv4 models expect 96 lines for English and 4400 lines for Japanese.
+/// Follows the `RapidOCR` character-table convention used by the bundled
+/// PP-OCRv4 ONNX models: `num_classes = splitlines(dict) + 2` (one trailing
+/// space plus the blank at index 0). The embedded PP-OCRv4 character tables
+/// contain 96 lines for English and 4400 lines for Japanese.
 fn load_dict(path: &Path) -> Result<Vec<String>, OcrError> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         tracing::error!(path = %path.display(), error = %e, "dictionary load failed");
         OcrError::ModelLoad(e.to_string())
     })?;
     let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
-    let mut dict: Vec<String> = content
+    let lines: Vec<String> = content
         .lines()
         .map(|line| line.trim_end_matches('\r').to_string())
         .collect();
-    if dict.is_empty() {
+    if lines.is_empty() {
         return Err(OcrError::InvalidManifest(format!(
             "dictionary is empty: {}",
             path.display()
         )));
     }
-    if dict[0].is_empty() || dict[0] == "blank" {
-        dict[0] = String::new();
-    } else {
-        dict.insert(0, String::new());
-    }
+    let dict = build_character_dict(lines);
     tracing::info!(
         chars = dict.len(),
         path = %path.display(),
         "dictionary loaded"
     );
     Ok(dict)
+}
+
+/// Build the final CTC character table for a PP-OCR recognition model.
+///
+/// Mirrors the `RapidOCR` `CTCLabelDecode` convention: append a trailing space
+/// (space is not in the character file for these models) and insert the blank
+/// token at index 0 when it is not already present.
+fn build_character_dict(mut lines: Vec<String>) -> Vec<String> {
+    lines.push(' '.to_string());
+    if lines.first().is_some_and(|first| !first.is_empty()) {
+        lines.insert(0, String::new());
+    }
+    lines
 }
 
 /// Find the dictionary key used by the optional multi-language model.
@@ -634,7 +662,7 @@ mod tests {
         let path = dir.path().join("dict.txt");
         std::fs::write(&path, "a\nb\n").unwrap();
         let dict = load_dict(&path).unwrap();
-        assert_eq!(dict, vec!["", "a", "b"]);
+        assert_eq!(dict, vec!["", "a", "b", " "]);
     }
 
     #[test]
@@ -643,7 +671,19 @@ mod tests {
         let path = dir.path().join("dict.txt");
         std::fs::write(&path, "\na\nb\n").unwrap();
         let dict = load_dict(&path).unwrap();
-        assert_eq!(dict, vec!["", "a", "b"]);
+        assert_eq!(dict, vec!["", "a", "b", " "]);
+    }
+
+    #[test]
+    fn build_character_dict_matches_model_class_count() {
+        // The embedded en table has 95 splitlines entries (94 chars + space);
+        // RapidOCR appends another space and inserts blank at index 0, giving
+        // 97 entries matching the rec_en.onnx output classes.
+        let embedded: Vec<String> = (0..95).map(|index| index.to_string()).collect();
+        let dict = build_character_dict(embedded);
+        assert_eq!(dict.len(), 97);
+        assert_eq!(dict[0], "");
+        assert_eq!(dict.last().map(String::as_str), Some(" "));
     }
 
     #[test]
@@ -652,7 +692,7 @@ mod tests {
         let path = dir.path().join("dict.txt");
         std::fs::write(&path, "blank\na\n").unwrap();
         let dict = load_dict(&path).unwrap();
-        assert_eq!(dict, vec!["", "a"]);
+        assert_eq!(dict, vec!["", "blank", "a", " "]);
     }
 
     #[test]

@@ -133,7 +133,7 @@ serde 表示：`OcrResult`、`OcrLine`、`OcrOptions` 等来自 `vtrans-core`，
 | `CapturedImage` 不实现 `Serialize`，无法通过 Tauri IPC 传输 | 只传输文本、状态或缩略图，图像留在 Rust 侧 |
 | capture 已按 region 裁剪后，仍传入带偏移的 region，导致二次裁剪 | 传入 `(0, 0, image.width, image.height)` 或与图像一致的 region |
 | 误以为 `from_manager` 会校验全部模型（含翻译模型） | 需要全量校验时，在应用层先调用 `manager.verify_integrity()` |
-| 字典行数与模型输出类数不匹配，`recognize` 报 Postprocess 错误 | PP-OCR 约定 `num_classes = 字典非空行数 + 1`（blank 占 index 0）；从与 rec 模型同版本同源的发布下载完整字典（en 96、ja 4400 字符），`load_dict` 会自动插入 blank |
+| 字典行数与模型输出类数不匹配，`recognize` 报 Postprocess 错误 | 优先使用 ONNX 模型内嵌的 `character` 元数据（RapidOCR PP-OCRv4：en 96 行、ja 4400 行）；仅当元数据缺失时才回退 manifest 字典文件 |
 
 ## 7. 设计决策记录
 
@@ -163,7 +163,7 @@ serde 表示：`OcrResult`、`OcrLine`、`OcrOptions` 等来自 `vtrans-core`，
 | 推理串行 | 同一 provider 的并发识别请求排队 | 减少并发请求，或按模型拆分实例 |
 | `from_manager` 只校验 OCR 组 | 翻译模型缺失不影响 OCR 构造 | 需要全量校验时应用层自行调用 |
 | 混排排序为启发式 | 复杂版式阅读顺序仍可能不完美 | 接受质量回归，或后续引入版面分析 |
-| 字典必须与 rec 模型同版本配套 | 类数不匹配时识别返回 `OcrError::Postprocess`，需要人工核对字典 | 使用与模型同源发布的完整字典（en 96 字符、ja 4400 字符） |
+| 非 RapidOCR 模型若无内嵌 `character` 元数据 | 字符表必须由 manifest 字典文件提供，行数约定可能不同 | 为这类模型单独导出匹配字典，或在模块内补充字典来源配置 |
 
 ## 9. 构建与测试
 
