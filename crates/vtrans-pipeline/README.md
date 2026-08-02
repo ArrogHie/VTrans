@@ -151,6 +151,51 @@ cargo fmt --all -- --check
 并发峰值），覆盖：单次完整链路、错误上报、取消、帧差跳过、指纹去重、旧任务取消、并发上限、
 停止清理、区域更新、背压有界、会话自然结束。
 
+## 7. 人工验证（全管线：采集屏幕 -> OCR -> 翻译 -> 输出）
+
+`examples/pipeline_verify.rs` 是完整管线验证 CLI：用真实 `WindowsCaptureSource` 采集屏幕、
+`PaddleOcrProvider` 识别、`ApiTranslationProvider` / `LocalTranslationProvider` 翻译，并把
+识别文本与译文打印到终端。
+
+前置条件：
+
+1. 运行 `scripts/download_models.ps1` 下载 OCR（及本地翻译）模型到 `src-tauri/resources/models`，
+   目录下需要有 `manifest.json` 与对应 `.onnx` / 字典文件；
+2. 需要交互式 Windows 桌面会话（远程会话 / 无桌面可能初始化失败）；
+3. 屏幕目标区域里先放好要翻译的内容（如打开一个日文网页）。
+
+单次截屏翻译：
+
+```powershell
+cargo run -p vtrans-pipeline --example pipeline_verify -- `
+  --models src-tauri/resources/models `
+  --language ja --target zh-CN --mode single `
+  --region 100,100,800,400
+```
+
+实时翻译（Ctrl+C 停止；`--region` 不传时默认主显示器居中 800x600）：
+
+```powershell
+cargo run -p vtrans-pipeline --example pipeline_verify -- `
+  --models src-tauri/resources/models `
+  --language ja --target zh-CN --mode live `
+  --interval-ms 500 --threshold 0.02
+```
+
+API 翻译（OCR 仍需模型，翻译走 OpenAI-compatible 接口）：
+
+```powershell
+cargo run -p vtrans-pipeline --example pipeline_verify -- `
+  --models src-tauri/resources/models `
+  --api-endpoint https://api.example.com/v1/chat/completions `
+  --api-model translator --api-key $env:VTRANS_API_KEY `
+  --language en --target zh-CN --mode single
+```
+
+预期输出：`[capture]` / `[ocr]` / `--- recognized text ---` / `[translate]` / `--- translated text ---`
+分阶段打印；单次模式结束时打印 `[pipeline] single capture completed`，实时模式按 Ctrl+C 后打印
+`[pipeline] stopped`。若 OCR 无文本，会跳过翻译（符合指纹去重与空文本语义）。
+
 ## 详细规格
 
 参见 `docs/modules/09-pipeline.md`。

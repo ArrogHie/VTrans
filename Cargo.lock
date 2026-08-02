@@ -5508,6 +5508,7 @@ dependencies = [
  "tracing",
  "vtrans-capture",
  "vtrans-core",
+ "vtrans-models",
  "vtrans-ocr",
  "vtrans-text",
  "vtrans-translation",
