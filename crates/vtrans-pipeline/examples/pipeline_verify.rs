@@ -113,7 +113,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("本地翻译模型加载失败: {message}");
             eprintln!();
             eprintln!("提示：vtrans-translation 支持「整图生成」（输入 num_beams/min_length/");
-            eprintln!("      max_length 等，输出 sequences）与「逐 token 解码」（含 decoder_input_ids）");
+            eprintln!(
+                "      max_length 等，输出 sequences）与「逐 token 解码」（含 decoder_input_ids）"
+            );
             eprintln!("      两种 ONNX 接口；当前模型与两者都不匹配，请检查模型文件或 manifest。");
             eprintln!("      现在可先用 API 翻译验证全管线：--api-endpoint <url> --api-model <name> --api-key <key>");
             std::process::exit(2);
