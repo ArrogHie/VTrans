@@ -149,7 +149,10 @@ impl Recognizer {
 /// # Errors
 ///
 /// Returns [`OcrError::Postprocess`] if the array shape is unsupported or
-/// the class count does not match the dictionary.
+/// the class count does not match the dictionary. A mismatch usually means
+/// the dictionary and the recognition model come from different PP-OCR
+/// releases; use the dictionary shipped with the same model version
+/// (`num_classes = dictionary line count + 1`, blank at index 0).
 ///
 /// # Example
 ///

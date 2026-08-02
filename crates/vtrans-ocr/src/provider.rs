@@ -506,6 +506,10 @@ fn load_recognizer(
 }
 
 /// Load a dictionary file, ensuring the CTC blank occupies index 0.
+///
+/// PP-OCR recognition models output `num_classes = non-blank line count + 1`,
+/// so the dictionary must come from the same model release. The bundled
+/// PP-OCRv4 models expect 96 lines for English and 4400 lines for Japanese.
 fn load_dict(path: &Path) -> Result<Vec<String>, OcrError> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         tracing::error!(path = %path.display(), error = %e, "dictionary load failed");
