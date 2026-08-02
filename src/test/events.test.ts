@@ -18,4 +18,14 @@ describe("event service", () => {
     cleanup();
     expect(unlisten).toHaveBeenCalledOnce();
   });
+
+  it("passes region_selected payloads as raw screen regions", async () => {
+    const callback = vi.fn();
+    listen.mockImplementationOnce(async (_name: string, handler: (event: { payload: unknown }) => void) => {
+      handler({ payload: { monitor_id: "display-1", x: 0, y: 0, width: 10, height: 20 } });
+      return vi.fn();
+    });
+    await listenToEvent("region_selected", callback);
+    expect(callback).toHaveBeenCalledWith({ monitor_id: "display-1", x: 0, y: 0, width: 10, height: 20 });
+  });
 });

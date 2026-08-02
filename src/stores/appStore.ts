@@ -87,13 +87,22 @@ export const useAppStore = create<AppState>((set) => ({
       config: { ...state.config, translation: { ...state.config.translation, provider } },
     })),
   applyStatus: (status) =>
-    set((state) => ({
-      status: status.pipeline_status,
-      mode: status.live_running ? "live" : state.mode,
-      selectedRegion: status.selected_region,
-      modelProgress: status.model_progress,
-      hydrated: true,
-    })),
+    set((state) => {
+      const provider = status.translation_provider === "api" || status.translation_provider === "local"
+        ? status.translation_provider
+        : state.config.translation.provider;
+      return {
+        status: status.pipeline_status,
+        mode: status.live_running ? "live" : state.mode,
+        selectedRegion: status.selected_region,
+        modelProgress: status.model_progress,
+        config: {
+          ...state.config,
+          translation: { ...state.config.translation, provider },
+        },
+        hydrated: true,
+      };
+    }),
   resetResults: () => set({ ocrResult: null, translationResult: null, error: null }),
 }));
 

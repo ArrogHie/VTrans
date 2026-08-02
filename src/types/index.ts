@@ -136,7 +136,7 @@ export type EventPayloadMap = {
   pipeline_error: PipelineErrorPayload;
   live_session_stopped: StoppedPayload;
   model_loading_progress: ModelProgressPayload;
-  region_selected: ResultPayload<ScreenRegion>;
+  region_selected: ScreenRegion;
 };
 
 export const DEFAULT_CONFIG: AppConfig = {

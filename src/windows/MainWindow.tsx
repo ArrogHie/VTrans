@@ -129,12 +129,20 @@ export function MainWindow() {
 
   const changeOcrLanguage = async (value: string) => {
     const language = value as LanguageCode;
-    updateLanguage("ocr", language);
-    try { await setOcrLanguage(language); } catch (ipcError) { setStatus({ error: getIpcErrorMessage(ipcError) }); }
+    try {
+      await setOcrLanguage(language);
+      updateLanguage("ocr", language);
+    } catch (ipcError) {
+      setStatus({ error: getIpcErrorMessage(ipcError) });
+    }
   };
   const changeProvider = async (provider: "api" | "local") => {
-    setProvider(provider);
-    try { await setTranslationProvider(provider); } catch (ipcError) { setStatus({ error: getIpcErrorMessage(ipcError) }); }
+    try {
+      await setTranslationProvider(provider);
+      setProvider(provider);
+    } catch (ipcError) {
+      setStatus({ error: getIpcErrorMessage(ipcError) });
+    }
   };
   const loadModels = async () => {
     setModelMessage(null);

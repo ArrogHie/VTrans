@@ -50,7 +50,6 @@ function useBackendEvents() {
         subscribeToBackendEvents({
           capture_status_changed: ({ status }) => {
             if (status === "capturing") {
-              setMode("live");
               setStatus("capturing");
             }
           },
@@ -68,11 +67,18 @@ function useBackendEvents() {
           },
           pipeline_error: ({ message }) => setError(message),
           live_session_stopped: () => {
+            const wasPaused = useAppStore.getState().livePaused;
             setStatus("idle");
-            if (!useAppStore.getState().livePaused) setMode("single");
+            if (!wasPaused) {
+              setLiveConfig(null);
+              setLivePaused(false);
+              setMode("single");
+            } else {
+              setMode("live");
+            }
           },
           model_loading_progress: ({ progress }) => setModelProgress(progress),
-          region_selected: ({ result }) => setSelectedRegion(result),
+          region_selected: (region) => setSelectedRegion(region),
         }),
         listenToFrontendOcrResult((result) => {
           setOcrResult(result);

@@ -52,4 +52,15 @@ describe("appStore", () => {
     expect(useAppStore.getState().error).toBe("后端不可用");
     expect(useAppStore.getState().status).toEqual({ error: "后端不可用" });
   });
+  it("hydrates the selected translation provider from backend status", () => {
+    useAppStore.getState().applyStatus({
+      pipeline_status: "idle",
+      ocr_provider: "pp-ocr",
+      translation_provider: "local",
+      selected_region: null,
+      live_running: false,
+      model_progress: null,
+    });
+    expect(useAppStore.getState().config.translation.provider).toBe("local");
+  });
 });
