@@ -32,6 +32,14 @@ export function RegionSelector() {
 
   useEffect(() => {
     let active = true;
+    let unlistenClose: (() => void) | undefined;
+    const currentWindow = getCurrentWindow();
+    void currentWindow.onCloseRequested(async () => {
+      await cancelRegionSelection();
+    }).then((unlisten) => {
+      if (active) unlistenClose = unlisten;
+      else unlisten();
+    });
     void currentMonitor().then((monitor) => {
       if (active && monitor?.name) {
         setMonitorId(monitor.name);
@@ -48,6 +56,7 @@ export function RegionSelector() {
     window.addEventListener("keydown", onKeyDown);
     return () => {
       active = false;
+      unlistenClose?.();
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [confirmSelection]);

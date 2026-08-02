@@ -37,7 +37,7 @@ const TARGET_LANGUAGES = [
 
 export function MainWindow() {
   const {
-    mode, status, error, selectedRegion, config, modelProgress,
+    mode, status, error, selectedRegion, config, modelProgress, liveConfig, livePaused,
     setMode, setStatus, setSelectedRegion, setOcrResult, setProvider, setLiveConfig, setLivePaused, updateLanguage,
   } = useAppStore();
   const [busy, setBusy] = useState(false);
@@ -68,7 +68,14 @@ export function MainWindow() {
         setStatus("completed");
         void showResultWindow();
       } else {
-        setStatus("idle");
+        if (liveConfig) {
+          const updatedLiveConfig = { ...liveConfig, region };
+          setLiveConfig(updatedLiveConfig);
+          void publishFrontendLiveConfig(updatedLiveConfig);
+          setStatus(livePaused ? "idle" : "capturing");
+        } else {
+          setStatus("idle");
+        }
       }
     } catch (ipcError) {
       setStatus({ error: getIpcErrorMessage(ipcError) });
@@ -105,7 +112,9 @@ export function MainWindow() {
   const stopLive = async () => {
     setBusy(true);
     try {
-      await stopLiveTranslation();
+      if (!livePaused) {
+        await stopLiveTranslation();
+      }
       void publishFrontendLiveStopped();
       setLiveConfig(null);
       setLivePaused(false);
