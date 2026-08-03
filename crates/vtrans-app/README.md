@@ -33,6 +33,7 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - serde/serde_json：IPC payload 和错误序列化。
 - thiserror：错误枚举和错误链。
 - tracing：结构化生命周期和错误日志。
+- tracing-appender：持有 `WorkerGuard`，在应用生命周期内刷新非阻塞日志写入器。
 
 所有依赖使用 MIT 或 Apache-2.0 兼容许可证；新增依赖仅在本 crate 的 Cargo.toml 中声明。
 
@@ -75,6 +76,10 @@ save_settings(settings: AppConfig) -> Result<(), AppError>
 get_app_status() -> Result<AppStatus, AppError>
 ~~~
 
+`capture_once` 在流水线运行期间并发消费事件通道，把 `ocr_started`、
+`translation_started` 等阶段事件推送到前端（单次捕获没有 live session，
+因此不发送 `live_session_stopped`），命令本身仍只返回最终的 `OcrResult`。
+
 LiveTranslationConfig 包含 region、capture_interval_ms 和 difference_threshold，字段可直接由前端 JSON 反序列化。
 
 ### Events
@@ -102,6 +107,12 @@ pub fn builder() -> tauri::Builder<tauri::Wry>
 
 src-tauri/src/main.rs 使用 builder()、generate_context!() 和 run() 完成宿主启动；capability 仍由宿主项目维护。
 
+init_app 在解析 app_data_dir 之后、创建 AppState 之前，通过
+`vtrans_core::init_logging` 初始化 tracing：日志同时输出到控制台和
+`app_data_dir/logs`（按小时轮转，保留 5 个文件），级别取配置中的
+`log_level`（`RUST_LOG` 环境变量优先）。返回的 `WorkerGuard` 存入 Tauri
+管理的 `LoggingGuard`，确保非阻塞写入器在应用退出前完成刷新。
+
 ## 构建与测试
 
 在仓库根目录执行：
@@ -128,6 +139,8 @@ cargo check -p vtrans
 ## 日志与安全
 
 - 所有 command、初始化入口和事件转发入口使用 tracing instrumentation。
+- 日志在 setup::init_app 中初始化；若 tracing 已被宿主或测试环境初始化，
+  初始化失败会降级为不记录滚动文件，应用仍可启动。
 - 错误路径记录 warn! 或 error!，正常生命周期记录 info!。
 - API key 从 CredentialManager 读取，不写入 config、事件或日志；翻译 Provider 的 upstream crate 负责 bearer token 注入。
 - 前端事件不传递 CapturedImage，避免截图通过 JSON/Base64 跨越 IPC。
@@ -138,4 +151,5 @@ cargo check -p vtrans
 - 选区窗口的最终坐标由前端通过 update_live_region 确认；start_region_selection 会等待确认结果，Escape/关闭操作应调用 cancel_region_selection。
 - 模型完整性校验通过 blocking pool 执行，避免大文件 SHA-256 计算阻塞 Tokio worker。
 - 全局快捷键由配置字符串解析，冲突或非法快捷键会在启动时返回 HotkeyFailed；当前没有 UI 内热键冲突编辑器。
+- 单次捕获的进度事件（ocr_started 等）由 capture_once 转发，但命令契约仍只返回 OcrResult；前端如需进度提示需同时监听 ocr_started/translation_started。
 - Tauri capability 文件仍由宿主项目维护；生产构建应按窗口和 command 最小化 capability。
