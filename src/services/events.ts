@@ -1,5 +1,10 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { EventPayloadMap, OcrResult, PipelineConfig } from "../types";
+import type {
+  EventPayloadMap,
+  OcrResult,
+  PipelineConfig,
+  TranslationResult,
+} from "../types";
 
 export type Unlisten = UnlistenFn;
 
@@ -9,6 +14,23 @@ export function listenToEvent<K extends keyof EventPayloadMap>(
   callback: (payload: EventPayloadMap[K]) => void,
 ): Promise<Unlisten> {
   return listen<EventPayloadMap[K]>(event, (eventPayload) => callback(eventPayload.payload));
+}
+
+/** Listen for a completed OCR result and receive the unwrapped result. */
+export function onOcrCompleted(callback: (result: OcrResult) => void): Promise<Unlisten> {
+  return listenToEvent("ocr_completed", ({ result }) => callback(result));
+}
+
+/** Listen for a completed translation and receive the unwrapped result. */
+export function onTranslationCompleted(
+  callback: (result: TranslationResult) => void,
+): Promise<Unlisten> {
+  return listenToEvent("translation_completed", ({ result }) => callback(result));
+}
+
+/** Listen for a pipeline error and receive the human-readable message. */
+export function onPipelineError(callback: (message: string) => void): Promise<Unlisten> {
+  return listenToEvent("pipeline_error", ({ message }) => callback(message));
 }
 
 /** Register all pipeline events and return one cleanup function. */

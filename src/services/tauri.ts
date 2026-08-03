@@ -21,6 +21,21 @@ export function getIpcErrorMessage(error: unknown): string {
   return "操作失败，请稍后重试";
 }
 
+/**
+ * Recognizes a deliberately cancelled region selection.
+ *
+ * `vtrans-app` completes a cancelled selection by dropping the pending
+ * oneshot sender, which surfaces as `AppError::NotInitialized` ("state not
+ * initialized"). Treating that single message as a silent cancel keeps the
+ * main window from flashing an error after the user pressed Esc.
+ */
+const REGION_SELECTION_CANCELLED_MESSAGES: readonly string[] = ["state not initialized"];
+
+export function isRegionSelectionCancelled(error: unknown): boolean {
+  const message = getIpcErrorMessage(error);
+  return REGION_SELECTION_CANCELLED_MESSAGES.some((candidate) => message.includes(candidate));
+}
+
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(command, args);

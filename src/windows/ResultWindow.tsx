@@ -3,8 +3,11 @@ import { Pause, Play, Pin, PinOff, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ResultCard } from "../components/ResultCard";
 import {
+  captureOnce,
+  getIpcErrorMessage,
   publishFrontendLiveConfig,
   publishFrontendLivePaused,
+  publishFrontendOcrResult,
   startLiveTranslation,
   stopLiveTranslation,
 } from "../services/tauri";
@@ -17,6 +20,8 @@ export function ResultWindow() {
   const liveConfig = useAppStore((state) => state.liveConfig);
   const livePaused = useAppStore((state) => state.livePaused);
   const setLivePaused = useAppStore((state) => state.setLivePaused);
+  const setOcrResult = useAppStore((state) => state.setOcrResult);
+  const setError = useAppStore((state) => state.setError);
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
 
   useEffect(() => {
@@ -38,12 +43,25 @@ export function ResultWindow() {
     }
     try {
       setLivePaused(true);
-      await publishFrontendLivePaused();
       await stopLiveTranslation();
       // The shared store drives the button in every WebView.
-      setLivePaused(true);
+      await publishFrontendLivePaused();
     } catch {
       setLivePaused(false);
+    }
+  };
+
+  /** Re-runs a single capture on the last selected region. */
+  const retranslate = async () => {
+    if (mode === "live") return;
+    const region = useAppStore.getState().selectedRegion;
+    if (!region) return;
+    try {
+      const result = await captureOnce(region);
+      setOcrResult(result);
+      void publishFrontendOcrResult(result);
+    } catch (error) {
+      setError(getIpcErrorMessage(error));
     }
   };
 
@@ -68,7 +86,12 @@ export function ResultWindow() {
       </header>
       <div className="space-y-3">
         <ResultCard title="原文" text={ocrResult?.merged_text ?? ""} />
-        <ResultCard title="译文" text={translationResult?.translated_text ?? ""} />
+        <ResultCard
+          title="译文"
+          text={translationResult?.translated_text ?? ""}
+          actionLabel={mode === "single" ? "重新翻译" : undefined}
+          onAction={mode === "single" ? () => void retranslate() : undefined}
+        />
       </div>
       {mode === "live" && (
         <div className="mt-3 flex items-center gap-2 text-xs text-slate-400"><Square size={12} />实时结果会随后台事件更新</div>

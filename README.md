@@ -8,7 +8,8 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
 - 提供单次翻译和实时翻译的控制面板。
 - 通过拖动框选生成物理像素坐标的 `ScreenRegion`。
 - 监听后端 pipeline/model 事件，并在多个 Tauri WebView 间同步结果和实时会话状态。
-- 展示 OCR 原文和翻译结果，支持复制、暂停/继续、置顶和窗口拖动。
+- 展示 OCR 原文和翻译结果，支持复制、重新翻译、暂停/继续、置顶和窗口拖动。
+- 提供只读设置面板（捕获间隔、差异阈值、超时、重试、快捷键、置顶），显示当前后端配置。
 
 ## 依赖关系
 
@@ -97,17 +98,19 @@ pnpm tauri dev
 ## 测试覆盖
 
 - Zustand store 的 mode/status、嵌套配置不可变更新和错误状态。
-- IPC command 参数名和 payload 结构。
-- 物理像素坐标转换和零尺寸选区拒绝。
+- IPC command 参数名和 payload 结构（含选区取消识别）。
+- 物理像素坐标转换（含反向拖拽）和零尺寸选区拒绝。
 - pipeline 状态标签和序列化错误分支。
+- 事件监听回调（含 `onOcrCompleted` 等便捷封装）的 payload 解包。
 
 选区的真实 Tauri 多显示器窗口行为仍需在 Windows 桌面环境中手动验证。
 
 ## 已知限制
 
 1. 当前 `vtrans-app::capture_once` 公开命令返回 OCR 结果；单次翻译的译文依赖后续 app 层命令契约完善，前端不会伪造译文。
-2. 完整 `AppConfig` 尚未由当前 app 层通过 IPC 返回，因此 frontend 暂不提供全量“保存设置”按钮，避免用未 hydrate 的默认值覆盖用户配置；OCR 语言和翻译 Provider 通过专用 command 立即保存。源语言/目标语言控件在对应 app IPC 提供前保持禁用。
+2. 完整 `AppConfig` 尚未由当前 app 层通过 IPC 返回，因此设置面板为只读，避免用未 hydrate 的默认值覆盖用户配置；OCR 语言和翻译 Provider 通过专用 command 立即保存。源语言/目标语言控件在对应 app IPC 提供前保持禁用。
 3. 结果窗口初始可见性、透明选区和窗口尺寸由 `src-tauri/tauri.conf.json` 管理；前端只负责运行时显示、隐藏和置顶。
 4. `model_dir` 是 Rust 配置中的 `PathBuf`，前端仅回传字符串或 `null`，不会读取模型文件。
 5. 事件监听在每个 webview 中安装，窗口销毁时统一清理；事件到达前关闭的窗口不会补发历史结果。
-6. API Key、完整原文/译文、截图像素和模型原始输出不存储在前端 store，也不会写入浏览器日志。
+6. 通过全局快捷键启动的实时会话不会同步 `frontend_live_config`（该事件由 `vtrans-app` 在快捷键路径上发送，属于 app 模块的待办协调项）；前端自身发起的实时会话不受影响。
+7. API Key、完整原文/译文、截图像素和模型原始输出不存储在前端 store，也不会写入浏览器日志。
