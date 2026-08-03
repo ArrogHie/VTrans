@@ -1,5 +1,7 @@
 //! Tauri command handlers for the `VTrans` frontend.
 
+use std::future::Future;
+
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
@@ -36,13 +38,13 @@ fn default_difference_threshold() -> f32 {
 /// Opens the selector window and waits for the frontend to confirm a region.
 ///
 /// The frontend completes the pending request by calling `update_live_region`.
-#[tauri::command]
-#[tracing::instrument(skip(state))]
 ///
 /// # Errors
 ///
 /// Returns an application error when the selector is unavailable, another
 /// selection is pending, or the frontend closes the selection request.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
 pub async fn start_region_selection(state: State<'_, AppState>) -> Result<ScreenRegion, AppError> {
     let app = state.app_handle()?;
     select_region(app, state.inner()).await
@@ -77,12 +79,12 @@ pub(crate) async fn select_region(
 }
 
 /// Cancels the pending region selection and hides the selector window.
-#[tauri::command]
-#[tracing::instrument(skip(state))]
 ///
 /// # Errors
 ///
 /// Returns an application error when the selector window cannot be accessed.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
 pub async fn cancel_region_selection(state: State<'_, AppState>) -> Result<(), AppError> {
     state.cancel_region_selection().await;
     let app = state.app_handle()?;
@@ -95,40 +97,100 @@ pub async fn cancel_region_selection(state: State<'_, AppState>) -> Result<(), A
 }
 
 /// Runs one capture, OCR, and translation pipeline pass and returns OCR text.
-#[tauri::command]
-#[tracing::instrument(skip(state, region))]
+///
+/// Stage events (`ocr_started`, `translation_started`, ...) are forwarded to
+/// the frontend while the pipeline runs so single captures can show progress;
+/// the command still returns the final [`OcrResult`] as its only payload.
 ///
 /// # Errors
 ///
 /// Returns an application error when capture, OCR, translation, or pipeline
 /// execution fails.
+#[tauri::command]
+#[tracing::instrument(skip(state, region))]
 pub async fn capture_once(
     region: ScreenRegion,
     state: State<'_, AppState>,
 ) -> Result<OcrResult, AppError> {
+    let app = state.app_handle()?;
     let pipeline = state.build_pipeline(PipelineMode::SingleCapture, region, 0, 0.03)?;
-    let (event_tx, mut event_rx) = mpsc::channel(16);
-    let run_result = pipeline.run(event_tx).await;
+    let (event_tx, event_rx) = mpsc::channel(16);
+    let ocr_result = run_capture_pipeline(
+        |event| emit_pipeline_event(&app, event),
+        pipeline.run(event_tx),
+        event_rx,
+    )
+    .await?;
+    ocr_result.ok_or(AppError::NotInitialized)
+}
+
+/// Drives a single-capture pipeline run while forwarding stage events.
+///
+/// Events are consumed concurrently with the run so that `ocr_started` and
+/// `translation_started` reach the frontend before the command returns.
+/// `Stopped` is intentionally not forwarded: a single capture has no live
+/// session, and `live_session_stopped` would be misleading.
+///
+/// Returns the final `OcrCompleted` payload, if one was produced, or the
+/// pipeline error that terminated the run. The `run` future must send all of
+/// its events before completing; the final drain is non-blocking so it can
+/// never wait on a channel sender that outlives the run.
+async fn run_capture_pipeline<E, Fut>(
+    mut emit: E,
+    run: Fut,
+    mut event_rx: mpsc::Receiver<PipelineEvent>,
+) -> Result<Option<OcrResult>, PipelineError>
+where
+    E: FnMut(PipelineEvent),
+    Fut: Future<Output = Result<(), PipelineError>>,
+{
+    tokio::pin!(run);
+
     let mut ocr_result = None;
-    while let Ok(event) = event_rx.try_recv() {
-        if let PipelineEvent::OcrCompleted(result) = event {
-            ocr_result = Some(result);
+    let mut run_result = None;
+    loop {
+        tokio::select! {
+            result = &mut run => {
+                run_result = Some(result);
+                break;
+            }
+            event = event_rx.recv() => {
+                match event {
+                    Some(PipelineEvent::OcrCompleted(result)) => ocr_result = Some(result),
+                    Some(PipelineEvent::Stopped) => {}
+                    Some(event) => emit(event),
+                    None => break,
+                }
+            }
         }
     }
-    match run_result {
-        Ok(()) => ocr_result.ok_or(AppError::NotInitialized),
-        Err(error) => Err(error.into()),
+
+    // Collect events still buffered when the run future finished. A single
+    // capture sends every event before it returns, so a non-blocking drain
+    // sees the tail of the buffer and cannot hang.
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            PipelineEvent::OcrCompleted(result) => ocr_result = Some(result),
+            PipelineEvent::Stopped => {}
+            event => emit(event),
+        }
     }
+
+    let run_result = match run_result {
+        Some(result) => result,
+        None => run.await,
+    };
+    run_result.map(|()| ocr_result)
 }
 
 /// Starts a live capture/OCR/translation task and returns immediately.
-#[tauri::command]
-#[tracing::instrument(skip(state, config))]
 ///
 /// # Errors
 ///
 /// Returns an application error when the region or providers are invalid, or
 /// when another live task is already running.
+#[tauri::command]
+#[tracing::instrument(skip(state, config))]
 pub async fn start_live_translation(
     config: LiveTranslationConfig,
     state: State<'_, AppState>,
@@ -192,13 +254,13 @@ async fn run_live_task(
 }
 
 /// Stops the live pipeline and waits for its task to finish.
-#[tauri::command]
-#[tracing::instrument(skip(state))]
 ///
 /// # Errors
 ///
 /// Returns an application error when no live pipeline is active or shutdown
 /// cannot complete.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
 pub async fn stop_live_translation(state: State<'_, AppState>) -> Result<(), AppError> {
     stop_live_task(state.inner()).await
 }
@@ -230,13 +292,13 @@ pub(crate) async fn stop_live_task(state: &AppState) -> Result<(), AppError> {
 }
 
 /// Updates the active live capture region or completes a pending selection.
-#[tauri::command]
-#[tracing::instrument(skip(state, region))]
 ///
 /// # Errors
 ///
 /// Returns an application error when the region is invalid or the active
 /// pipeline rejects the update.
+#[tauri::command]
+#[tracing::instrument(skip(state, region))]
 pub async fn update_live_region(
     region: ScreenRegion,
     state: State<'_, AppState>,
@@ -252,13 +314,13 @@ pub async fn update_live_region(
 }
 
 /// Updates the OCR language in the persisted configuration.
-#[tauri::command]
-#[tracing::instrument(skip(state))]
 ///
 /// # Errors
 ///
 /// Returns an application error when the configuration cannot be persisted or
 /// a live task is currently running.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
 pub async fn set_ocr_language(
     language: Language,
     state: State<'_, AppState>,
@@ -274,13 +336,13 @@ pub async fn set_ocr_language(
 }
 
 /// Switches between the API and local translation providers.
-#[tauri::command]
-#[tracing::instrument(skip(state), fields(provider = provider_id))]
 ///
 /// # Errors
 ///
 /// Returns an application error for an unsupported provider, a failed
 /// provider/configuration update, or an active live task.
+#[tauri::command]
+#[tracing::instrument(skip(state), fields(provider = provider_id))]
 pub async fn set_translation_provider(
     provider_id: String,
     state: State<'_, AppState>,
@@ -295,12 +357,12 @@ pub async fn set_translation_provider(
 }
 
 /// Verifies local model files and returns the integrity report.
-#[tauri::command]
-#[tracing::instrument(skip(state))]
 ///
 /// # Errors
 ///
 /// Returns an application error when model integrity verification fails.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
 pub async fn load_local_models(
     state: State<'_, AppState>,
 ) -> Result<vtrans_models::VerifyReport, AppError> {
@@ -319,13 +381,13 @@ pub async fn load_local_models(
 }
 
 /// Persists the complete application settings object.
-#[tauri::command]
-#[tracing::instrument(skip(state, settings))]
 ///
 /// # Errors
 ///
 /// Returns an application error when validation or atomic persistence fails,
 /// or a live task is currently running.
+#[tauri::command]
+#[tracing::instrument(skip(state, settings))]
 pub async fn save_settings(
     settings: vtrans_config::AppConfig,
     state: State<'_, AppState>,
@@ -342,12 +404,12 @@ pub async fn save_settings(
 }
 
 /// Returns a frontend-safe application status snapshot.
-#[tauri::command]
-#[tracing::instrument(skip(state))]
 ///
 /// # Errors
 ///
 /// Returns an application error if the managed state is unavailable.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
 pub async fn get_app_status(state: State<'_, AppState>) -> Result<AppStatus, AppError> {
     let live_running = state.live_task_is_running().await;
     Ok(state.status_snapshot(live_running))
@@ -374,6 +436,7 @@ pub fn invoke_handler<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vtrans_core::{OcrLine, TranslationResult};
 
     #[test]
     fn live_config_defaults_are_stable() {
@@ -383,5 +446,83 @@ mod tests {
         .unwrap();
         assert_eq!(value.capture_interval_ms, 500);
         assert!((value.difference_threshold - 0.03).abs() < f32::EPSILON);
+    }
+
+    fn ocr_result(text: &str) -> OcrResult {
+        OcrResult::from_lines(
+            vec![OcrLine::new(
+                text,
+                0.95,
+                [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+                0,
+            )],
+            Some(Language::English),
+            12,
+        )
+    }
+
+    #[tokio::test]
+    async fn capture_pipeline_forwards_stage_events_and_collects_result() {
+        let (tx, rx) = mpsc::channel(16);
+        let run = async move {
+            tx.send(PipelineEvent::CaptureStarted).await.unwrap();
+            tx.send(PipelineEvent::OcrStarted).await.unwrap();
+            tx.send(PipelineEvent::OcrCompleted(ocr_result("hello")))
+                .await
+                .unwrap();
+            tx.send(PipelineEvent::TranslationStarted).await.unwrap();
+            tx.send(PipelineEvent::TranslationCompleted(TranslationResult::new(
+                "hola", "mock", 8,
+            )))
+            .await
+            .unwrap();
+            tx.send(PipelineEvent::Stopped).await.unwrap();
+            Ok::<(), PipelineError>(())
+        };
+
+        let mut forwarded = Vec::new();
+        let collected = run_capture_pipeline(|event| forwarded.push(event), run, rx)
+            .await
+            .unwrap();
+
+        assert_eq!(collected.unwrap().merged_text, "hello");
+        assert!(forwarded
+            .iter()
+            .any(|event| matches!(event, PipelineEvent::CaptureStarted)));
+        assert!(forwarded
+            .iter()
+            .any(|event| matches!(event, PipelineEvent::OcrStarted)));
+        assert!(forwarded
+            .iter()
+            .any(|event| matches!(event, PipelineEvent::TranslationCompleted(_))));
+        // A single capture has no live session; `Stopped` must be dropped.
+        assert!(!forwarded
+            .iter()
+            .any(|event| matches!(event, PipelineEvent::Stopped)));
+    }
+
+    #[tokio::test]
+    async fn capture_pipeline_propagates_run_error() {
+        let (tx, rx) = mpsc::channel(16);
+        let run = async move {
+            tx.send(PipelineEvent::OcrStarted).await.unwrap();
+            Err(PipelineError::Cancelled)
+        };
+
+        let result = run_capture_pipeline(|_| {}, run, rx).await;
+        assert!(matches!(result, Err(PipelineError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn capture_pipeline_returns_none_without_ocr_result() {
+        let (tx, rx) = mpsc::channel(16);
+        let run = async move {
+            tx.send(PipelineEvent::CaptureStarted).await.unwrap();
+            tx.send(PipelineEvent::Stopped).await.unwrap();
+            Ok::<(), PipelineError>(())
+        };
+
+        let collected = run_capture_pipeline(|_| {}, run, rx).await.unwrap();
+        assert!(collected.is_none());
     }
 }
