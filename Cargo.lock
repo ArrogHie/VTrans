@@ -5417,7 +5417,6 @@ dependencies = [
  "vtrans-ocr",
  "vtrans-pipeline",
  "vtrans-security",
- "vtrans-text",
  "vtrans-translation",
 ]
 
