@@ -47,14 +47,15 @@ struct ModelProgressPayload<'a> {
     progress: f32,
 }
 
-/// Emits one pipeline event using the stable frontend event contract.
+/// Maps a pipeline event to its stable event name and JSON payload.
 ///
-/// Payloads contain OCR and translation results but never image bytes. Any
-/// emission failure is logged; pipeline execution must not be rolled back
-/// merely because a frontend window was closed.
-#[tracing::instrument(skip(app, event))]
-pub fn emit_pipeline_event<R: Runtime>(app: &AppHandle<R>, event: PipelineEvent) {
-    let (name, payload) = match event {
+/// The payload contains OCR and translation results but never image bytes.
+/// The mapping is kept separate from emission so the frontend contract can
+/// be asserted in unit tests without a running Tauri application.
+fn event_name_and_payload(
+    event: PipelineEvent,
+) -> (&'static str, Result<serde_json::Value, serde_json::Error>) {
+    match event {
         PipelineEvent::CaptureStarted => (
             CAPTURE_STATUS_CHANGED,
             serde_json::to_value(StatusPayload {
@@ -92,7 +93,16 @@ pub fn emit_pipeline_event<R: Runtime>(app: &AppHandle<R>, event: PipelineEvent)
             LIVE_SESSION_STOPPED,
             serde_json::to_value(StoppedPayload { reason: "stopped" }),
         ),
-    };
+    }
+}
+
+/// Emits one pipeline event using the stable frontend event contract.
+///
+/// Any emission failure is logged; pipeline execution must not be rolled back
+/// merely because a frontend window was closed.
+#[tracing::instrument(skip(app, event))]
+pub fn emit_pipeline_event<R: Runtime>(app: &AppHandle<R>, event: PipelineEvent) {
+    let (name, payload) = event_name_and_payload(event);
 
     match payload {
         Ok(payload) => {
@@ -131,7 +141,7 @@ fn unix_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vtrans_core::{Language, TranslationError};
+    use vtrans_core::{Language, OcrResult, TranslationError, TranslationResult};
 
     #[test]
     fn only_stage_failures_are_recoverable() {
@@ -146,5 +156,49 @@ mod tests {
             vtrans_core::CaptureError::MonitorNotFound("x".into())
         )));
         let _ = Language::English;
+    }
+
+    #[test]
+    fn stage_events_use_stable_names_and_shapes() {
+        let (name, payload) = event_name_and_payload(PipelineEvent::CaptureStarted);
+        assert_eq!(name, CAPTURE_STATUS_CHANGED);
+        assert_eq!(payload.unwrap(), serde_json::json!({"status": "capturing"}));
+
+        let (name, payload) = event_name_and_payload(PipelineEvent::OcrStarted);
+        assert_eq!(name, OCR_STARTED);
+        assert!(payload.unwrap().get("timestamp").is_some());
+
+        let (name, payload) = event_name_and_payload(PipelineEvent::TranslationStarted);
+        assert_eq!(name, TRANSLATION_STARTED);
+        assert!(payload.unwrap().get("timestamp").is_some());
+    }
+
+    #[test]
+    fn completed_events_wrap_standard_results() {
+        let (name, payload) =
+            event_name_and_payload(PipelineEvent::OcrCompleted(OcrResult::empty()));
+        assert_eq!(name, OCR_COMPLETED);
+        assert!(payload.unwrap().get("result").is_some());
+
+        let (name, payload) = event_name_and_payload(PipelineEvent::TranslationCompleted(
+            TranslationResult::new("hola", "mock", 4),
+        ));
+        assert_eq!(name, TRANSLATION_COMPLETED);
+        let value = payload.unwrap();
+        assert_eq!(value["result"]["translated_text"], "hola");
+    }
+
+    #[test]
+    fn error_and_stop_events_carry_metadata() {
+        let (name, payload) =
+            event_name_and_payload(PipelineEvent::Error(PipelineError::Cancelled));
+        assert_eq!(name, PIPELINE_ERROR);
+        let value = payload.unwrap();
+        assert!(value.get("message").is_some());
+        assert_eq!(value["recoverable"], false);
+
+        let (name, payload) = event_name_and_payload(PipelineEvent::Stopped);
+        assert_eq!(name, LIVE_SESSION_STOPPED);
+        assert_eq!(payload.unwrap()["reason"], "stopped");
     }
 }

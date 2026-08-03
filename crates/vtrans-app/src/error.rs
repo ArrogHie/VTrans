@@ -86,6 +86,7 @@ impl From<CoreError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use vtrans_core::Language;
 
     #[test]
@@ -102,5 +103,55 @@ mod tests {
         let error = AppError::from(CoreError::UnsupportedLanguage(Language::Japanese));
         assert!(matches!(error, AppError::Core(_)));
         assert!(error.to_string().contains("unsupported language"));
+    }
+
+    #[test]
+    fn converts_every_upstream_error_variant() {
+        let error = AppError::from(ConfigError::NotFound(PathBuf::from("config.json")));
+        assert!(matches!(error, AppError::Config(_)));
+        assert!(error.to_string().contains("config error"));
+
+        let error = AppError::from(SecurityError::NotFound("translation".into()));
+        assert!(matches!(error, AppError::Security(_)));
+        assert!(error.to_string().contains("security error"));
+
+        let error = AppError::from(ModelError::FileNotFound(PathBuf::from("det.onnx")));
+        assert!(matches!(error, AppError::Model(_)));
+        assert!(error.to_string().contains("model error"));
+
+        let error = AppError::from(CaptureError::SessionStopped);
+        assert!(matches!(error, AppError::Capture(_)));
+        assert!(error.to_string().contains("capture error"));
+
+        let error = AppError::from(OcrError::Cancelled);
+        assert!(matches!(error, AppError::Ocr(_)));
+        assert!(error.to_string().contains("ocr error"));
+
+        let error = AppError::from(TranslationError::Cancelled);
+        assert!(matches!(error, AppError::Translation(_)));
+        assert!(error.to_string().contains("translation error"));
+
+        let error = AppError::from(PipelineError::Cancelled);
+        assert!(matches!(error, AppError::Pipeline(_)));
+        assert!(error.to_string().contains("pipeline error"));
+    }
+
+    #[test]
+    fn app_specific_messages_are_user_facing() {
+        assert!(AppError::NotInitialized
+            .to_string()
+            .contains("not initialized"));
+        assert!(AppError::SelectionInProgress
+            .to_string()
+            .contains("already"));
+        assert!(AppError::InvalidRegion("zero width".into())
+            .to_string()
+            .contains("invalid region"));
+        assert!(AppError::Tauri("boom".into())
+            .to_string()
+            .contains("tauri error"));
+        assert!(AppError::HotkeyFailed("conflict".into())
+            .to_string()
+            .contains("hotkey registration failed"));
     }
 }
