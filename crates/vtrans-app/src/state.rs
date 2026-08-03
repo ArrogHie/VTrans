@@ -81,8 +81,8 @@ impl AppState {
         let capture_source = Arc::new(WindowsCaptureSource::new()?);
         let ocr_provider =
             Arc::new(PaddleOcrProvider::from_manager(&model_manager)?) as Arc<dyn OcrProvider>;
-        let translation_provider =
-            build_translation_provider(&config, &credentials, &model_manager)?;
+        let api_key = load_api_key(&credentials, &config)?;
+        let translation_provider = build_translation_provider(&config, &api_key, &model_manager)?;
         info!(
             ocr_provider = ocr_provider.id(),
             translation_provider = translation_provider.id(),
@@ -189,14 +189,20 @@ impl AppState {
             config.translation.source_language,
             config.translation.target_language,
         );
-        let pipeline_config = PipelineConfig::new(
-            mode,
-            region,
-            capture_interval_ms,
-            difference_threshold,
-            ocr_options,
-            translation_request,
-        );
+        // Single captures never use the interval or difference threshold;
+        // the dedicated constructors keep the defaults for each mode
+        // explicit instead of repeating magic values.
+        let pipeline_config = if mode.is_live() {
+            PipelineConfig::live(
+                region,
+                capture_interval_ms,
+                difference_threshold,
+                ocr_options,
+                translation_request,
+            )
+        } else {
+            PipelineConfig::single(region, ocr_options, translation_request)
+        };
         let capture = Box::new(SharedCaptureSource(Arc::clone(&self.capture_source)))
             as Box<dyn CaptureSource>;
         let ocr = Box::new(SharedOcrProvider(
@@ -217,14 +223,28 @@ impl AppState {
         ))
     }
 
-    pub(crate) fn prepare_translation_provider(
+    pub(crate) async fn prepare_translation_provider(
         &self,
-        config: &AppConfig,
+        config: AppConfig,
     ) -> Result<Arc<dyn TranslationProvider>, AppError> {
-        build_translation_provider(config, &self.credentials, &self.model_manager)
+        let api_key = load_api_key(&self.credentials, &config)?;
+        let model_manager = Arc::clone(&self.model_manager);
+        // Loading a local provider verifies SHA-256 hashes, parses the
+        // tokenizer, and creates an ONNX session; run it on the blocking
+        // pool so the Tokio workers never stall while switching providers.
+        tokio::task::spawn_blocking(move || {
+            build_translation_provider(&config, &api_key, &model_manager)
+        })
+        .await
+        .map_err(|error| {
+            AppError::Tauri(format!("translation provider setup task failed: {error}"))
+        })?
     }
 
-    pub(crate) fn set_translation_provider_id(&self, provider_id: &str) -> Result<(), AppError> {
+    pub(crate) async fn set_translation_provider_id(
+        &self,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
         if provider_id != "api" && provider_id != "local" {
             return Err(vtrans_core::TranslationError::Inference(format!(
                 "unsupported translation provider: {provider_id}"
@@ -233,7 +253,7 @@ impl AppState {
         }
         let mut config = self.load_config()?;
         config.translation.provider = provider_id.to_string();
-        let provider = self.prepare_translation_provider(&config)?;
+        let provider = self.prepare_translation_provider(config.clone()).await?;
         self.save_config(&config)?;
         self.replace_translation_provider(provider);
         Ok(())
@@ -374,23 +394,17 @@ impl TranslationProvider for SharedTranslationProvider {
 
 fn build_translation_provider(
     config: &AppConfig,
-    credentials: &CredentialManager,
+    api_key: &str,
     model_manager: &ModelManager,
 ) -> Result<Arc<dyn TranslationProvider>, AppError> {
     match config.translation.provider.as_str() {
-        "api" => {
-            let key = credentials.load("translation")?.unwrap_or_else(|| {
-                warn!("translation API credential is not configured");
-                String::new()
-            });
-            Ok(Arc::new(ApiTranslationProvider::new(
-                &config.translation.api_endpoint,
-                &config.translation.api_model,
-                &key,
-                std::time::Duration::from_secs(u64::from(config.translation.timeout_seconds)),
-                config.translation.max_retries,
-            )))
-        }
+        "api" => Ok(Arc::new(ApiTranslationProvider::new(
+            &config.translation.api_endpoint,
+            &config.translation.api_model,
+            api_key,
+            std::time::Duration::from_secs(u64::from(config.translation.timeout_seconds)),
+            config.translation.max_retries,
+        ))),
         "local" => Ok(Arc::new(LocalTranslationProvider::from_manager(
             model_manager,
         )?)),
@@ -402,6 +416,21 @@ fn build_translation_provider(
             .into())
         }
     }
+}
+
+/// Loads the API credential from secure storage for the API provider.
+///
+/// The vault is only touched when the configured provider is `"api"`; other
+/// providers return an empty key. The key is returned to the caller and never
+/// logged or persisted.
+fn load_api_key(credentials: &CredentialManager, config: &AppConfig) -> Result<String, AppError> {
+    if config.translation.provider != "api" {
+        return Ok(String::new());
+    }
+    Ok(credentials.load("translation")?.unwrap_or_else(|| {
+        warn!("translation API credential is not configured");
+        String::new()
+    }))
 }
 
 fn poison_inner<T>(poisoned: std::sync::PoisonError<T>) -> T {

@@ -113,6 +113,8 @@ pub async fn capture_once(
     state: State<'_, AppState>,
 ) -> Result<OcrResult, AppError> {
     let app = state.app_handle()?;
+    // The interval and threshold are ignored for single captures; the
+    // pipeline builder uses the single-mode defaults for them.
     let pipeline = state.build_pipeline(PipelineMode::SingleCapture, region, 0, 0.03)?;
     let (event_tx, event_rx) = mpsc::channel(16);
     let ocr_result = run_capture_pipeline(
@@ -351,7 +353,7 @@ pub async fn set_translation_provider(
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
-    state.set_translation_provider_id(&provider_id)?;
+    state.set_translation_provider_id(&provider_id).await?;
     tracing::info!(provider = provider_id, "translation provider selected");
     Ok(())
 }
@@ -396,7 +398,7 @@ pub async fn save_settings(
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
-    let provider = state.prepare_translation_provider(&settings)?;
+    let provider = state.prepare_translation_provider(settings.clone()).await?;
     state.save_config(&settings)?;
     state.replace_translation_provider(provider);
     tracing::info!("application settings saved");
