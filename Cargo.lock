@@ -5393,10 +5393,7 @@ version = "0.1.0"
 dependencies = [
  "tauri",
  "tauri-build",
- "tokio",
- "tracing",
  "vtrans-app",
- "vtrans-core",
 ]
 
 [[package]]
@@ -5404,7 +5401,6 @@ name = "vtrans-app"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "directories",
  "serde",
  "serde_json",
  "tauri",
@@ -5413,6 +5409,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-appender",
  "vtrans-capture",
  "vtrans-config",
  "vtrans-core",
