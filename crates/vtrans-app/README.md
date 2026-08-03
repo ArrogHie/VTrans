@@ -19,10 +19,12 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - vtrans-security：Windows Credential Manager 凭据访问。
 - vtrans-capture：WindowsCaptureSource。
 - vtrans-ocr：PaddleOcrProvider。
-- vtrans-text：由 pipeline 间接使用。
 - vtrans-translation：API 和本地 Provider。
 - vtrans-models：manifest、模型路径和完整性报告。
 - vtrans-pipeline：捕获、OCR、标准化和翻译编排。
+
+> vtrans-text 只作为 vtrans-pipeline 的传递依赖参与 OCR 文本标准化；本 crate
+> 不直接引用它，因此不在 Cargo.toml 中声明。
 
 ### 外部 crate
 
@@ -150,6 +152,10 @@ cargo check -p vtrans
 - AppState::new 需要可用的 Windows Graphics Capture 环境、模型 manifest 和对应模型文件；模型未部署时启动会返回 AppError::Model/AppError::Capture。
 - 选区窗口的最终坐标由前端通过 update_live_region 确认；start_region_selection 会等待确认结果，Escape/关闭操作应调用 cancel_region_selection。
 - 模型完整性校验通过 blocking pool 执行，避免大文件 SHA-256 计算阻塞 Tokio worker。
+- 切换翻译 Provider（`set_translation_provider` / `save_settings`）会在 blocking
+  pool 中重新加载本地 ONNX 模型（tokenizer + session），期间持有生命周期锁，
+  其他启动/停止命令会等待切换完成。
 - 全局快捷键由配置字符串解析，冲突或非法快捷键会在启动时返回 HotkeyFailed；当前没有 UI 内热键冲突编辑器。
+  通过 `save_settings` 修改热键配置后需要重启应用才会重新注册。
 - 单次捕获的进度事件（ocr_started 等）由 capture_once 转发，但命令契约仍只返回 OcrResult；前端如需进度提示需同时监听 ocr_started/translation_started。
 - Tauri capability 文件仍由宿主项目维护；生产构建应按窗口和 command 最小化 capability。
