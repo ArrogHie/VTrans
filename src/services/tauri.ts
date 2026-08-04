@@ -80,6 +80,16 @@ export function setOcrLanguage(language: AppConfig["ocr"]["language"]): Promise<
   return call<void>("set_ocr_language", { language });
 }
 
+/** Persists the translation source language. */
+export function setSourceLanguage(language: AppConfig["translation"]["source_language"]): Promise<void> {
+  return call<void>("set_source_language", { language });
+}
+
+/** Persists the translation target language. */
+export function setTargetLanguage(language: AppConfig["translation"]["target_language"]): Promise<void> {
+  return call<void>("set_target_language", { language });
+}
+
 /** Persists the selected translation provider. */
 export function setTranslationProvider(providerId: AppConfig["translation"]["provider"]): Promise<void> {
   return call<void>("set_translation_provider", { provider_id: providerId });

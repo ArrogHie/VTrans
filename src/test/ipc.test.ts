@@ -3,7 +3,13 @@ import { describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
-const { cancelRegionSelection, captureOnce, startLiveTranslation } = await import("../services/tauri");
+const {
+  cancelRegionSelection,
+  captureOnce,
+  setSourceLanguage,
+  setTargetLanguage,
+  startLiveTranslation,
+} = await import("../services/tauri");
 
 describe("tauri IPC service", () => {
   it("passes the screen region under the command argument name", async () => {
@@ -24,5 +30,17 @@ describe("tauri IPC service", () => {
     const config = { region: { monitor_id: "display-1", x: 1, y: 2, width: 3, height: 4 }, capture_interval_ms: 500, difference_threshold: 0.03 };
     await startLiveTranslation(config);
     expect(invoke).toHaveBeenCalledWith("start_live_translation", { config });
+  });
+
+  it("passes the source language under the command argument name", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setSourceLanguage("ja");
+    expect(invoke).toHaveBeenCalledWith("set_source_language", { language: "ja" });
+  });
+
+  it("passes the target language under the command argument name", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setTargetLanguage("en");
+    expect(invoke).toHaveBeenCalledWith("set_target_language", { language: "en" });
   });
 });

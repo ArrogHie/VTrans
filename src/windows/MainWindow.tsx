@@ -15,6 +15,8 @@ import {
   publishFrontendLiveStopped,
   publishFrontendOcrResult,
   setOcrLanguage,
+  setSourceLanguage,
+  setTargetLanguage,
   setTranslationProvider,
   showResultWindow,
   startLiveTranslation,
@@ -199,6 +201,24 @@ export function MainWindow() {
       setStatus({ error: getIpcErrorMessage(ipcError) });
     }
   };
+  const changeSourceLanguage = async (value: string) => {
+    const language = value as LanguageCode;
+    try {
+      await setSourceLanguage(language);
+      updateLanguage("source", language);
+    } catch (ipcError) {
+      setStatus({ error: getIpcErrorMessage(ipcError) });
+    }
+  };
+  const changeTargetLanguage = async (value: string) => {
+    const language = value as Exclude<LanguageCode, "auto">;
+    try {
+      await setTargetLanguage(language);
+      updateLanguage("target", language);
+    } catch (ipcError) {
+      setStatus({ error: getIpcErrorMessage(ipcError) });
+    }
+  };
   const changeProvider = async (provider: "api" | "local") => {
     try {
       await setTranslationProvider(provider);
@@ -309,8 +329,8 @@ export function MainWindow() {
           <h2 className="mb-3 text-sm font-semibold">语言与引擎</h2>
           <div className="flex gap-2">
             <LanguageSelector label="OCR 语言" value={config.ocr.language} options={OCR_LANGUAGES} onChange={(value) => void changeOcrLanguage(value)} />
-            <LanguageSelector label="源语言（待 app IPC）" value={config.translation.source_language} options={SOURCE_LANGUAGES} disabled onChange={() => undefined} />
-            <LanguageSelector label="目标语言（待 app IPC）" value={config.translation.target_language} options={TARGET_LANGUAGES} disabled onChange={() => undefined} />
+            <LanguageSelector label="源语言" value={config.translation.source_language} options={SOURCE_LANGUAGES} onChange={(value) => void changeSourceLanguage(value)} />
+            <LanguageSelector label="目标语言" value={config.translation.target_language} options={TARGET_LANGUAGES} onChange={(value) => void changeTargetLanguage(value)} />
           </div>
           <div className="mt-4"><ProviderToggle value={config.translation.provider} onChange={(value) => void changeProvider(value)} /></div>
         </section>
