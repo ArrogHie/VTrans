@@ -184,7 +184,7 @@ cargo fmt -p vtrans-translation -- --check
 验证 CLI（API 模式）：
 
 ```powershell
-cargo run --example translation_verify -- `
+cargo run -p vtrans-translation --example translation_verify -- `
   --text "hello" --source en --target ja `
   --api-endpoint https://api.example.com/v1/chat/completions `
   --api-model translator --api-key $env:VTRANS_API_KEY
@@ -192,7 +192,7 @@ cargo run --example translation_verify -- `
 验证 CLI（本地模式，需先按 manifest 放置模型）：
 
 ```powershell
-cargo run --example translation_verify -- `
+cargo run -p vtrans-translation --example translation_verify -- `
   --text "hello" --source en --target ja `
   --models src-tauri/resources/models
 ```
