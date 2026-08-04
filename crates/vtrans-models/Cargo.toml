@@ -18,5 +18,9 @@ sha2 = "0.10"
 pretty_assertions = { workspace = true }
 tempfile = "3"
 
+[[bin]]
+name = "vtrans-verify-models"
+path = "src/bin/verify_models.rs"
+
 [lints]
 workspace = true
