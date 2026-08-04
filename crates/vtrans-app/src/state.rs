@@ -245,14 +245,8 @@ impl AppState {
         &self,
         provider_id: &str,
     ) -> Result<(), AppError> {
-        if provider_id != "api" && provider_id != "local" {
-            return Err(vtrans_core::TranslationError::Inference(format!(
-                "unsupported translation provider: {provider_id}"
-            ))
-            .into());
-        }
         let mut config = self.load_config()?;
-        config.translation.provider = provider_id.to_string();
+        update_translation_provider_config(&mut config, provider_id)?;
         let provider = self.prepare_translation_provider(config.clone()).await?;
         self.save_config(&config)?;
         self.replace_translation_provider(provider);
@@ -397,25 +391,52 @@ fn build_translation_provider(
     api_key: &str,
     model_manager: &ModelManager,
 ) -> Result<Arc<dyn TranslationProvider>, AppError> {
-    match config.translation.provider.as_str() {
-        "api" => Ok(Arc::new(ApiTranslationProvider::new(
+    validate_translation_provider_id(&config.translation.provider)?;
+    if config.translation.provider == "api" {
+        Ok(Arc::new(ApiTranslationProvider::new(
             &config.translation.api_endpoint,
             &config.translation.api_model,
             api_key,
             std::time::Duration::from_secs(u64::from(config.translation.timeout_seconds)),
             config.translation.max_retries,
-        ))),
-        "local" => Ok(Arc::new(LocalTranslationProvider::from_manager(
+        )))
+    } else {
+        Ok(Arc::new(LocalTranslationProvider::from_manager(
             model_manager,
-        )?)),
-        provider => {
-            warn!(provider, "unknown translation provider in config");
-            Err(vtrans_core::TranslationError::Inference(format!(
-                "unsupported translation provider: {provider}"
-            ))
-            .into())
-        }
+        )?))
     }
+}
+
+/// Validates a translation provider identifier against the stable
+/// application-level domain (`"api"` or `"local"`).
+///
+/// The same domain is accepted by the `set_translation_provider` command and
+/// enforced by `vtrans-config` validation, so configuration snapshots and
+/// runtime provider selection can never disagree.
+pub(crate) fn validate_translation_provider_id(provider_id: &str) -> Result<(), AppError> {
+    if matches!(provider_id, "api" | "local") {
+        Ok(())
+    } else {
+        warn!(provider = provider_id, "unsupported translation provider");
+        Err(vtrans_core::TranslationError::Inference(format!(
+            "unsupported translation provider: {provider_id}"
+        ))
+        .into())
+    }
+}
+
+/// Applies a provider selection to a configuration snapshot.
+///
+/// Kept as a pure function so the mutation performed by
+/// [`AppState::set_translation_provider_id`] can be unit-tested without a
+/// Tauri runtime.
+fn update_translation_provider_config(
+    config: &mut AppConfig,
+    provider_id: &str,
+) -> Result<(), AppError> {
+    validate_translation_provider_id(provider_id)?;
+    config.translation.provider = provider_id.to_string();
+    Ok(())
 }
 
 /// Loads the API credential from secure storage for the API provider.
@@ -455,5 +476,44 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("pipeline_status"));
         assert!(json.contains("mock-ocr"));
+    }
+
+    #[test]
+    fn translation_provider_validation_accepts_known_ids() {
+        assert!(validate_translation_provider_id("api").is_ok());
+        assert!(validate_translation_provider_id("local").is_ok());
+    }
+
+    #[test]
+    fn translation_provider_validation_rejects_unknown_ids() {
+        let error = validate_translation_provider_id("local-onnx").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported translation provider"));
+    }
+
+    #[test]
+    fn provider_config_update_sets_identifier_and_preserves_other_fields() {
+        let mut config = AppConfig::default();
+        update_translation_provider_config(&mut config, "local").unwrap();
+        assert_eq!(config.translation.provider, "local");
+        assert_eq!(config.ocr.language, AppConfig::default().ocr.language);
+        assert_eq!(
+            config.hotkeys.live_translate,
+            AppConfig::default().hotkeys.live_translate
+        );
+    }
+
+    #[test]
+    fn provider_config_update_rejects_unknown_id_without_mutation() {
+        let mut config = AppConfig::default();
+        assert!(
+            update_translation_provider_config(&mut config, "local-onnx").is_err(),
+            "runtime provider ids must not be accepted as configuration identifiers"
+        );
+        assert_eq!(
+            config.translation.provider,
+            AppConfig::default().translation.provider
+        );
     }
 }
