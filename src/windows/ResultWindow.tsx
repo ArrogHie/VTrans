@@ -1,6 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Pause, Play, Pin, PinOff, Square, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ErrorBanner } from "../components/ErrorBanner";
 import { ResultCard } from "../components/ResultCard";
 import {
   captureOnce,
@@ -23,6 +24,7 @@ export function ResultWindow() {
   const setOcrResult = useAppStore((state) => state.setOcrResult);
   const setTranslationResult = useAppStore((state) => state.setTranslationResult);
   const setError = useAppStore((state) => state.setError);
+  const error = useAppStore((state) => state.error);
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
 
   useEffect(() => {
@@ -87,6 +89,9 @@ export function ResultWindow() {
           <button type="button" onClick={close} className="icon-button" title="关闭"><X size={16} /></button>
         </div>
       </header>
+      {error && (
+        <ErrorBanner message={error} onDismiss={() => setError(null)} />
+      )}
       <div className="space-y-3">
         <ResultCard title="原文" text={ocrResult?.merged_text ?? ""} />
         <ResultCard

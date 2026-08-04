@@ -288,7 +288,7 @@ export function MainWindow() {
         <ModeToggle
           value={mode}
           onChange={(next) => void switchMode(next)}
-          disabled={mode === "live" && Boolean(liveConfig) && !livePaused}
+          disabled={busy || (mode === "live" && Boolean(liveConfig) && !livePaused)}
         />
         <StatusBar status={status} error={error} />
 
