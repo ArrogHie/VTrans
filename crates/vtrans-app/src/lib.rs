@@ -1,9 +1,19 @@
-// VTrans application layer. See docs/modules/10-app.md.
+//! `VTrans` application layer.
+//!
+//! This crate is the Rust/ frontend boundary: it assembles production
+//! providers, exposes Tauri commands, forwards pipeline events, and owns
+//! global shortcut registration.
 
 pub mod commands;
+pub mod error;
 pub mod events;
 pub mod hotkeys;
 pub mod setup;
 pub mod state;
 
-// TODO(feat/10-app): re-export AppState once implemented.
+pub use commands::LiveTranslationConfig;
+pub use error::AppError;
+pub use events::{emit_model_loading_progress, emit_pipeline_event};
+pub use hotkeys::register_hotkeys;
+pub use setup::{app_handle, builder, init_app};
+pub use state::{AppState, AppStatus};
