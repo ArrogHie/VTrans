@@ -91,6 +91,19 @@ export const useAppStore = create<AppState>((set) => ({
       const provider = status.translation_provider === "api" || status.translation_provider === "local"
         ? status.translation_provider
         : state.config.translation.provider;
+      // Hotkey-started live sessions never publish `frontend_live_config`
+      // (that is an app-module coordination item). When the backend reports
+      // a running session without a local live config, reconstruct one from
+      // the backend-selected region and the capture defaults so pause/stop
+      // controls work immediately. An existing live config is preserved.
+      const liveConfig =
+        status.live_running && status.selected_region && !state.liveConfig
+          ? {
+              region: status.selected_region,
+              capture_interval_ms: state.config.capture.interval_ms,
+              difference_threshold: state.config.capture.difference_threshold,
+            }
+          : state.liveConfig;
       return {
         status: status.pipeline_status,
         mode: status.live_running ? "live" : state.mode,
@@ -100,6 +113,10 @@ export const useAppStore = create<AppState>((set) => ({
           ...state.config,
           translation: { ...state.config.translation, provider },
         },
+        liveConfig,
+        // A running backend session contradicts a locally paused marker;
+        // clear it so the pause/resume controls reflect reality.
+        livePaused: status.live_running ? false : state.livePaused,
         hydrated: true,
       };
     }),

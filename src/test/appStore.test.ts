@@ -19,6 +19,8 @@ beforeEach(() => {
 });
 
 describe("appStore", () => {
+  const region = { monitor_id: "display-1", x: 0, y: 0, width: 640, height: 480 };
+
   it("updates mode and status immutably", () => {
     useAppStore.getState().setMode("live");
     useAppStore.getState().setStatus("capturing");
@@ -62,5 +64,94 @@ describe("appStore", () => {
       model_progress: null,
     });
     expect(useAppStore.getState().config.translation.provider).toBe("local");
+  });
+
+  it("constructs a live config fallback for hotkey-started sessions", () => {
+    useAppStore.getState().applyStatus({
+      pipeline_status: "capturing",
+      ocr_provider: "pp-ocr",
+      translation_provider: "api",
+      selected_region: region,
+      live_running: true,
+      model_progress: null,
+    });
+    const state = useAppStore.getState();
+    expect(state.mode).toBe("live");
+    expect(state.livePaused).toBe(false);
+    expect(state.liveConfig).toEqual({
+      region,
+      capture_interval_ms: 500,
+      difference_threshold: 0.03,
+    });
+  });
+
+  it("keeps live config null when a running session has no selected region", () => {
+    useAppStore.getState().applyStatus({
+      pipeline_status: "capturing",
+      ocr_provider: "pp-ocr",
+      translation_provider: "api",
+      selected_region: null,
+      live_running: true,
+      model_progress: null,
+    });
+    expect(useAppStore.getState().liveConfig).toBeNull();
+  });
+
+  it("preserves an existing live config instead of overwriting it", () => {
+    const existing = {
+      region: { monitor_id: "display-2", x: 10, y: 20, width: 100, height: 80 },
+      capture_interval_ms: 750,
+      difference_threshold: 0.05,
+    };
+    useAppStore.getState().setLiveConfig(existing);
+    useAppStore.getState().applyStatus({
+      pipeline_status: "capturing",
+      ocr_provider: "pp-ocr",
+      translation_provider: "api",
+      selected_region: region,
+      live_running: true,
+      model_progress: null,
+    });
+    expect(useAppStore.getState().liveConfig).toEqual(existing);
+  });
+
+  it("clears a stale paused marker when the backend reports a running session", () => {
+    const existing = {
+      region,
+      capture_interval_ms: 500,
+      difference_threshold: 0.03,
+    };
+    useAppStore.getState().setLiveConfig(existing);
+    useAppStore.getState().setLivePaused(true);
+    useAppStore.getState().applyStatus({
+      pipeline_status: "capturing",
+      ocr_provider: "pp-ocr",
+      translation_provider: "api",
+      selected_region: region,
+      live_running: true,
+      model_progress: null,
+    });
+    expect(useAppStore.getState().livePaused).toBe(false);
+    expect(useAppStore.getState().liveConfig).toEqual(existing);
+  });
+
+  it("keeps the live config across a paused backend state for resume", () => {
+    const existing = {
+      region,
+      capture_interval_ms: 500,
+      difference_threshold: 0.03,
+    };
+    useAppStore.getState().setLiveConfig(existing);
+    useAppStore.getState().setLivePaused(true);
+    useAppStore.getState().applyStatus({
+      pipeline_status: "idle",
+      ocr_provider: "pp-ocr",
+      translation_provider: "api",
+      selected_region: region,
+      live_running: false,
+      model_progress: null,
+    });
+    expect(useAppStore.getState().liveConfig).toEqual(existing);
+    expect(useAppStore.getState().livePaused).toBe(true);
   });
 });

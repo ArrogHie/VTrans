@@ -112,5 +112,5 @@ pnpm tauri dev
 3. 结果窗口初始可见性、透明选区和窗口尺寸由 `src-tauri/tauri.conf.json` 管理；前端只负责运行时显示、隐藏和置顶。
 4. `model_dir` 是 Rust 配置中的 `PathBuf`，前端仅回传字符串或 `null`，不会读取模型文件。
 5. 事件监听在每个 webview 中安装，窗口销毁时统一清理；事件到达前关闭的窗口不会补发历史结果。
-6. 通过全局快捷键启动的实时会话不会同步 `frontend_live_config`（该事件由 `vtrans-app` 在快捷键路径上发送，属于 app 模块的待办协调项）；前端自身发起的实时会话不受影响。
+6. 通过全局快捷键启动的实时会话不会同步 `frontend_live_config`（该事件由 `vtrans-app` 在快捷键路径上发送，属于 app 模块的待办协调项）；前端自身发起的实时会话不受影响。作为缓解，`applyStatus` 在收到 `live_running && selected_region` 且本地没有 `liveConfig` 时，会用 `config.capture` 默认值构造回退配置，让暂停/停止立即可用；精确的捕获间隔/阈值仍待 app 模块在快捷键路径补发事件后对齐。
 7. API Key、完整原文/译文、截图像素和模型原始输出不存储在前端 store，也不会写入浏览器日志。
