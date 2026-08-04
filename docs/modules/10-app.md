@@ -114,13 +114,28 @@ crates/vtrans-app/
 
 | 测试项 | 类型 | 说明 |
 |--------|------|------|
-| AppState 初始化 | 集成 | 创建后所有字段就绪 |
-| save_settings | 集成 | 调用后配置文件更新 |
-| get_app_status | 集成 | 返回正确状态 |
-| Provider 切换 | 集成 | set_translation_provider 后使用新 provider |
-| 快捷键注册 | 集成 | register_hotkeys 不报错 |
-| 错误映射 | 单元 | 各模块错误正确映射到 AppError |
-| 事件发送 | 集成 | PipelineEvent 正确转为前端事件 |
+| AppState 初始化 | 手工验证 | 依赖 Windows Graphics Capture、Credential Manager 和模型文件，无头环境不可自动化；验证步骤见 crate README「手工验证项」第 1 条 |
+| save_settings | 手工验证 + 单元 | 全链路（IPC → 持久化 → 重启生效）手工验证（README 第 2 条）；配置校验与原子持久化由 vtrans-config 单测覆盖 |
+| get_app_status | 手工验证 + 单元 | 全链路手工验证（README 第 3 条）；`AppStatus` 序列化契约有单测 |
+| Provider 切换 | 手工验证 + 单元 | 全链路手工验证（README 第 4 条）；`validate_translation_provider_id` / `update_translation_provider_config` 有单测 |
+| 快捷键注册 | 手工验证 | 依赖真实全局快捷键注册环境（README 第 5 条）；动作分派枚举有单测 |
+| 错误映射 | 单元 | 各模块错误正确映射到 AppError（error.rs tests）✅ |
+| 事件发送 | 单元 | PipelineEvent 正确转为前端事件（events.rs tests）✅ |
+
+> 说明：依赖 Windows 桌面环境的 5 项已登记为手工验证，具体步骤与验证点见
+> `crates/vtrans-app/README.md`「手工验证项」一节；其纯逻辑部分均有自动化测试。
+
+### Provider id 契约
+
+`AppStatus.translation_provider` 返回运行时 Provider 的实现 id（当前为
+`"api"` / `"local-onnx"`），而 `set_translation_provider` 与配置 schema 使用
+配置标识符（`"api"` / `"local"`）。两端映射：
+
+- 后端：`validate_translation_provider_id` 维护配置标识符白名单；
+- 前端：`normalizeProviderId` 把实现 id 映射回配置标识符。
+
+**新增翻译 Provider 时**，必须同步更新后端白名单与前端 `normalizeProviderId`
+映射，并在 `crates/vtrans-app/README.md` 登记，否则状态水合会显示错误引擎。
 
 ## 验收标准
 
@@ -142,3 +157,6 @@ crates/vtrans-app/
 - 所有 Command 返回 Result<T, AppError>
 - AppError 实现 Serialize 用于前端错误展示
 - src-tauri/main.rs 只调用 vtrans-app::init_app，保持薄层
+- 合并顺序：`feat/10-app` 必须先于 `feat/11-frontend` 合并——模块 11 已调用
+  `set_source_language` / `set_target_language`，若前端先合并，运行时会出现
+  command 不存在错误。

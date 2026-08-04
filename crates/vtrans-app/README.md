@@ -175,10 +175,19 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 5. **快捷键注册与触发**：依次按 Alt+Shift+A（选区）、Alt+Shift+R（实时）、
    Alt+Shift+S（停止），确认动作触发且日志无 `HotkeyFailed`；通过
    `save_settings` 修改热键后重启应用生效。
+6. **源/目标语言切换**：在设置面板切换源语言（含 auto）与目标语言
+   （zh-CN/ja/en），确认立即生效且 `get_app_status` 后状态正常；实时会话
+   运行中切换应返回 `AlreadyRunning` 错误；重启应用确认配置持久化。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
 `AppStatus` 序列化契约、语言配置更新与目标语言校验、错误映射与事件转换。
+
+`AppStatus.translation_provider` 与 `set_translation_provider` 使用不同的
+标识符域（实现 id `"api"`/`"local-onnx"` ↔ 配置 id `"api"`/`"local"`）。
+**新增翻译 Provider 时**，必须同步更新后端 `validate_translation_provider_id`
+白名单与前端 `normalizeProviderId` 映射，否则重启后前端引擎开关会错误回退
+显示为 API。
 
 ## 已知限制
 
