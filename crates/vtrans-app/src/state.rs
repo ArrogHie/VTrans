@@ -26,7 +26,12 @@ pub struct AppStatus {
     pub pipeline_status: PipelineStatus,
     /// Stable identifier of the configured OCR provider.
     pub ocr_provider: String,
-    /// Stable identifier of the configured translation provider.
+    /// Runtime implementation id of the configured translation provider
+    /// (`"api"` or `"local-onnx"`).
+    ///
+    /// This differs from the configuration identifier domain (`"api"` /
+    /// `"local"`) accepted by `set_translation_provider_id`; the frontend
+    /// maps it back via `normalizeProviderId`.
     pub translation_provider: String,
     /// Last selected region, when one has been selected.
     pub selected_region: Option<ScreenRegion>,
@@ -413,7 +418,7 @@ fn build_translation_provider(
 /// The same domain is accepted by the `set_translation_provider` command and
 /// enforced by `vtrans-config` validation, so configuration snapshots and
 /// runtime provider selection can never disagree.
-pub(crate) fn validate_translation_provider_id(provider_id: &str) -> Result<(), AppError> {
+fn validate_translation_provider_id(provider_id: &str) -> Result<(), AppError> {
     if matches!(provider_id, "api" | "local") {
         Ok(())
     } else {
