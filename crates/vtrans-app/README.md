@@ -72,6 +72,8 @@ start_live_translation(config: LiveTranslationConfig) -> Result<(), AppError>
 stop_live_translation() -> Result<(), AppError>
 update_live_region(region: ScreenRegion) -> Result<(), AppError>
 set_ocr_language(language: Language) -> Result<(), AppError>
+set_source_language(language: Language) -> Result<(), AppError>
+set_target_language(language: Language) -> Result<(), AppError>
 set_translation_provider(provider_id: String) -> Result<(), AppError>
 load_local_models() -> Result<VerifyReport, AppError>
 save_settings(settings: AppConfig) -> Result<(), AppError>
@@ -82,7 +84,16 @@ get_app_status() -> Result<AppStatus, AppError>
 `translation_started` 等阶段事件推送到前端（单次捕获没有 live session，
 因此不发送 `live_session_stopped`），命令本身仍只返回最终的 `OcrResult`。
 
+`set_source_language` / `set_target_language` 与 `set_ocr_language` 语义对称：
+实时会话运行中拒绝修改（`PipelineError::AlreadyRunning`），仅局部更新配置并
+清除缓存的 pipeline。目标语言为 `Language::Auto` 时由配置校验拒绝
+（`translation.target_language must not be "auto"`）。
+
 LiveTranslationConfig 包含 region、capture_interval_ms 和 difference_threshold，字段可直接由前端 JSON 反序列化。
+
+`AppStatus.translation_provider` 返回运行时 Provider 的实现 id（`"api"` /
+`"local-onnx"`），与 `set_translation_provider` 接受的配置标识符（`"api"` /
+`"local"`）值域不同；前端 `normalizeProviderId` 负责把实现 id 映射回配置标识符。
 
 ### Events
 
@@ -146,6 +157,28 @@ cargo check -p vtrans
 - 错误路径记录 warn! 或 error!，正常生命周期记录 info!。
 - API key 从 CredentialManager 读取，不写入 config、事件或日志；翻译 Provider 的 upstream crate 负责 bearer token 注入。
 - 前端事件不传递 CapturedImage，避免截图通过 JSON/Base64 跨越 IPC。
+
+## 手工验证项
+
+模块测试计划中的以下项依赖 Windows 桌面环境（Graphics Capture、Credential
+Manager、模型文件），无法在无头环境自动化，登记为手工验证：
+
+1. **AppState 初始化**：部署模型文件到 `app_data_dir/models` 后启动应用；确认
+   启动日志出现 `application state initialized`，首次运行自动生成 `config.json`。
+2. **save_settings 全链路**：修改捕获间隔并保存，重启应用确认配置持久化；
+   API 提供者需先在凭据管理器配置 key。
+3. **get_app_status 全链路**：启动后前端状态栏显示正确的 Provider、区域和
+   pipeline 状态；启动/停止实时会话后轮询结果同步变化。
+4. **Provider 切换全链路**：切换 api/local 后调用 `get_app_status`，确认
+   `translation_provider` 返回对应实现 id（`"api"`/`"local-onnx"`），重启后
+   前端引擎开关仍显示正确。
+5. **快捷键注册与触发**：依次按 Alt+Shift+A（选区）、Alt+Shift+R（实时）、
+   Alt+Shift+S（停止），确认动作触发且日志无 `HotkeyFailed`；通过
+   `save_settings` 修改热键后重启应用生效。
+
+以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
+（`validate_translation_provider_id` / `update_translation_provider_config`）、
+`AppStatus` 序列化契约、语言配置更新与目标语言校验、错误映射与事件转换。
 
 ## 已知限制
 
