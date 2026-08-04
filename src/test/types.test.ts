@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONFIG, pipelineStatusLabel, isPipelineError } from "../types";
+import {
+  DEFAULT_CONFIG,
+  normalizeProviderId,
+  pipelineStatusLabel,
+  isPipelineError,
+} from "../types";
 
 describe("frontend contracts", () => {
   it("uses backend-compatible API defaults", () => {
     expect(DEFAULT_CONFIG.translation.api_endpoint).toMatch(/^https:\/\//);
     expect(DEFAULT_CONFIG.translation.api_model).not.toHaveLength(0);
     expect(DEFAULT_CONFIG.translation.max_retries).toBe(3);
+    expect(DEFAULT_CONFIG.hotkeys.live_translate).toBe("Alt+Shift+R");
   });
 
   it("matches the model verification report shape", () => {
@@ -24,5 +30,19 @@ describe("pipeline status helpers", () => {
     const status = { error: "模型缺失" } as const;
     expect(isPipelineError(status)).toBe(true);
     expect(pipelineStatusLabel(status)).toBe("模型缺失");
+  });
+});
+
+describe("normalizeProviderId", () => {
+  it("maps the local ONNX runtime id to the local config value", () => {
+    expect(normalizeProviderId("local-onnx")).toBe("local");
+  });
+
+  it("keeps the api runtime id unchanged", () => {
+    expect(normalizeProviderId("api")).toBe("api");
+  });
+
+  it("falls back to api for unknown runtime ids", () => {
+    expect(normalizeProviderId("unknown-provider")).toBe("api");
   });
 });

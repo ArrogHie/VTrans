@@ -58,12 +58,24 @@ describe("appStore", () => {
     useAppStore.getState().applyStatus({
       pipeline_status: "idle",
       ocr_provider: "pp-ocr",
-      translation_provider: "local",
+      translation_provider: "local-onnx",
       selected_region: null,
       live_running: false,
       model_progress: null,
     });
     expect(useAppStore.getState().config.translation.provider).toBe("local");
+  });
+
+  it("maps unknown provider ids back to the api default", () => {
+    useAppStore.getState().applyStatus({
+      pipeline_status: "idle",
+      ocr_provider: "pp-ocr",
+      translation_provider: "unexpected-provider",
+      selected_region: null,
+      live_running: false,
+      model_progress: null,
+    });
+    expect(useAppStore.getState().config.translation.provider).toBe("api");
   });
 
   it("constructs a live config fallback for hotkey-started sessions", () => {

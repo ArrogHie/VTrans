@@ -154,7 +154,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   result_window: { always_on_top: true },
   hotkeys: {
     select_and_translate: "Alt+Shift+A",
-    live_translate: "Alt+Shift+L",
+    live_translate: "Alt+Shift+R",
     stop_live: "Alt+Shift+S",
   },
   log_level: "info",
@@ -177,4 +177,19 @@ export function pipelineStatusLabel(status: PipelineStatus): string {
       completed: "已完成",
     } satisfies Record<Exclude<PipelineStatus, { error: string }>, string>
   )[status];
+}
+
+/**
+ * Normalizes a backend translation provider identifier to the frontend
+ * provider value domain.
+ *
+ * `vtrans-app` reports `AppStatus.translation_provider` using the provider
+ * implementation id: `"api"` for the API provider and `"local-onnx"` for the
+ * local ONNX provider. The frontend stores and persists the configuration
+ * identifier `"api" | "local"` only, so the runtime id must be mapped back.
+ * Unknown values fall back to `"api"` to keep the UI in a valid state.
+ */
+export function normalizeProviderId(raw: string): ProviderId {
+  if (raw === "local-onnx") return "local";
+  return "api";
 }

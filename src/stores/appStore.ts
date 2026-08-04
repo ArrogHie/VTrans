@@ -11,7 +11,7 @@ import type {
   ScreenRegion,
   TranslationResult,
 } from "../types";
-import { DEFAULT_CONFIG } from "../types";
+import { DEFAULT_CONFIG, normalizeProviderId } from "../types";
 
 interface AppState {
   mode: Mode;
@@ -88,9 +88,9 @@ export const useAppStore = create<AppState>((set) => ({
     })),
   applyStatus: (status) =>
     set((state) => {
-      const provider = status.translation_provider === "api" || status.translation_provider === "local"
-        ? status.translation_provider
-        : state.config.translation.provider;
+      // 后端透传 provider 实现 id（"api" / "local-onnx"），映射到前端
+      // 配置标识符域（"api" / "local"）。
+      const provider = normalizeProviderId(status.translation_provider);
       // Hotkey-started live sessions never publish `frontend_live_config`
       // (that is an app-module coordination item). When the backend reports
       // a running session without a local live config, reconstruct one from
