@@ -193,3 +193,23 @@ export function normalizeProviderId(raw: string): ProviderId {
   if (raw === "local-onnx") return "local";
   return "api";
 }
+
+/**
+ * Reports whether the local ONNX translation model supports the configured
+ * language pair.
+ *
+ * The bundled manifest (`opus-mt-en-zh-int8`) currently declares a single
+ * `en -> zh-CN` pair and cannot auto-detect the source language. Any other
+ * source/target combination (including `auto`) must be served by the API
+ * provider; the UI surfaces this constraint so translation never fails
+ * silently.
+ */
+export function isLocalPairSupported(
+  config: Pick<AppConfig, "translation">,
+): boolean {
+  if (config.translation.provider !== "local") return true;
+  return (
+    config.translation.source_language === "en" &&
+    config.translation.target_language === "zh-CN"
+  );
+}

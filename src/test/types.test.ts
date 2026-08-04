@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CONFIG,
+  isLocalPairSupported,
   normalizeProviderId,
   pipelineStatusLabel,
   isPipelineError,
@@ -44,5 +45,43 @@ describe("normalizeProviderId", () => {
 
   it("falls back to api for unknown runtime ids", () => {
     expect(normalizeProviderId("unknown-provider")).toBe("api");
+  });
+});
+
+describe("isLocalPairSupported", () => {
+  it("allows any pair on the api provider", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.translation.source_language = "ja";
+    expect(isLocalPairSupported(config)).toBe(true);
+  });
+
+  it("allows en -> zh-CN on the local provider", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.translation.provider = "local";
+    config.translation.source_language = "en";
+    config.translation.target_language = "zh-CN";
+    expect(isLocalPairSupported(config)).toBe(true);
+  });
+
+  it("flags unsupported source languages on the local provider", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.translation.provider = "local";
+    config.translation.source_language = "ja";
+    expect(isLocalPairSupported(config)).toBe(false);
+  });
+
+  it("flags auto source on the local provider", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.translation.provider = "local";
+    config.translation.source_language = "auto";
+    expect(isLocalPairSupported(config)).toBe(false);
+  });
+
+  it("flags non-zh-CN targets on the local provider", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.translation.provider = "local";
+    config.translation.source_language = "en";
+    config.translation.target_language = "ja";
+    expect(isLocalPairSupported(config)).toBe(false);
   });
 });

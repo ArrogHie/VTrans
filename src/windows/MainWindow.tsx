@@ -24,6 +24,7 @@ import {
   stopLiveTranslation,
 } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
+import { isLocalPairSupported } from "../types";
 import type { LanguageCode, Mode } from "../types";
 
 const OCR_LANGUAGES = [
@@ -333,6 +334,11 @@ export function MainWindow() {
             <LanguageSelector label="目标语言" value={config.translation.target_language} options={TARGET_LANGUAGES} onChange={(value) => void changeTargetLanguage(value)} />
           </div>
           <div className="mt-4"><ProviderToggle value={config.translation.provider} onChange={(value) => void changeProvider(value)} /></div>
+          {config.translation.provider === "local" && !isLocalPairSupported(config) && (
+            <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              本地模型目前仅支持 en → zh-CN，且不能自动判断源语言；其它源语言请切换到云端 API。
+            </p>
+          )}
         </section>
 
         <section className="grid grid-cols-2 gap-2">
