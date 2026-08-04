@@ -22,7 +22,7 @@ import {
   stopLiveTranslation,
 } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
-import type { LanguageCode } from "../types";
+import type { LanguageCode, Mode } from "../types";
 
 const OCR_LANGUAGES = [
   { value: "auto", label: "自动检测" },
@@ -181,6 +181,15 @@ export function MainWindow() {
     }
   };
 
+  /** Switches the translation mode, stopping a live session first. */
+  const switchMode = async (next: Mode) => {
+    if (next === mode) return;
+    if (mode === "live" && liveConfig) {
+      await stopLive();
+    }
+    setMode(next);
+  };
+
   const changeOcrLanguage = async (value: string) => {
     const language = value as LanguageCode;
     try {
@@ -276,7 +285,11 @@ export function MainWindow() {
       )}
 
       <div className="space-y-4">
-        <ModeToggle value={mode} onChange={setMode} />
+        <ModeToggle
+          value={mode}
+          onChange={(next) => void switchMode(next)}
+          disabled={mode === "live" && Boolean(liveConfig) && !livePaused}
+        />
         <StatusBar status={status} error={error} />
 
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">

@@ -110,7 +110,7 @@ export function publishFrontendLiveConfig(config: PipelineConfig): Promise<void>
   return emit("frontend_live_config", config);
 }
 
-/** Marks an intentional pause before stopping the backend live task. */
+/** Marks an intentional pause after the backend live task has stopped. */
 export function publishFrontendLivePaused(): Promise<void> {
   return emit("frontend_live_paused");
 }

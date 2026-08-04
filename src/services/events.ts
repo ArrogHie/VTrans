@@ -71,7 +71,7 @@ export function listenToFrontendLiveConfig(callback: (config: PipelineConfig) =>
   return listen<PipelineConfig>(FRONTEND_LIVE_CONFIG, (eventPayload) => callback(eventPayload.payload));
 }
 
-/** Listen for a frontend pause marker before the backend stop event arrives. */
+/** Listen for a frontend pause marker published after the backend live task stopped. */
 export function listenToFrontendLivePaused(callback: () => void): Promise<Unlisten> {
   return listen(FRONTEND_LIVE_PAUSED, callback);
 }

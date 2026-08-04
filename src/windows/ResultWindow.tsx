@@ -21,6 +21,7 @@ export function ResultWindow() {
   const livePaused = useAppStore((state) => state.livePaused);
   const setLivePaused = useAppStore((state) => state.setLivePaused);
   const setOcrResult = useAppStore((state) => state.setOcrResult);
+  const setTranslationResult = useAppStore((state) => state.setTranslationResult);
   const setError = useAppStore((state) => state.setError);
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
 
@@ -56,6 +57,8 @@ export function ResultWindow() {
     if (mode === "live") return;
     const region = useAppStore.getState().selectedRegion;
     if (!region) return;
+    // 清空上一次的译文，避免新原文与旧译文并列造成误导。
+    setTranslationResult(null);
     try {
       const result = await captureOnce(region);
       setOcrResult(result);
