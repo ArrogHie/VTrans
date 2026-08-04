@@ -16,6 +16,7 @@ use crate::AppError;
 /// # Errors
 ///
 /// Returns `AppError::HotkeyFailed` when a shortcut is invalid or cannot be registered.
+#[tracing::instrument(skip(app))]
 pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError> {
     let state = app.state::<AppState>();
     let config = state.load_config()?;
