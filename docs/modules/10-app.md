@@ -25,6 +25,8 @@ t::generate_handler![
     stop_live_translation,
     update_live_region,
     set_ocr_language,
+    set_source_language,
+    set_target_language,
     set_translation_provider,
     load_local_models,
     save_settings,

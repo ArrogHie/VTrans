@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
+use vtrans_config::AppConfig;
 use vtrans_core::{Language, OcrResult, PipelineMode, ScreenRegion};
 use vtrans_pipeline::{PipelineError, PipelineEvent};
 
@@ -337,6 +338,77 @@ pub async fn set_ocr_language(
     Ok(())
 }
 
+/// Updates the translation source language in the persisted configuration.
+///
+/// `Language::Auto` enables automatic source-language detection.
+///
+/// # Errors
+///
+/// Returns an application error when the configuration cannot be persisted or
+/// a live task is currently running.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn set_source_language(
+    language: Language,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
+    if state.live_task_is_running().await {
+        return Err(PipelineError::AlreadyRunning.into());
+    }
+    state.update_config(|config| apply_source_language(config, language))?;
+    state.clear_pipeline();
+    tracing::info!(
+        language = language.code(),
+        "translation source language updated"
+    );
+    Ok(())
+}
+
+/// Updates the translation target language in the persisted configuration.
+///
+/// `Language::Auto` is rejected by configuration validation because the
+/// target language must be a concrete language (`zh-CN`, `ja`, or `en`).
+///
+/// # Errors
+///
+/// Returns an application error when the configuration cannot be persisted or
+/// a live task is currently running.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn set_target_language(
+    language: Language,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
+    if state.live_task_is_running().await {
+        return Err(PipelineError::AlreadyRunning.into());
+    }
+    state.update_config(|config| apply_target_language(config, language))?;
+    state.clear_pipeline();
+    tracing::info!(
+        language = language.code(),
+        "translation target language updated"
+    );
+    Ok(())
+}
+
+/// Applies a source-language change to a configuration snapshot.
+///
+/// Kept as a pure function so the exact mutation performed by
+/// [`set_source_language`] can be unit-tested without a Tauri runtime.
+fn apply_source_language(config: &mut AppConfig, language: Language) {
+    config.translation.source_language = language;
+}
+
+/// Applies a target-language change to a configuration snapshot.
+///
+/// Kept as a pure function so the exact mutation performed by
+/// [`set_target_language`] can be unit-tested without a Tauri runtime.
+fn apply_target_language(config: &mut AppConfig, language: Language) {
+    config.translation.target_language = language;
+}
+
 /// Switches between the API and local translation providers.
 ///
 /// # Errors
@@ -391,7 +463,7 @@ pub async fn load_local_models(
 #[tauri::command]
 #[tracing::instrument(skip(state, settings))]
 pub async fn save_settings(
-    settings: vtrans_config::AppConfig,
+    settings: AppConfig,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     let _lifecycle = state.live_lifecycle.lock().await;
@@ -428,6 +500,8 @@ pub fn invoke_handler<R: tauri::Runtime>(
         stop_live_translation,
         update_live_region,
         set_ocr_language,
+        set_source_language,
+        set_target_language,
         set_translation_provider,
         load_local_models,
         save_settings,
@@ -448,6 +522,35 @@ mod tests {
         .unwrap();
         assert_eq!(value.capture_interval_ms, 500);
         assert!((value.difference_threshold - 0.03).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn source_language_update_mutates_only_source_field() {
+        let mut config = AppConfig::default();
+        apply_source_language(&mut config, Language::Japanese);
+        assert_eq!(config.translation.source_language, Language::Japanese);
+        assert_eq!(
+            config.translation.target_language,
+            AppConfig::default().translation.target_language
+        );
+    }
+
+    #[test]
+    fn target_language_update_mutates_only_target_field() {
+        let mut config = AppConfig::default();
+        apply_target_language(&mut config, Language::English);
+        assert_eq!(config.translation.target_language, Language::English);
+        assert_eq!(
+            config.translation.source_language,
+            AppConfig::default().translation.source_language
+        );
+    }
+
+    #[test]
+    fn target_language_auto_is_rejected_by_config_validation() {
+        let mut config = AppConfig::default();
+        apply_target_language(&mut config, Language::Auto);
+        assert!(config.validate().is_err());
     }
 
     fn ocr_result(text: &str) -> OcrResult {

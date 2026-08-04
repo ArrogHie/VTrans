@@ -351,6 +351,8 @@ start_live_translation(cfg) -> Result<(), AppError>
 stop_live_translation()     -> Result<(), AppError>
 update_live_region(region)  -> Result<(), AppError>
 set_ocr_language(lang)      -> Result<(), AppError>
+set_source_language(lang)   -> Result<(), AppError>
+set_target_language(lang)   -> Result<(), AppError>
 set_translation_provider(id)-> Result<(), AppError>
 load_local_models()         -> Result<ModelLoadReport, AppError>
 save_settings(settings)     -> Result<(), AppError>
