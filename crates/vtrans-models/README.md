@@ -183,7 +183,7 @@ serde 表示：`ModelManifest` 及其子结构实现 `Serialize` / `Deserialize`
 | `size_bytes` 不参与校验 | 待优化 | 先做大小预检可跳过明显错误的哈希计算 |
 | `load_progress` 不驱动真实下载/加载 | 待后续 Phase | 由 `vtrans-app` 的加载流程写入进度 |
 | 无自动下载/修复机制 | 待后续 Phase | 使用 `scripts/download_models.ps1` 完成下载 |
-| 未提供验证 CLI 二进制 | 待后续 Phase | 用 `cargo test` 覆盖校验路径，后续可加 `examples/` CLI |
+| 验证 CLI 依赖真实模型目录 | 设计使然 | `vtrans-verify-models` 读取 `--models` / `$VTRANS_MODEL_DIR`，缺文件时以非零码退出 |
 
 ## 9. 构建与测试
 
@@ -194,7 +194,13 @@ cargo clippy -p vtrans-models --all-targets
 cargo fmt -p vtrans-models -- --check
 ```
 
-测试覆盖：manifest 解析、缺失字段、SHA-256 匹配/不匹配、文件不存在、路径解析、批量校验报告（单元 + 集成 + 文档测试，共 52 个用例）。当前没有独立验证 CLI；下载模型后可通过集成测试验证全流程。
+测试覆盖：manifest 解析、缺失字段、SHA-256 匹配/不匹配、文件不存在、路径解析、批量校验报告（单元 + 集成 + 文档测试，共 52 个用例）。部署模型后可用独立验证 CLI 全量校验：
+
+```powershell
+cargo run --bin vtrans-verify-models -- --models src-tauri/resources/models
+```
+
+该 CLI 与 `vtrans-app` 的 `load_local_models` 命令走同一套 `verify_integrity` 逻辑，缺文件或哈希不匹配时以非零退出码报告失败项。
 ## 10. 详细规格
 
 参见 `docs/modules/08-models.md`。

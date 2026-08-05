@@ -109,6 +109,62 @@ fn log_count(events: &[PipelineEvent], predicate: impl Fn(&PipelineEvent) -> boo
 }
 
 #[tokio::test]
+async fn frame_sink_observes_only_frames_accepted_by_difference_detection() {
+    let region = ScreenRegion::new("m0", 0, 0, 8, 8);
+    let capture = Arc::new(MockCaptureBehavior::default());
+    let ocr = Arc::new(MockOcrBehavior::default());
+    ocr.push(Ok(ocr_result("Hello")));
+    let translation = Arc::new(MockTranslationBehavior::default());
+    translation.push(Ok(translation_result("你好", "mock-translation")));
+    let sink = Arc::new(RecordingSink::default());
+
+    let pipeline = Arc::new(Pipeline::with_frame_sink(
+        live_config(region),
+        deps(
+            MockCaptureSource::new(capture.clone()),
+            MockOcr::new(ocr.clone()),
+            MockTranslation::new(translation.clone()),
+        ),
+        Some(sink.clone()),
+    ));
+    let (run_handle, log) = start_live(&pipeline);
+
+    // First frame is always "changed": the sink must see it before OCR.
+    feed_frame(&capture, solid_image(8, 8, 1)).await;
+    log.wait_until(
+        |e| matches!(e, PipelineEvent::TranslationCompleted(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(sink.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // An unchanged frame is skipped by the differ and must not reach OCR or
+    // the sink.
+    feed_frame(&capture, solid_image(8, 8, 1)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(sink.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // A changed frame reaches the sink again.
+    ocr.push(Ok(ocr_result("World")));
+    translation.push(Ok(translation_result("世界", "mock-translation")));
+    feed_frame(&capture, varied_image(8, 8, 1, 9)).await;
+    // The first `wait_until` already matched the first translation, so wait
+    // for the second translation to arrive before asserting the sink count.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while log.count_matching(|e| matches!(e, PipelineEvent::TranslationCompleted(_))) < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the second translation"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(sink.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    pipeline.stop().await.unwrap();
+    assert!(run_handle.await.unwrap().is_ok());
+}
+
+#[tokio::test]
 async fn live_full_chain_emits_events_in_order() {
     let (pipeline, capture, _ocr, translation) = live_pipeline(
         vec![Ok(ocr_result("Hello"))],

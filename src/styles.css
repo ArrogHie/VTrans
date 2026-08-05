@@ -3,9 +3,14 @@
 @tailwind utilities;
 
 @layer base {
-  :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #0f172a; background: #f8fafc; font-synthesis: none; text-rendering: optimizeLegibility; }
+  :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #0f172a; font-synthesis: none; text-rendering: optimizeLegibility; }
   * { box-sizing: border-box; }
-  body { margin: 0; min-width: 320px; min-height: 100vh; }
+  body { margin: 0; min-width: 320px; min-height: 100vh; background: #f8fafc; }
+  /* 选区窗口必须透出桌面：根元素与 body 都不能有不透明背景。 */
+  html[data-window="selector"],
+  html[data-window="selector"] body,
+  html[data-window="overlay"],
+  html[data-window="overlay"] body { background: transparent; }
   button, select { font: inherit; }
 }
 

@@ -6,6 +6,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const {
   cancelRegionSelection,
   captureOnce,
+  getAppConfig,
+  setApiKey,
+  setTranslationProvider,
   setSourceLanguage,
   setTargetLanguage,
   startLiveTranslation,
@@ -42,5 +45,25 @@ describe("tauri IPC service", () => {
     invoke.mockResolvedValueOnce(undefined);
     await setTargetLanguage("en");
     expect(invoke).toHaveBeenCalledWith("set_target_language", { language: "en" });
+  });
+
+  it("passes the provider id under the Tauri camelCase argument name", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setTranslationProvider("local");
+    // 后端参数名为 `provider_id`，Tauri 2 默认映射为 camelCase `providerId`。
+    expect(invoke).toHaveBeenCalledWith("set_translation_provider", { providerId: "local" });
+  });
+
+  it("passes the API key under the Tauri camelCase argument name", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setApiKey("sk-test-1234");
+    // 后端参数名为 `api_key`，Tauri 2 默认映射为 camelCase `apiKey`。
+    expect(invoke).toHaveBeenCalledWith("set_api_key", { apiKey: "sk-test-1234" });
+  });
+
+  it("requests the full application configuration without arguments", async () => {
+    invoke.mockResolvedValueOnce({});
+    await getAppConfig();
+    expect(invoke).toHaveBeenCalledWith("get_app_config", undefined);
   });
 });

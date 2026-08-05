@@ -1,14 +1,40 @@
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useState } from "react";
+import { Check, RotateCcw, X } from "lucide-react";
+import { hideRegionOverlay, showRegionOverlay } from "../services/regionOverlay";
 import { cancelRegionSelection, toPhysicalRegion, updateLiveRegion } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
+
+type Phase = "selecting" | "confirmed";
 
 export function RegionSelector() {
   const [start, setStart] = useState<{ x: number; y: number } | null>(null);
   const [end, setEnd] = useState<{ x: number; y: number } | null>(null);
+  const [phase, setPhase] = useState<Phase>("selecting");
   const [monitorId, setMonitorId] = useState<string | null>(null);
   const setSelectedRegion = useAppStore((state) => state.setSelectedRegion);
-  const [message, setMessage] = useState("拖动鼠标框选要翻译的区域");
+  const [message, setMessage] = useState("拖动鼠标框选要翻译的区域，松开后确认");
+
+  const resetSelection = useCallback(() => {
+    void hideRegionOverlay();
+    setStart(null);
+    setEnd(null);
+    setPhase("selecting");
+    setMessage("拖动鼠标框选要翻译的区域，松开后确认");
+  }, []);
+
+  const cancelSelection = useCallback(() => {
+    void (async () => {
+      await hideRegionOverlay();
+      try {
+        await cancelRegionSelection();
+      } catch {
+        // 后端可能已经清理了待处理选区，忽略即可。
+      } finally {
+        await getCurrentWindow().hide();
+      }
+    })();
+  }, []);
 
   const confirmSelection = useCallback(async () => {
     if (!start || !end) return;
@@ -24,6 +50,7 @@ export function RegionSelector() {
     try {
       await updateLiveRegion(region);
       setSelectedRegion(region);
+      await showRegionOverlay(region);
       await getCurrentWindow().hide();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "选区提交失败");
@@ -49,7 +76,7 @@ export function RegionSelector() {
     });
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        void cancelRegionSelection().finally(() => getCurrentWindow().hide());
+        cancelSelection();
       }
       else if (event.key === "Enter") void confirmSelection();
     };
@@ -59,25 +86,49 @@ export function RegionSelector() {
       unlistenClose?.();
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [confirmSelection]);
+  }, [cancelSelection, confirmSelection]);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (phase !== "selecting") return;
     event.currentTarget.setPointerCapture(event.pointerId);
     setStart({ x: event.clientX, y: event.clientY });
     setEnd({ x: event.clientX, y: event.clientY });
+    setMessage("拖动鼠标框选要翻译的区域，松开后确认");
   };
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (start) setEnd({ x: event.clientX, y: event.clientY });
+    if (phase === "selecting" && start) setEnd({ x: event.clientX, y: event.clientY });
   };
   const onPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (start) setEnd({ x: event.clientX, y: event.clientY });
+    if (phase !== "selecting" || !start) return;
+    setEnd({ x: event.clientX, y: event.clientY });
+    const box = getSelectionBox(start, { x: event.clientX, y: event.clientY });
+    if (!box || box.width < 4 || box.height < 4) {
+      setMessage("选区太小，请重新拖动");
+      return;
+    }
+    setPhase("confirmed");
+    setMessage("确认选区，或重新选择");
   };
 
   const box = getSelectionBox(start, end);
+  const confirmed = phase === "confirmed" && box !== null;
   return (
     <main className="fixed inset-0 cursor-crosshair select-none bg-slate-950/25" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} aria-label="屏幕区域选择器">
       <div className="pointer-events-none absolute left-1/2 top-8 -translate-x-1/2 rounded-full bg-slate-950/75 px-4 py-2 text-xs text-white shadow-lg">{message} · Enter 确认 · Esc 取消</div>
       {box && <div className="pointer-events-none absolute border-2 border-indigo-400 bg-indigo-400/10 shadow-[0_0_0_9999px_rgba(15,23,42,0.2)]" style={{ left: box.left, top: box.top, width: box.width, height: box.height }}><span className="absolute -top-7 left-0 rounded bg-indigo-500 px-2 py-1 text-xs font-medium text-white">{Math.round(box.width)} × {Math.round(box.height)}</span></div>}
+      {confirmed && (
+        <div className="absolute bottom-10 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-xl bg-slate-950/80 px-3 py-2 shadow-lg">
+          <button type="button" onClick={() => void confirmSelection()} className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400">
+            <Check size={15} aria-hidden="true" />确认
+          </button>
+          <button type="button" onClick={resetSelection} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-700 px-3 py-2 text-sm font-medium text-slate-100 hover:bg-slate-600">
+            <RotateCcw size={14} aria-hidden="true" />重新选择
+          </button>
+          <button type="button" onClick={cancelSelection} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-700 px-3 py-2 text-sm font-medium text-slate-100 hover:bg-slate-600">
+            <X size={14} aria-hidden="true" />取消
+          </button>
+        </div>
+      )}
     </main>
   );
 }

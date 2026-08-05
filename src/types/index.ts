@@ -52,6 +52,15 @@ export interface AppStatus {
   selected_region: ScreenRegion | null;
   live_running: boolean;
   model_progress: number | null;
+  debug_mode: boolean;
+}
+
+export interface DebugFramePayload {
+  /** Base64-encoded JPEG thumbnail (longest edge ≤ 480 px). */
+  image: string;
+  region: ScreenRegion;
+  frame_index: number;
+  timestamp_ms: number;
 }
 
 export interface AppConfig {
@@ -137,6 +146,9 @@ export type EventPayloadMap = {
   live_session_stopped: StoppedPayload;
   model_loading_progress: ModelProgressPayload;
   region_selected: ScreenRegion;
+  overlay_region_updated: ScreenRegion;
+  overlay_hidden: null;
+  debug_frame_updated: DebugFramePayload;
 };
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -192,4 +204,24 @@ export function pipelineStatusLabel(status: PipelineStatus): string {
 export function normalizeProviderId(raw: string): ProviderId {
   if (raw === "local-onnx") return "local";
   return "api";
+}
+
+/**
+ * Reports whether the local ONNX translation model supports the configured
+ * language pair.
+ *
+ * The bundled manifest (`opus-mt-en-zh-int8`) currently declares a single
+ * `en -> zh-CN` pair and cannot auto-detect the source language. Any other
+ * source/target combination (including `auto`) must be served by the API
+ * provider; the UI surfaces this constraint so translation never fails
+ * silently.
+ */
+export function isLocalPairSupported(
+  config: Pick<AppConfig, "translation">,
+): boolean {
+  if (config.translation.provider !== "local") return true;
+  return (
+    config.translation.source_language === "en" &&
+    config.translation.target_language === "zh-CN"
+  );
 }

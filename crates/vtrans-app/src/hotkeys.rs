@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use crate::commands::{select_region, start_live_task, stop_live_task, LiveTranslationConfig};
 use crate::events::REGION_SELECTED;
+use crate::overlay::hide_region_overlay;
 use crate::state::AppState;
 use crate::AppError;
 
@@ -96,6 +97,10 @@ fn dispatch_hotkey(app: AppHandle, action: HotkeyAction) {
                 if let Err(error) = stop_live_task(state.inner()).await {
                     warn!(error = %error, "stop hotkey action failed");
                 }
+                // A hotkey stop is always a real stop (never a pause), so the
+                // region marker is cleared even when every webview is hidden
+                // or throttled by the OS.
+                hide_region_overlay(&app);
             }
         }
     });

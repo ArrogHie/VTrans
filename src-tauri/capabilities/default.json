@@ -2,13 +2,17 @@
   "$schema": "https://schema.tauri.app/config/2/capability",
   "identifier": "default",
   "description": "Default capability for VTrans windows",
-  "windows": ["main", "result", "selector"],
+  "windows": ["main", "result", "selector", "overlay"],
   "permissions": [
     "core:default",
     "core:event:default",
+    "core:window:allow-available-monitors",
     "core:window:allow-hide",
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-focus",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
     "core:window:allow-show",
     "core:window:allow-start-dragging"
   ]

@@ -8,6 +8,9 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - 提供手动单次翻译、实时翻译、区域更新、语言/Provider 切换、设置持久化和状态查询命令。
 - 将 vtrans_pipeline::PipelineEvent 转换为稳定的前端事件名和 JSON payload。
 - 注册配置中的全局快捷键，并把快捷键动作派发到选区、实时翻译和停止流程。
+- 管理系统托盘（关闭主窗口隐藏到托盘、托盘菜单恢复/退出）与单实例保护。
+- 维护常驻选区 overlay 窗口，在屏幕上持续显示当前捕获区域边界。
+- Debug 模式下把进入 OCR 前的捕获帧以缩略图形式实时推送到前端面板。
 - 使用 AppError 将底层错误映射为可序列化、可展示的用户错误信息。
 
 ## 依赖关系
@@ -36,6 +39,9 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - thiserror：错误枚举和错误链。
 - tracing：结构化生命周期和错误日志。
 - tracing-appender：持有 `WorkerGuard`，在应用生命周期内刷新非阻塞日志写入器。
+- tauri-plugin-single-instance：阻止多实例并存，避免全局快捷键冲突。
+- image：捕获帧缩放与 JPEG 编码（Debug 模式）。
+- base64：调试缩略图 Base64 编码（跨 IPC 事件 payload）。
 
 所有依赖使用 MIT 或 Apache-2.0 兼容许可证；新增依赖仅在本 crate 的 Cargo.toml 中声明。
 
@@ -46,6 +52,7 @@ pub struct AppState { /* managed by Tauri */ }
 
 impl AppState {
     pub fn new(app_data_dir: &Path) -> Result<Self, AppError>;
+    pub fn new_with_debug(app_data_dir: &Path, debug_mode: bool) -> Result<Self, AppError>;
 }
 
 pub struct AppStatus {
@@ -55,10 +62,12 @@ pub struct AppStatus {
     pub selected_region: Option<ScreenRegion>,
     pub live_running: bool,
     pub model_progress: Option<f32>,
+    pub debug_mode: bool,
 }
 ~~~
 
 AppState::new 从 app_data_dir/config.json 加载配置，默认从 app_data_dir/models/manifest.json 加载模型 manifest；AppConfig.model_dir 可以覆盖模型目录。
+AppState::new_with_debug 额外接收 Debug 模式开关（仅本次运行有效，不持久化）。
 
 ### Tauri Commands
 
@@ -77,6 +86,8 @@ set_target_language(language: Language) -> Result<(), AppError>
 set_translation_provider(provider_id: String) -> Result<(), AppError>
 load_local_models() -> Result<VerifyReport, AppError>
 save_settings(settings: AppConfig) -> Result<(), AppError>
+set_api_key(api_key: String) -> Result<(), AppError>
+get_app_config() -> Result<AppConfig, AppError>
 get_app_status() -> Result<AppStatus, AppError>
 ~~~
 
@@ -88,6 +99,18 @@ get_app_status() -> Result<AppStatus, AppError>
 实时会话运行中拒绝修改（`PipelineError::AlreadyRunning`），仅局部更新配置并
 清除缓存的 pipeline。目标语言为 `Language::Auto` 时由配置校验拒绝
 （`translation.target_language must not be "auto"`）。
+
+`set_api_key` 把翻译 API Key 写入 Windows Credential Manager（target 固定为
+`"translation"`，与 `load_api_key` 读取的 target 一致），Key 不进入
+`config.json`、前端 store、事件或日志。写入通过 `spawn_blocking` 在阻塞池
+执行；当 `config.translation.provider == "api"` 时，保存后用新 Key 重建 API
+provider，无需重启即生效。空串/纯空白或超过 4096 字符的 Key 返回
+`AppError::InvalidApiKey`。前端参数名为 `{ apiKey }`（Tauri 2 默认
+camelCase，命令未加 `rename_all`）。
+
+`get_app_config` 返回当前配置的完整快照（clone，不长时间持有锁），前端
+挂载时用它水合设置面板，避免整包 `save_settings` 用前端默认值覆盖后端
+其它字段（OCR 语言、日志级别、模型目录等）。
 
 LiveTranslationConfig 包含 region、capture_interval_ms 和 difference_threshold，字段可直接由前端 JSON 反序列化。
 
@@ -108,8 +131,63 @@ emit_pipeline_event 转发以下事件：
 - live_session_stopped
 - model_loading_progress
 - region_selected
+- overlay_region_updated
+- overlay_hidden
+- debug_frame_updated（仅 Debug 模式开启时发射）
 
 事件只包含标准文本/状态结构，不携带截图图像数据。敏感凭据不会进入事件或日志。
+
+### Debug 模式（捕获帧预览）
+
+Debug 模式是**默认关闭、显式开启**的运行期开关，用于排查「OCR 识别文字与
+选区方框内实际文字不符」：开启后，进入 OCR 之前的捕获帧会以缩略图形式
+实时显示在主窗口调试面板。
+
+- **开关**：`--debug` 命令行参数或 `VTRANS_DEBUG=1` 环境变量（`true` 亦可，
+  大小写不敏感）；解析失败不影响正常启动，只记一行 `info!`（`debug_mode`
+  布尔）。开关状态**不写入 config.json**。
+- **帧出口**：`vtrans_pipeline::FrameSink` 在捕获帧通过帧差检测（live）或
+  捕获完成（single）后、进入 OCR 前调用；关闭时 pipeline 不挂 sink，
+  整条调试链路不存在、零开销。
+- **编码**：纯函数 `encode_debug_thumbnail` 把 BGRA8/RGBA8 帧缩放到最长边
+  ≤ 480px（整数等比缩放，不放大），JPEG 质量 80；在阻塞池执行。
+- **传输**：事件 `debug_frame_updated`，payload 为 Base64 JPEG + 区域 +
+  帧序号 + 时间戳；只走事件不走命令返回值。节流 ≤ 10fps，watch 通道
+  保证最新值语义（旧帧被覆盖），编码失败只 `warn!` 并跳过该帧。
+  区域元数据：单次翻译使用命令传入的区域（含显示器坐标），实时会话跟随
+  `update_live_region` 的最新选区；帧序号按捕获帧递增，节流或编码失败
+  跳过的帧会在序号上留下缺口，便于前端判断丢帧。
+- **隐私**：只显示、不保存——不落盘、不进日志、不进 store、不进结果窗口；
+  面板只保留内存中最新一帧，Debug 退出后不保留任何帧缓存。
+- **红线豁免**：`CapturedImage` 默认禁止跨 IPC；缩略图是 Debug-only 的
+  显式豁免，仅在 Debug 开启时发射，生产 Release 默认不启用。
+
+### 窗口生命周期与托盘
+
+关闭主窗口（点 X）不会退出进程：窗口隐藏到系统托盘，实时会话与全局快捷键
+继续运行。托盘图标左键单击或菜单「显示主窗口」恢复主窗口；菜单「退出」是
+唯一的主动退出路径，进程退出时释放全部快捷键。第二个进程实例启动时会被
+单实例插件拦截，并恢复已有实例的主窗口。
+
+### 选区 overlay
+
+选区确认后，一个无边框、透明、置顶、可点穿的全屏 overlay 窗口覆盖在区域
+所在显示器上（窗口原点 = 显示器原点，尺寸 = 显示器尺寸），用纯 CSS 边框
+在区域相对偏移处持续标出捕获区域（含尺寸标签）。显示/定位由前端
+`regionOverlay` 服务驱动（`availableMonitors` + `setPosition`/`setSize` +
+`setIgnoreCursorEvents`），后端在 `update_live_region` 与 `start_live_task`
+中同步显示、在重新选区/取消时隐藏作为兜底。暂停实时会话保留方框；真正
+停止（UI 按钮或热键）时隐藏。overlay 窗口不接收鼠标事件，也不传输任何
+图像数据（只传 `ScreenRegion` 坐标）。
+
+### capability 归属
+
+`src-tauri/capabilities/default.json` 由模块 10 统一维护，清单按前端实际
+调用的窗口 API 复核：`allow-available-monitors`、`allow-set-position`、
+`allow-set-size`、`allow-set-ignore-cursor-events` 由 `regionOverlay`
+服务使用（常驻方框的显示器枚举/定位/点穿），`allow-show`/`allow-hide`/
+`allow-set-focus`/`allow-set-always-on-top`/`allow-start-dragging` 由结果
+窗口与选区窗口使用；无多余权限。
 
 ### Tauri bootstrap
 
@@ -155,7 +233,10 @@ cargo check -p vtrans
 - 日志在 setup::init_app 中初始化；若 tracing 已被宿主或测试环境初始化，
   初始化失败会降级为不记录滚动文件，应用仍可启动。
 - 错误路径记录 warn! 或 error!，正常生命周期记录 info!。
-- API key 从 CredentialManager 读取，不写入 config、事件或日志；翻译 Provider 的 upstream crate 负责 bearer token 注入。
+- API key 通过 `set_api_key` 写入 CredentialManager（target `"translation"`），
+  从 CredentialManager 读取，不写入 config、事件或日志；日志引用 Key 时仅
+  记录 `vtrans_core::mask_sensitive` 掩码值；翻译 Provider 的 upstream crate
+  负责 bearer token 注入。
 - 前端事件不传递 CapturedImage，避免截图通过 JSON/Base64 跨越 IPC。
 
 ## 手工验证项
@@ -178,6 +259,25 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 6. **源/目标语言切换**：在设置面板切换源语言（含 auto）与目标语言
    （zh-CN/ja/en），确认立即生效且 `get_app_status` 后状态正常；实时会话
    运行中切换应返回 `AlreadyRunning` 错误；重启应用确认配置持久化。
+7. **set_api_key 全链路**：在设置面板输入 API Key 保存，确认日志只有掩码
+   形式（`sk-****1234`）；重启应用后 Key 仍在（Credential Manager），且
+   provider 为 `"api"` 时翻译请求携带新 Key 生效；输入空串/超长 Key 确认
+   前端展示校验错误且不写入凭据。
+8. **get_app_config 水合**：在设置面板保存配置后修改配置文件中其它字段
+   （如 OCR 语言），重启应用打开设置面板，确认显示后端真实值而非前端默认
+   值；整包保存后其它字段不被覆盖。
+9. **托盘与窗口生命周期**：点击主窗口关闭按钮，确认主窗口隐藏、进程仍在、
+   托盘出现图标；左键单击托盘恢复主窗口；托盘菜单「退出」后进程结束且
+   全局快捷键不再占用（再次按下 Alt+Shift+A/R/S 不触发本应用）。
+10. **选区 overlay**：框选确认后，屏幕上出现与选区对齐的常驻边框（含尺寸
+    标签）；实时会话运行中更新区域，边框同步移动/缩放；停止实时或重新
+    选区时边框消失；框选区域内的鼠标操作（点击、拖动）不受 overlay 影响。
+11. **单实例**：应用运行中再次启动 vtrans.exe，确认不会出现第二个进程，
+    已有实例的主窗口被恢复显示。
+12. **Debug 模式**：以 `VTRANS_DEBUG=1` 启动应用，主窗口出现「调试：捕获
+    帧」面板；实时翻译或单次翻译运行时面板显示进入 OCR 前的区域缩略图
+    （≤480px），帧号递增且刷新率 ≤10fps；确认面板图像与 OCR 输出一致。
+    关闭 Debug 正常启动时无面板、无 `debug_frame_updated` 事件。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
@@ -200,4 +300,16 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 - 全局快捷键由配置字符串解析，冲突或非法快捷键会在启动时返回 HotkeyFailed；当前没有 UI 内热键冲突编辑器。
   通过 `save_settings` 修改热键配置后需要重启应用才会重新注册。
 - 单次捕获的进度事件（ocr_started 等）由 capture_once 转发，但命令契约仍只返回 OcrResult；前端如需进度提示需同时监听 ocr_started/translation_started。
-- Tauri capability 文件仍由宿主项目维护；生产构建应按窗口和 command 最小化 capability。
+- 关闭主窗口是「隐藏到托盘」而非退出；只有托盘菜单「退出」或任务管理器
+  能结束进程，首次使用时需注意托盘图标的存在。
+- overlay 仅覆盖区域所在显示器（selector 全屏所在的显示器）；选区窗口目前
+  不支持跨显示器拖拽，因此框选区域始终位于该显示器内。
+- overlay 边框会被 Windows Graphics Capture 截入画面（位于选区边缘，2px），
+  对 OCR 文本行检测的影响可忽略；这是"屏幕常驻标记"的固有代价。
+- Debug 缩略图为 JPEG（有损）且最长边 ≤ 480px，仅用于核对 OCR 输入，不
+  保证与原始帧逐像素一致；帧差未触发时（画面无变化）不产生新调试帧。
+- 常驻方框为纯 CSS 边框，不显示区域真实缩略图；如需屏幕缩略预览，需架构
+  确认后由 vtrans-app 提供小尺寸位图事件/命令（`CapturedImage` 不得跨
+  IPC），前端方框已兜底，不阻塞 MVP。
+- capability 清单由模块 10 统一维护（见「capability 归属」一节）；生产构建
+  应按窗口和 command 最小化 capability。

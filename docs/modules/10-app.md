@@ -30,6 +30,8 @@ t::generate_handler![
     set_translation_provider,
     load_local_models,
     save_settings,
+    set_api_key,
+    get_app_config,
     get_app_status,
 ]
 ```
@@ -56,6 +58,9 @@ impl AppState {
 
 ```rust
 pub fn emit_pipeline_event(app: &AppHandle, event: PipelineEvent);
+pub fn emit_overlay_region(app: &AppHandle, region: &ScreenRegion);
+pub fn emit_overlay_hidden(app: &AppHandle);
+pub fn emit_debug_frame(app: &AppHandle, payload: DebugFramePayload);
 ```
 
 ### 全局快捷键
@@ -66,6 +71,56 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
 // Alt+Shift+R: start_live_translation (实时)
 // Alt+Shift+S: stop_live_translation
 ```
+
+### 窗口生命周期与托盘
+
+- 关闭主窗口 → 隐藏到系统托盘（进程、实时会话、全局快捷键继续运行）；
+- 托盘左键 / 菜单「显示主窗口」→ 恢复主窗口；菜单「退出」→ `app.exit(0)`；
+- 单实例插件拦截第二个进程实例并恢复已有实例主窗口。
+
+### 选区 overlay
+
+- 选区确认（`update_live_region`）→ overlay 窗口覆盖区域所在显示器（窗口
+  原点 = 显示器原点），前端 `regionOverlay` 服务定位/显示/点穿，后端同步
+  显示兜底；CSS 边框 + 尺寸标签绘制在区域相对偏移处（事件
+  `overlay_region_updated`）；
+- 重新选区 / 取消 / 真正停止（UI 按钮或热键）→ 隐藏（事件
+  `overlay_hidden`）；暂停实时会话保留方框（暂停走 `stop_live_translation`，
+  后端不在停止路径隐藏，避免与前端暂停语义冲突）；
+- overlay 无边框、透明、置顶、可点穿（`focusable: false` +
+  `set_ignore_cursor_events(true)`），只传输 `ScreenRegion` 坐标，不跨 IPC
+  传图像。
+
+### capability 归属
+
+`src-tauri/capabilities/default.json` 由模块 10 统一维护，清单按前端实际
+调用的窗口 API 复核：`allow-available-monitors`、`allow-set-position`、
+`allow-set-size`、`allow-set-ignore-cursor-events` 由 `regionOverlay` 服务
+使用（常驻方框的显示器枚举/定位/点穿），其余 `allow-show`/`allow-hide`/
+`allow-set-focus`/`allow-set-always-on-top`/`allow-start-dragging` 由结果
+窗口与选区窗口使用；无多余权限。
+
+**待架构确认（不阻塞 MVP）**：常驻方框目前为纯 CSS 边框，不显示区域真实
+缩略图；若产品要求屏幕缩略预览，需由 vtrans-app 提供小尺寸位图事件/命令
+（`CapturedImage` 不得跨 IPC）。命令命名约定维持 Tauri 默认 camelCase，
+如需统一 snake_case 需前后端同步修改（见 `contracts.rs` 注释）。
+
+### Debug 模式（捕获帧预览）
+
+- **开关**：`--debug` 或 `VTRANS_DEBUG=1`（`true` 亦可），默认关闭，不写入
+  config.json；解析失败不影响启动。`AppStatus.debug_mode` 透传给前端决定
+  是否渲染调试面板。
+- **帧出口**：vtrans-pipeline 的 `FrameSink`（`Pipeline::with_frame_sink`）
+  在捕获帧进入 OCR 前调用；关闭时无 sink、零开销。
+- **编码**：`encode_debug_thumbnail` 纯函数（BGRA8/RGBA8 → ≤480px JPEG80
+  Base64），在阻塞池执行；帧序号/时间戳随 payload 发送。
+- **事件**：`debug_frame_updated`（仅 Debug 开启时发射），payload 含
+  `image`/`region`/`frame_index`/`timestamp_ms`；≤10fps 节流、watch 最新值
+  语义、编码失败 `warn!` 跳过。区域元数据：单次翻译取命令传入的区域，
+  实时会话跟随 `update_live_region` 的选区；`frame_index` 按捕获帧递增，
+  被节流/编码失败跳过的帧留下序号缺口，前端可据此判断丢帧。
+- **隐私**：只显示不保存（不落盘、不进日志、不进 store/结果窗口）；此
+  缩略图跨 IPC 是 Debug-only 显式豁免（`CapturedImage` 默认禁止序列化）。
 
 ## 错误类型
 
@@ -88,6 +143,8 @@ pub enum AppError {
     Ocr(#[from] OcrError),
     #[error("translation error: {0}")]
     Translation(#[from] TranslationError),
+    #[error("invalid api key: {0}")]
+    InvalidApiKey(String),
     #[error("tauri error: {0}")]
     Tauri(String),
     #[error("hotkey registration failed: {0}")]
@@ -118,7 +175,16 @@ crates/vtrans-app/
 | save_settings | 手工验证 + 单元 | 全链路（IPC → 持久化 → 重启生效）手工验证（README 第 2 条）；配置校验与原子持久化由 vtrans-config 单测覆盖 |
 | get_app_status | 手工验证 + 单元 | 全链路手工验证（README 第 3 条）；`AppStatus` 序列化契约有单测 |
 | Provider 切换 | 手工验证 + 单元 | 全链路手工验证（README 第 4 条）；`validate_translation_provider_id` / `update_translation_provider_config` 有单测 |
+| set_api_key | 手工验证 + 单元 | 全链路手工验证（README 第 7 条）；key 校验与凭据存储有单测，IPC 参数契约见 contracts.rs |
+| get_app_config | 手工验证 + 单元 | 前端水合手工验证（README 第 8 条）；AppConfig 序列化字段契约见 contracts.rs |
 | 快捷键注册 | 手工验证 | 依赖真实全局快捷键注册环境（README 第 5 条）；动作分派枚举有单测 |
+| 托盘与窗口生命周期 | 手工验证 | 依赖系统托盘与真实窗口环境（README 第 9 条）；菜单 id 与事件名有单测 |
+| 选区 overlay | 手工验证 + 单元 | 依赖真实显示器（README 第 10 条）；overlay 坐标换算由前端单测覆盖 |
+| 单实例保护 | 手工验证 | 依赖进程级行为（README 第 11 条） |
+| Debug 模式开关 | 单元 | `parse_debug_env_value` 值域解析（setup.rs tests）✅ |
+| 缩略图编码 | 单元 | 尺寸缩放/JPEG 有效/格式与缓冲校验（debug_frame.rs tests）✅ |
+| Debug 帧出口 | 集成 | FrameSink 收到进入 OCR 前的帧、跳过未变化帧（pipeline 集成测试）✅ |
+| Debug 面板显示 | 手工验证 | 依赖真实显示器与模型（README 第 12 条） |
 | 错误映射 | 单元 | 各模块错误正确映射到 AppError（error.rs tests）✅ |
 | 事件发送 | 单元 | PipelineEvent 正确转为前端事件（events.rs tests）✅ |
 
@@ -139,14 +205,34 @@ crates/vtrans-app/
 
 ## 验收标准
 
-- [ ] 所有 Commands 可被前端调用
-- [ ] 所有 Events 正确推送到前端
-- [ ] AppState 正确组装各模块实现
-- [ ] 快捷键可注册和触发
-- [ ] 错误信息对用户友好
-- [ ] UI 线程不被阻塞
-- [ ] Release 构建关闭不必要 capability
-- [ ] README.md 完整
+- [x] 所有 Commands 可被前端调用（`invoke_handler` 注册 15 个命令，前端
+      `src/services/tauri.ts` 全部按 Tauri 2 camelCase 参数契约调用）
+- [x] 所有 Events 正确推送到前端（`events.rs` 单测 + `tests/contracts.rs`
+      固化了事件名与 payload 形状）
+- [x] AppState 正确组装各模块实现（`AppState::new` / `new_with_debug`）
+- [x] 快捷键可注册和触发（实现 + 动作分派单测；真实注册依赖桌面环境，
+      登记 README 手工验证项 5）
+- [x] 错误信息对用户友好（`AppError` 序列化为纯字符串，`error.rs` 单测）
+- [x] UI 线程不被阻塞（模型校验、缩略图编码走 `spawn_blocking`）
+- [x] Release 构建关闭不必要 capability（Debug 面板采用主窗口内嵌方案，
+      不新增窗口/权限；capability 归属见「capability 归属」一节）
+- [x] README.md 完整
+
+### Debug 模式验收（本任务）
+
+- [x] 开关：`--debug` / `VTRANS_DEBUG=1`（`true` 亦可），默认关闭、不持久化；
+      解析失败不影响启动（`parse_debug_env_value` 单测）
+- [x] 关闭时零开销：不挂 `FrameSink`、不注册 `debug_frame_updated`、无面板
+- [x] 帧出口：pipeline `FrameSink` 在进入 OCR 前收到帧（pipeline 集成测试
+      `frame_sink_observes_*`），live 模式帧差未触发时不产生调试帧
+- [x] 编码：纯函数 `encode_debug_thumbnail`（≤480px JPEG80），单测覆盖
+      缩放、格式转换与非法缓冲
+- [x] 传输：`debug_frame_updated` 事件 payload（`image`/`region`/
+      `frame_index`/`timestamp_ms`）契约有单测；节流 ≤10fps；区域元数据
+      单次取命令区域、实时跟随选区；编码失败 `warn!` 跳过且不影响翻译
+- [x] 日志纪律：Debug 帧不进日志，开关状态只记一行 `info!`
+- [x] 隐私：只显示不保存（不落盘、不进日志、不进 store/结果窗口）；面板
+      显示依赖真实桌面环境，登记 README 手工验证项 12
 
 ## 开发注意事项
 
@@ -157,6 +243,11 @@ crates/vtrans-app/
 - 所有 Command 返回 Result<T, AppError>
 - AppError 实现 Serialize 用于前端错误展示
 - src-tauri/main.rs 只调用 vtrans-app::init_app，保持薄层
+- 主窗口关闭默认隐藏到托盘而非退出；托盘是唯一恢复入口，托盘创建失败时
+  应用启动失败而不是留下无法恢复的孤儿进程
 - 合并顺序：`feat/10-app` 必须先于 `feat/11-frontend` 合并——模块 11 已调用
   `set_source_language` / `set_target_language`，若前端先合并，运行时会出现
-  command 不存在错误。
+  command 不存在错误。`set_api_key` / `get_app_config` 同理，前端
+  `SettingsPanel` 已按 `{ apiKey }`（Tauri 2 默认 camelCase）参数名约定等待
+  这两个命令落地；新增 command 不得添加 `rename_all = "snake_case"`，否则
+  需同步修改前端 `src/services/tauri.ts` 与 `src/test/ipc.test.ts`。

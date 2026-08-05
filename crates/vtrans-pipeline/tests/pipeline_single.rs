@@ -69,6 +69,47 @@ fn happy_path_pipeline() -> (
 }
 
 #[tokio::test]
+async fn frame_sink_observes_the_captured_frame_before_ocr() {
+    let region = ScreenRegion::new("m0", 10, 20, 8, 8);
+    let capture = Arc::new(MockCaptureBehavior::default());
+    capture
+        .capture_once_outcome
+        .lock()
+        .unwrap_or_else(poison_inner)
+        .replace(Ok(solid_image(8, 8, 1)));
+    let ocr = Arc::new(MockOcrBehavior::default());
+    ocr.push(Ok(ocr_result("Hello world")));
+    let translation = Arc::new(MockTranslationBehavior::default());
+    translation.push(Ok(translation_result("你好世界", "mock-translation")));
+    let sink = Arc::new(RecordingSink::default());
+
+    let pipeline = Arc::new(Pipeline::with_frame_sink(
+        single_config(region),
+        deps(
+            MockCaptureSource::new(capture.clone()),
+            MockOcr::new(ocr.clone()),
+            MockTranslation::new(translation.clone()),
+        ),
+        Some(sink.clone()),
+    ));
+    let (tx, rx) = mpsc::channel(32);
+
+    let result = pipeline.run(tx).await;
+    assert!(result.is_ok(), "run failed: {result:?}");
+    let events = collect_events(rx).await;
+    assert!(matches!(events[1], PipelineEvent::OcrStarted));
+
+    assert_eq!(sink.calls.load(Ordering::SeqCst), 1);
+    let observed = sink
+        .last
+        .lock()
+        .unwrap_or_else(poison_inner)
+        .clone()
+        .unwrap();
+    assert_eq!((observed.width, observed.height), (8, 8));
+}
+
+#[tokio::test]
 async fn single_capture_emits_full_event_chain() {
     let (pipeline, capture, ocr, translation) = happy_path_pipeline();
     let (tx, rx) = mpsc::channel(32);

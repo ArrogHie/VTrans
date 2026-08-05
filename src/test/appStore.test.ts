@@ -62,6 +62,7 @@ describe("appStore", () => {
       selected_region: null,
       live_running: false,
       model_progress: null,
+      debug_mode: false,
     });
     expect(useAppStore.getState().config.translation.provider).toBe("local");
   });
@@ -74,6 +75,7 @@ describe("appStore", () => {
       selected_region: null,
       live_running: false,
       model_progress: null,
+      debug_mode: false,
     });
     expect(useAppStore.getState().config.translation.provider).toBe("api");
   });
@@ -86,6 +88,7 @@ describe("appStore", () => {
       selected_region: region,
       live_running: true,
       model_progress: null,
+      debug_mode: false,
     });
     const state = useAppStore.getState();
     expect(state.mode).toBe("live");
@@ -105,6 +108,7 @@ describe("appStore", () => {
       selected_region: null,
       live_running: true,
       model_progress: null,
+      debug_mode: false,
     });
     expect(useAppStore.getState().liveConfig).toBeNull();
   });
@@ -123,6 +127,7 @@ describe("appStore", () => {
       selected_region: region,
       live_running: true,
       model_progress: null,
+      debug_mode: false,
     });
     expect(useAppStore.getState().liveConfig).toEqual(existing);
   });
@@ -142,6 +147,7 @@ describe("appStore", () => {
       selected_region: region,
       live_running: true,
       model_progress: null,
+      debug_mode: false,
     });
     expect(useAppStore.getState().livePaused).toBe(false);
     expect(useAppStore.getState().liveConfig).toEqual(existing);
@@ -162,6 +168,7 @@ describe("appStore", () => {
       selected_region: region,
       live_running: false,
       model_progress: null,
+      debug_mode: false,
     });
     expect(useAppStore.getState().liveConfig).toEqual(existing);
     expect(useAppStore.getState().livePaused).toBe(true);

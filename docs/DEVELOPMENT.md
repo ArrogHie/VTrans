@@ -135,8 +135,8 @@ cargo test -p vtrans-text
 ### 6.3 验证 CLI
 
 ```powershell
-cargo run --example ocr_verify -- --image tests/fixtures/ja_horizontal.png
-cargo run --example translation_verify -- --text "Hello" --source en --target ja
+cargo run -p vtrans-ocr --example ocr_verify -- --image tests/fixtures/ja_horizontal.png
+cargo run -p vtrans-translation --example translation_verify -- --text "Hello" --source en --target ja
 ```
 
 ### 6.4 前端测试
@@ -158,7 +158,7 @@ cargo clippy --workspace --all-targets
 
 开发模式日志输出到控制台。生产模式日志写入：%APPDATA%\com.vtrans.app\logs\
 
-日志文件 10MB 轮转，保留 5 个文件。
+日志按小时轮转，保留最近 5 个文件。
 
 ### 7.2 日志级别控制
 

@@ -44,6 +44,20 @@ pub use cancel::TaskSlot;
 pub use dedup::{FrameDiffer, TextDedup, DEFAULT_DIFFERENCE_THRESHOLD};
 pub use single::run_single_capture;
 
+/// Observes captured frames before they enter OCR.
+///
+/// The pipeline calls [`on_frame`](Self::on_frame) for every frame that
+/// reaches the OCR stage (in live mode, after frame-difference detection
+/// accepted the frame; in single mode, after capture). The callback is
+/// synchronous and must not block the pipeline: implementations forward the
+/// frame into a bounded queue and return immediately. A pipeline without a
+/// sink (`None`) performs no extra work, so Debug-only frame observation is
+/// zero-cost when disabled.
+pub trait FrameSink: Send + Sync {
+    /// Observes one frame that is about to enter OCR.
+    fn on_frame(&self, frame: &CapturedImage);
+}
+
 /// Errors reported by the translation pipeline.
 ///
 /// Capture, OCR, and translation errors are imported from `vtrans-core` and
@@ -330,6 +344,7 @@ impl PipelineState {
 pub struct Pipeline {
     deps: Arc<PipelineDeps>,
     state: Arc<PipelineState>,
+    frame_sink: Option<Arc<dyn FrameSink>>,
 }
 
 impl std::fmt::Debug for Pipeline {
@@ -347,6 +362,20 @@ impl Pipeline {
     /// dependencies.
     #[must_use]
     pub fn new(config: PipelineConfig, deps: PipelineDeps) -> Self {
+        Self::with_frame_sink(config, deps, None)
+    }
+
+    /// Creates a pipeline with an optional frame observer.
+    ///
+    /// The sink receives every frame that is about to enter OCR. Passing
+    /// `None` (the default, see [`new`](Self::new)) keeps the capture path
+    /// identical to a pipeline without frame observation.
+    #[must_use]
+    pub fn with_frame_sink(
+        config: PipelineConfig,
+        deps: PipelineDeps,
+        frame_sink: Option<Arc<dyn FrameSink>>,
+    ) -> Self {
         Self {
             deps: Arc::new(deps),
             state: Arc::new(PipelineState {
@@ -357,6 +386,7 @@ impl Pipeline {
                 done: Notify::new(),
                 region_changed: Notify::new(),
             }),
+            frame_sink,
         }
     }
 
@@ -390,6 +420,7 @@ impl Pipeline {
         }
 
         let config = self.state.config();
+        let frame_sink = self.frame_sink.clone();
         info!(
             mode = ?config.mode,
             region = ?config.region,
@@ -403,6 +434,7 @@ impl Pipeline {
                     config,
                     stop,
                     &event_tx,
+                    frame_sink,
                 )
                 .await
             }
@@ -412,6 +444,7 @@ impl Pipeline {
                     self.state.clone(),
                     stop,
                     event_tx.clone(),
+                    frame_sink,
                 )
                 .await
             }
