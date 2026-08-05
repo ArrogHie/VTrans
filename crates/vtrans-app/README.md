@@ -139,10 +139,23 @@ emit_pipeline_event 转发以下事件：
 
 ### 选区 overlay
 
-选区确认（`update_live_region`）后，一个无边框、透明、置顶、可点穿的全屏
-overlay 窗口覆盖在区域所在显示器上，用纯 CSS 边框持续标出捕获区域（含
-尺寸标签）。重新选区或实时会话结束时 overlay 隐藏；overlay 窗口不接收
-鼠标事件，也不传输任何图像数据（只传 `ScreenRegion` 坐标）。
+选区确认后，一个无边框、透明、置顶、可点穿的全屏 overlay 窗口覆盖在区域
+所在显示器上（窗口原点 = 显示器原点，尺寸 = 显示器尺寸），用纯 CSS 边框
+在区域相对偏移处持续标出捕获区域（含尺寸标签）。显示/定位由前端
+`regionOverlay` 服务驱动（`availableMonitors` + `setPosition`/`setSize` +
+`setIgnoreCursorEvents`），后端在 `update_live_region` 与 `start_live_task`
+中同步显示、在重新选区/取消时隐藏作为兜底。暂停实时会话保留方框；真正
+停止（UI 按钮或热键）时隐藏。overlay 窗口不接收鼠标事件，也不传输任何
+图像数据（只传 `ScreenRegion` 坐标）。
+
+### capability 归属
+
+`src-tauri/capabilities/default.json` 由模块 10 统一维护，清单按前端实际
+调用的窗口 API 复核：`allow-available-monitors`、`allow-set-position`、
+`allow-set-size`、`allow-set-ignore-cursor-events` 由 `regionOverlay`
+服务使用（常驻方框的显示器枚举/定位/点穿），`allow-show`/`allow-hide`/
+`allow-set-focus`/`allow-set-always-on-top`/`allow-start-dragging` 由结果
+窗口与选区窗口使用；无多余权限。
 
 ### Tauri bootstrap
 
@@ -257,4 +270,8 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
   不支持跨显示器拖拽，因此框选区域始终位于该显示器内。
 - overlay 边框会被 Windows Graphics Capture 截入画面（位于选区边缘，2px），
   对 OCR 文本行检测的影响可忽略；这是"屏幕常驻标记"的固有代价。
-- Tauri capability 文件仍由宿主项目维护；生产构建应按窗口和 command 最小化 capability。
+- 常驻方框为纯 CSS 边框，不显示区域真实缩略图；如需屏幕缩略预览，需架构
+  确认后由 vtrans-app 提供小尺寸位图事件/命令（`CapturedImage` 不得跨
+  IPC），前端方框已兜底，不阻塞 MVP。
+- capability 清单由模块 10 统一维护（见「capability 归属」一节）；生产构建
+  应按窗口和 command 最小化 capability。

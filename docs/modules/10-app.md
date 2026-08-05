@@ -79,11 +79,30 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
 
 ### 选区 overlay
 
-- 选区确认（`update_live_region`）→ overlay 窗口定位到区域所在显示器并
-  显示 CSS 边框 + 尺寸标签（事件 `overlay_region_updated`）；
-- 重新选区 / 实时会话结束 → 隐藏（事件 `overlay_hidden`）；
-- overlay 无边框、透明、置顶、可点穿（`set_ignore_cursor_events(true)`），
-  只传输 `ScreenRegion` 坐标，不跨 IPC 传图像。
+- 选区确认（`update_live_region`）→ overlay 窗口覆盖区域所在显示器（窗口
+  原点 = 显示器原点），前端 `regionOverlay` 服务定位/显示/点穿，后端同步
+  显示兜底；CSS 边框 + 尺寸标签绘制在区域相对偏移处（事件
+  `overlay_region_updated`）；
+- 重新选区 / 取消 / 真正停止（UI 按钮或热键）→ 隐藏（事件
+  `overlay_hidden`）；暂停实时会话保留方框（暂停走 `stop_live_translation`，
+  后端不在停止路径隐藏，避免与前端暂停语义冲突）；
+- overlay 无边框、透明、置顶、可点穿（`focusable: false` +
+  `set_ignore_cursor_events(true)`），只传输 `ScreenRegion` 坐标，不跨 IPC
+  传图像。
+
+### capability 归属
+
+`src-tauri/capabilities/default.json` 由模块 10 统一维护，清单按前端实际
+调用的窗口 API 复核：`allow-available-monitors`、`allow-set-position`、
+`allow-set-size`、`allow-set-ignore-cursor-events` 由 `regionOverlay` 服务
+使用（常驻方框的显示器枚举/定位/点穿），其余 `allow-show`/`allow-hide`/
+`allow-set-focus`/`allow-set-always-on-top`/`allow-start-dragging` 由结果
+窗口与选区窗口使用；无多余权限。
+
+**待架构确认（不阻塞 MVP）**：常驻方框目前为纯 CSS 边框，不显示区域真实
+缩略图；若产品要求屏幕缩略预览，需由 vtrans-app 提供小尺寸位图事件/命令
+（`CapturedImage` 不得跨 IPC）。命令命名约定维持 Tauri 默认 camelCase，
+如需统一 snake_case 需前后端同步修改（见 `contracts.rs` 注释）。
 
 ## 错误类型
 
