@@ -8,6 +8,8 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - 提供手动单次翻译、实时翻译、区域更新、语言/Provider 切换、设置持久化和状态查询命令。
 - 将 vtrans_pipeline::PipelineEvent 转换为稳定的前端事件名和 JSON payload。
 - 注册配置中的全局快捷键，并把快捷键动作派发到选区、实时翻译和停止流程。
+- 管理系统托盘（关闭主窗口隐藏到托盘、托盘菜单恢复/退出）与单实例保护。
+- 维护常驻选区 overlay 窗口，在屏幕上持续显示当前捕获区域边界。
 - 使用 AppError 将底层错误映射为可序列化、可展示的用户错误信息。
 
 ## 依赖关系
@@ -36,6 +38,7 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - thiserror：错误枚举和错误链。
 - tracing：结构化生命周期和错误日志。
 - tracing-appender：持有 `WorkerGuard`，在应用生命周期内刷新非阻塞日志写入器。
+- tauri-plugin-single-instance：阻止多实例并存，避免全局快捷键冲突。
 
 所有依赖使用 MIT 或 Apache-2.0 兼容许可证；新增依赖仅在本 crate 的 Cargo.toml 中声明。
 
@@ -122,8 +125,24 @@ emit_pipeline_event 转发以下事件：
 - live_session_stopped
 - model_loading_progress
 - region_selected
+- overlay_region_updated
+- overlay_hidden
 
 事件只包含标准文本/状态结构，不携带截图图像数据。敏感凭据不会进入事件或日志。
+
+### 窗口生命周期与托盘
+
+关闭主窗口（点 X）不会退出进程：窗口隐藏到系统托盘，实时会话与全局快捷键
+继续运行。托盘图标左键单击或菜单「显示主窗口」恢复主窗口；菜单「退出」是
+唯一的主动退出路径，进程退出时释放全部快捷键。第二个进程实例启动时会被
+单实例插件拦截，并恢复已有实例的主窗口。
+
+### 选区 overlay
+
+选区确认（`update_live_region`）后，一个无边框、透明、置顶、可点穿的全屏
+overlay 窗口覆盖在区域所在显示器上，用纯 CSS 边框持续标出捕获区域（含
+尺寸标签）。重新选区或实时会话结束时 overlay 隐藏；overlay 窗口不接收
+鼠标事件，也不传输任何图像数据（只传 `ScreenRegion` 坐标）。
 
 ### Tauri bootstrap
 
@@ -202,6 +221,14 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 8. **get_app_config 水合**：在设置面板保存配置后修改配置文件中其它字段
    （如 OCR 语言），重启应用打开设置面板，确认显示后端真实值而非前端默认
    值；整包保存后其它字段不被覆盖。
+9. **托盘与窗口生命周期**：点击主窗口关闭按钮，确认主窗口隐藏、进程仍在、
+   托盘出现图标；左键单击托盘恢复主窗口；托盘菜单「退出」后进程结束且
+   全局快捷键不再占用（再次按下 Alt+Shift+A/R/S 不触发本应用）。
+10. **选区 overlay**：框选确认后，屏幕上出现与选区对齐的常驻边框（含尺寸
+    标签）；实时会话运行中更新区域，边框同步移动/缩放；停止实时或重新
+    选区时边框消失；框选区域内的鼠标操作（点击、拖动）不受 overlay 影响。
+11. **单实例**：应用运行中再次启动 vtrans.exe，确认不会出现第二个进程，
+    已有实例的主窗口被恢复显示。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
@@ -224,4 +251,10 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 - 全局快捷键由配置字符串解析，冲突或非法快捷键会在启动时返回 HotkeyFailed；当前没有 UI 内热键冲突编辑器。
   通过 `save_settings` 修改热键配置后需要重启应用才会重新注册。
 - 单次捕获的进度事件（ocr_started 等）由 capture_once 转发，但命令契约仍只返回 OcrResult；前端如需进度提示需同时监听 ocr_started/translation_started。
+- 关闭主窗口是「隐藏到托盘」而非退出；只有托盘菜单「退出」或任务管理器
+  能结束进程，首次使用时需注意托盘图标的存在。
+- overlay 仅覆盖区域所在显示器（selector 全屏所在的显示器）；选区窗口目前
+  不支持跨显示器拖拽，因此框选区域始终位于该显示器内。
+- overlay 边框会被 Windows Graphics Capture 截入画面（位于选区边缘，2px），
+  对 OCR 文本行检测的影响可忽略；这是"屏幕常驻标记"的固有代价。
 - Tauri capability 文件仍由宿主项目维护；生产构建应按窗口和 command 最小化 capability。

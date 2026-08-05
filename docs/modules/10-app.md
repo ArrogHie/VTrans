@@ -58,6 +58,8 @@ impl AppState {
 
 ```rust
 pub fn emit_pipeline_event(app: &AppHandle, event: PipelineEvent);
+pub fn emit_overlay_region(app: &AppHandle, region: &ScreenRegion);
+pub fn emit_overlay_hidden(app: &AppHandle);
 ```
 
 ### 全局快捷键
@@ -68,6 +70,20 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
 // Alt+Shift+R: start_live_translation (实时)
 // Alt+Shift+S: stop_live_translation
 ```
+
+### 窗口生命周期与托盘
+
+- 关闭主窗口 → 隐藏到系统托盘（进程、实时会话、全局快捷键继续运行）；
+- 托盘左键 / 菜单「显示主窗口」→ 恢复主窗口；菜单「退出」→ `app.exit(0)`；
+- 单实例插件拦截第二个进程实例并恢复已有实例主窗口。
+
+### 选区 overlay
+
+- 选区确认（`update_live_region`）→ overlay 窗口定位到区域所在显示器并
+  显示 CSS 边框 + 尺寸标签（事件 `overlay_region_updated`）；
+- 重新选区 / 实时会话结束 → 隐藏（事件 `overlay_hidden`）；
+- overlay 无边框、透明、置顶、可点穿（`set_ignore_cursor_events(true)`），
+  只传输 `ScreenRegion` 坐标，不跨 IPC 传图像。
 
 ## 错误类型
 
@@ -125,6 +141,9 @@ crates/vtrans-app/
 | set_api_key | 手工验证 + 单元 | 全链路手工验证（README 第 7 条）；key 校验与凭据存储有单测，IPC 参数契约见 contracts.rs |
 | get_app_config | 手工验证 + 单元 | 前端水合手工验证（README 第 8 条）；AppConfig 序列化字段契约见 contracts.rs |
 | 快捷键注册 | 手工验证 | 依赖真实全局快捷键注册环境（README 第 5 条）；动作分派枚举有单测 |
+| 托盘与窗口生命周期 | 手工验证 | 依赖系统托盘与真实窗口环境（README 第 9 条）；菜单 id 与事件名有单测 |
+| 选区 overlay | 手工验证 + 单元 | 依赖真实显示器（README 第 10 条）；overlay 坐标换算由前端单测覆盖 |
+| 单实例保护 | 手工验证 | 依赖进程级行为（README 第 11 条） |
 | 错误映射 | 单元 | 各模块错误正确映射到 AppError（error.rs tests）✅ |
 | 事件发送 | 单元 | PipelineEvent 正确转为前端事件（events.rs tests）✅ |
 
@@ -163,6 +182,8 @@ crates/vtrans-app/
 - 所有 Command 返回 Result<T, AppError>
 - AppError 实现 Serialize 用于前端错误展示
 - src-tauri/main.rs 只调用 vtrans-app::init_app，保持薄层
+- 主窗口关闭默认隐藏到托盘而非退出；托盘是唯一恢复入口，托盘创建失败时
+  应用启动失败而不是留下无法恢复的孤儿进程
 - 合并顺序：`feat/10-app` 必须先于 `feat/11-frontend` 合并——模块 11 已调用
   `set_source_language` / `set_target_language`，若前端先合并，运行时会出现
   command 不存在错误。`set_api_key` / `get_app_config` 同理，前端
