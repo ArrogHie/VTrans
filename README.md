@@ -10,6 +10,7 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
 - 监听后端 pipeline/model 事件，并在多个 Tauri WebView 间同步结果和实时会话状态。
 - 展示 OCR 原文和翻译结果，支持复制、重新翻译、暂停/继续、置顶和窗口拖动。
 - 提供只读设置面板（捕获间隔、差异阈值、超时、重试、快捷键、置顶），显示当前后端配置。
+- Debug 模式下实时显示进入 OCR 前的捕获帧缩略图（仅显示、不保存、不持久化）。
 
 ## 依赖关系
 
@@ -53,6 +54,19 @@ export function listenToEvent<K extends keyof EventPayloadMap>(
 ): Promise<Unlisten>;
 export function subscribeToBackendEvents(handlers: ...): Promise<Unlisten>;
 ```
+
+Debug 帧服务（仅 Debug 模式启用）：
+
+```ts
+export function subscribeToDebugFrames(
+  onFrame: (frame: DebugFramePayload) => void,
+): Promise<Unlisten>;
+export function createLatestFrameStore<T>(): LatestFrameStore<T>;
+export function useDebugFrame(enabled: boolean): DebugFramePayload | null;
+```
+
+`debug_frame_updated` 事件携带 base64 JPEG 缩略图（最长边 ≤ 480px）、区域坐标/尺寸、
+帧序号和时间戳；`AppStatus.debug_mode` 决定面板是否渲染。
 
 ### Store
 
@@ -102,6 +116,10 @@ pnpm tauri dev
 - 物理像素坐标转换（含反向拖拽）和零尺寸选区拒绝。
 - pipeline 状态标签和序列化错误分支。
 - 事件监听回调（含 `onOcrCompleted` 等便捷封装）的 payload 解包。
+- 最新值帧缓冲：多次推送只保留最新一帧，`clear` 释放缓存，绝不累积。
+- `debug_frame_updated` 事件订阅：事件名、payload 解包与注销清理。
+- DebugPanel 渲染：「Debug 模式 · 仅显示不保存」文案、缩略图 data URL、坐标/尺寸/帧号/
+  时间戳叠加、可选 OCR 对照行的展示与截断。
 - 后端 provider id（`"api"` / `"local-onnx"`）到前端配置标识符的映射与未知值回退。
 - 模式切换控件在实时会话运行期间的禁用行为。
 
@@ -119,6 +137,8 @@ pnpm tauri dev
 | 实时暂停 | 实时运行中点暂停再点继续 | 后端任务停止后前端显示暂停态；继续后恢复识别 |
 | 快捷键会话 | 使用全局快捷键启动实时翻译 | 主窗口进入实时模式，暂停/停止按钮可用（依赖 `frontend_live_config` 事件，见已知限制 6） |
 | 窗口控制 | 拖动/缩放主窗口与结果窗口，切换结果窗口置顶 | 窗口可拖动、可缩放；置顶开关即时生效 |
+| Debug 帧显示 | 以 `--debug` 或 `VTRANS_DEBUG=1` 启动，开启实时翻译或单次翻译 | 主窗口出现「Debug 模式 · 仅显示不保存」面板，缩略图随捕获帧实时更新；正常启动时主窗口无该区块 |
+| Debug 退出清理 | Debug 模式下停止翻译并退出应用 | 面板帧数据随窗口销毁释放，不落盘、不写入日志、不进入结果窗口 |
 
 ## 已知限制
 
@@ -129,3 +149,7 @@ pnpm tauri dev
 5. 事件监听在每个 webview 中安装，窗口销毁时统一清理；事件到达前关闭的窗口不会补发历史结果。
 6. 通过全局快捷键启动的实时会话依赖 `vtrans-app` 在快捷键路径补发 `frontend_live_config` 事件；`applyStatus` 保留回退逻辑：收到 `live_running && selected_region` 且本地没有 `liveConfig` 时，用 `config.capture` 默认值构造配置，让暂停/停止在事件到达前立即可用。若后端版本未补发该事件，捕获间隔/阈值会以默认值近似。
 7. API Key、完整原文/译文、截图像素和模型原始输出不存储在前端 store，也不会写入浏览器日志。
+8. Debug 面板仅在应用以 `--debug` 或 `VTRANS_DEBUG=1` 启动时出现（开关不写入 config.json）。
+   帧图像由后端以 ≤10fps 节流、最长边 ≤480px 的 base64 JPEG 缩略图经 `debug_frame_updated`
+   事件推送；前端仅保留内存中最新一帧，关闭 Debug 模式或退出即释放，不落盘、不写日志、
+   不发送到结果窗口。Debug 关闭时前端不订阅该事件，整条链路零开销。
