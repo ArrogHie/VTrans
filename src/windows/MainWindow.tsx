@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FolderCheck, MousePointer2, Pause, Play, RefreshCw, Settings2, Square } from "lucide-react";
+import { DebugPanel } from "../components/DebugPanel";
 import { LanguageSelector } from "../components/LanguageSelector";
 import { ModeToggle } from "../components/ModeToggle";
 import { ProviderToggle } from "../components/ProviderToggle";
 import { ResultCard } from "../components/ResultCard";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { StatusBar } from "../components/StatusBar";
+import { useDebugFrame } from "../hooks/useDebugFrame";
 import { hideRegionOverlay, showRegionOverlay } from "../services/regionOverlay";
 import {
   captureOnce,
@@ -31,7 +32,7 @@ import {
 import { useAppStore } from "../stores/appStore";
 import { regionPreviewBox } from "../utils/regionPreview";
 import { isLocalPairSupported } from "../types";
-import type { DebugFramePayload, LanguageCode, Mode } from "../types";
+import type { LanguageCode, Mode } from "../types";
 
 const OCR_LANGUAGES = [
   { value: "auto", label: "自动检测" },
@@ -57,24 +58,7 @@ export function MainWindow() {
   const [modelMessage, setModelMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
-  const [debugFrame, setDebugFrame] = useState<DebugFramePayload | null>(null);
-
-  useEffect(() => {
-    // Debug 模式开启时才注册监听；关闭时面板与事件订阅都不存在。
-    if (!debugMode) return;
-    let disposed = false;
-    let unlisten: UnlistenFn | undefined;
-    void listen<DebugFramePayload>("debug_frame_updated", (event) => {
-      if (!disposed) setDebugFrame(event.payload);
-    }).then((cleanup) => {
-      if (disposed) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [debugMode]);
+  const debugFrame = useDebugFrame(debugMode);
 
   useEffect(() => {
     let active = true;
@@ -368,31 +352,7 @@ export function MainWindow() {
           </div>
         </section>
 
-        {debugMode && (
-          <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-sm font-semibold">调试：捕获帧</h2>
-              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-600">
-                Debug
-              </span>
-            </div>
-            {debugFrame ? (
-              <>
-                <img
-                  src={`data:image/jpeg;base64,${debugFrame.image}`}
-                  alt="OCR 前捕获帧"
-                  className="max-h-56 w-full rounded-md border border-slate-200 bg-slate-50 object-contain"
-                />
-                <p className="mt-2 text-[11px] text-slate-400">
-                  帧 #{debugFrame.frame_index} · {debugFrame.region.width} ×{" "}
-                  {debugFrame.region.height} · 时间 {new Date(debugFrame.timestamp_ms).toLocaleTimeString()}
-                </p>
-              </>
-            ) : (
-              <p className="py-4 text-center text-xs text-slate-400">等待捕获帧…</p>
-            )}
-          </section>
-        )}
+        {debugMode && <DebugPanel frame={debugFrame} ocrText={ocrResult?.merged_text ?? null} />}
 
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-sm font-semibold">语言与引擎</h2>
