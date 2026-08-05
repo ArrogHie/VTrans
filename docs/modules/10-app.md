@@ -116,7 +116,9 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
   Base64），在阻塞池执行；帧序号/时间戳随 payload 发送。
 - **事件**：`debug_frame_updated`（仅 Debug 开启时发射），payload 含
   `image`/`region`/`frame_index`/`timestamp_ms`；≤10fps 节流、watch 最新值
-  语义、编码失败 `warn!` 跳过。
+  语义、编码失败 `warn!` 跳过。区域元数据：单次翻译取命令传入的区域，
+  实时会话跟随 `update_live_region` 的选区；`frame_index` 按捕获帧递增，
+  被节流/编码失败跳过的帧留下序号缺口，前端可据此判断丢帧。
 - **隐私**：只显示不保存（不落盘、不进日志、不进 store/结果窗口）；此
   缩略图跨 IPC 是 Debug-only 显式豁免（`CapturedImage` 默认禁止序列化）。
 
@@ -203,14 +205,34 @@ crates/vtrans-app/
 
 ## 验收标准
 
-- [ ] 所有 Commands 可被前端调用
-- [ ] 所有 Events 正确推送到前端
-- [ ] AppState 正确组装各模块实现
-- [ ] 快捷键可注册和触发
-- [ ] 错误信息对用户友好
-- [ ] UI 线程不被阻塞
-- [ ] Release 构建关闭不必要 capability
-- [ ] README.md 完整
+- [x] 所有 Commands 可被前端调用（`invoke_handler` 注册 15 个命令，前端
+      `src/services/tauri.ts` 全部按 Tauri 2 camelCase 参数契约调用）
+- [x] 所有 Events 正确推送到前端（`events.rs` 单测 + `tests/contracts.rs`
+      固化了事件名与 payload 形状）
+- [x] AppState 正确组装各模块实现（`AppState::new` / `new_with_debug`）
+- [x] 快捷键可注册和触发（实现 + 动作分派单测；真实注册依赖桌面环境，
+      登记 README 手工验证项 5）
+- [x] 错误信息对用户友好（`AppError` 序列化为纯字符串，`error.rs` 单测）
+- [x] UI 线程不被阻塞（模型校验、缩略图编码走 `spawn_blocking`）
+- [x] Release 构建关闭不必要 capability（Debug 面板采用主窗口内嵌方案，
+      不新增窗口/权限；capability 归属见「capability 归属」一节）
+- [x] README.md 完整
+
+### Debug 模式验收（本任务）
+
+- [x] 开关：`--debug` / `VTRANS_DEBUG=1`（`true` 亦可），默认关闭、不持久化；
+      解析失败不影响启动（`parse_debug_env_value` 单测）
+- [x] 关闭时零开销：不挂 `FrameSink`、不注册 `debug_frame_updated`、无面板
+- [x] 帧出口：pipeline `FrameSink` 在进入 OCR 前收到帧（pipeline 集成测试
+      `frame_sink_observes_*`），live 模式帧差未触发时不产生调试帧
+- [x] 编码：纯函数 `encode_debug_thumbnail`（≤480px JPEG80），单测覆盖
+      缩放、格式转换与非法缓冲
+- [x] 传输：`debug_frame_updated` 事件 payload（`image`/`region`/
+      `frame_index`/`timestamp_ms`）契约有单测；节流 ≤10fps；区域元数据
+      单次取命令区域、实时跟随选区；编码失败 `warn!` 跳过且不影响翻译
+- [x] 日志纪律：Debug 帧不进日志，开关状态只记一行 `info!`
+- [x] 隐私：只显示不保存（不落盘、不进日志、不进 store/结果窗口）；面板
+      显示依赖真实桌面环境，登记 README 手工验证项 12
 
 ## 开发注意事项
 

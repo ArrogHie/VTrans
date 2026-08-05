@@ -7,6 +7,12 @@
 //! `debug_frame_updated`. The pipeline is display-only: frames are never
 //! written to disk, logged, or persisted. When Debug mode is off, no sink is
 //! attached to the pipeline and none of this code runs.
+//!
+//! The forwarder counts **every** frame the pipeline hands over (each watch
+//! wake corresponds to one captured frame accepted by frame-difference
+//! detection), so the emitted `frame_index` advances even when the frame
+//! itself is dropped by the ≤10 fps throttle or fails to encode. The
+//! frontend can therefore detect dropped frames as gaps in the sequence.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,7 +23,7 @@ use tauri::Manager;
 use thiserror::Error;
 use tokio::sync::watch;
 use tracing::warn;
-use vtrans_core::{CapturedImage, PixelFormat};
+use vtrans_core::{CapturedImage, PixelFormat, ScreenRegion};
 use vtrans_pipeline::FrameSink;
 
 use crate::events::{emit_debug_frame, DebugFramePayload};
@@ -32,6 +38,46 @@ const MAX_FRAME_RATE: u32 = 10;
 
 /// Minimum interval between two emitted debug frames (1000 / 10 fps).
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(1000 / MAX_FRAME_RATE as u64);
+
+/// How the region metadata attached to an emitted debug frame is resolved.
+///
+/// A single capture always originates from the region passed to the
+/// `capture_once` command, which is not stored in `AppState`; a live session
+/// instead follows `AppState::selected_region` so mid-session region updates
+/// are reflected in the payload.
+#[derive(Clone, Debug)]
+pub(crate) enum RegionSource {
+    /// The frame always originates from this exact region (single captures).
+    Fixed(ScreenRegion),
+    /// Follows the last region selected in `AppState` so live region updates
+    /// are reflected; falls back to the region the session started with.
+    FollowSelected(ScreenRegion),
+}
+
+impl RegionSource {
+    /// Resolves the region metadata for one frame.
+    ///
+    /// `selected` is the current `AppState::selected_region` snapshot; it is
+    /// ignored by [`RegionSource::Fixed`] because a single capture's region
+    /// must not be confused with a previously selected live region.
+    fn resolve(&self, selected: Option<ScreenRegion>) -> ScreenRegion {
+        match self {
+            Self::Fixed(region) => region.clone(),
+            Self::FollowSelected(initial) => selected.unwrap_or_else(|| initial.clone()),
+        }
+    }
+}
+
+/// Returns `true` when a frame may be emitted now, enforcing the maximum
+/// debug frame rate.
+///
+/// The first frame is always allowed; subsequent frames must be at least
+/// [`MIN_FRAME_INTERVAL`] apart (the boundary itself is allowed).
+fn throttle_allows(now: Instant, last_emit: Option<Instant>) -> bool {
+    last_emit.map_or(true, |previous| {
+        now.duration_since(previous) >= MIN_FRAME_INTERVAL
+    })
+}
 
 /// Errors produced while encoding a debug thumbnail.
 #[derive(Debug, Error)]
@@ -146,7 +192,10 @@ impl FrameSink for ChannelFrameSink {
 /// Received frames are throttled to [`MAX_FRAME_RATE`], encoded on the
 /// blocking pool, and emitted as `debug_frame_updated`. The task exits when
 /// the pipeline drops the sink (channel closed).
-pub(crate) fn spawn_debug_frame_forwarder(app: tauri::AppHandle) -> Arc<dyn FrameSink> {
+pub(crate) fn spawn_debug_frame_forwarder(
+    app: tauri::AppHandle,
+    region_source: RegionSource,
+) -> Arc<dyn FrameSink> {
     let placeholder = CapturedImage::new(1, 1, PixelFormat::Rgba8, vec![0; 4])
         .expect("1x1 placeholder image is valid");
     let (tx, mut rx) = watch::channel(placeholder);
@@ -155,18 +204,20 @@ pub(crate) fn spawn_debug_frame_forwarder(app: tauri::AppHandle) -> Arc<dyn Fram
         let mut frame_index: u64 = 0;
         while rx.changed().await.is_ok() {
             let image = rx.borrow_and_update().clone();
+            // Every watch wake is one captured frame accepted by the
+            // pipeline; advance the sequence even when the frame is dropped
+            // below so the frontend can see the gap.
+            frame_index = frame_index.wrapping_add(1);
             let now = Instant::now();
-            if last_emit.is_some_and(|previous| now.duration_since(previous) < MIN_FRAME_INTERVAL) {
+            if !throttle_allows(now, last_emit) {
                 continue;
             }
             last_emit = Some(now);
-            frame_index = frame_index.wrapping_add(1);
-            let region = app
-                .state::<AppState>()
-                .selected_region()
-                .unwrap_or_else(|| {
-                    vtrans_core::ScreenRegion::new("", 0, 0, image.width, image.height)
-                });
+            let selected = match &region_source {
+                RegionSource::Fixed(_) => None,
+                RegionSource::FollowSelected(_) => app.state::<AppState>().selected_region(),
+            };
+            let region = region_source.resolve(selected);
             let encoded = tokio::task::spawn_blocking(move || encode_debug_thumbnail(&image)).await;
             let bytes = match encoded {
                 Ok(Ok(bytes)) => bytes,
@@ -284,5 +335,68 @@ mod tests {
             encode_debug_thumbnail(&image),
             Err(DebugFrameError::InvalidFrame(_))
         ));
+    }
+
+    #[test]
+    fn throttle_allows_the_first_frame_immediately() {
+        assert!(throttle_allows(Instant::now(), None));
+    }
+
+    #[test]
+    fn throttle_denies_frames_within_the_interval() {
+        let now = Instant::now();
+        let within = MIN_FRAME_INTERVAL
+            .checked_sub(Duration::from_millis(1))
+            .expect("the throttle interval is longer than one millisecond");
+        let previous = now
+            .checked_sub(within)
+            .expect("instant supports the subtraction");
+        assert!(!throttle_allows(now, Some(previous)));
+    }
+
+    #[test]
+    fn throttle_allows_frames_at_or_after_the_interval_boundary() {
+        let now = Instant::now();
+        let at_boundary = now
+            .checked_sub(MIN_FRAME_INTERVAL)
+            .expect("instant supports the subtraction");
+        assert!(throttle_allows(now, Some(at_boundary)));
+        let after_boundary = now
+            .checked_sub(MIN_FRAME_INTERVAL + Duration::from_millis(1))
+            .expect("instant supports the subtraction");
+        assert!(throttle_allows(now, Some(after_boundary)));
+    }
+
+    #[test]
+    fn fixed_region_source_ignores_the_selected_region() {
+        let source = RegionSource::Fixed(ScreenRegion::new("m0", 1, 2, 3, 4));
+        let selected = Some(ScreenRegion::new("m9", 9, 9, 9, 9));
+        assert_eq!(region_fields(&source.resolve(selected)), ("m0", 1, 2, 3, 4));
+    }
+
+    #[test]
+    fn follow_selected_region_source_uses_the_selected_region() {
+        let source = RegionSource::FollowSelected(ScreenRegion::new("m0", 1, 2, 3, 4));
+        let selected = Some(ScreenRegion::new("m1", 10, 20, 30, 40));
+        assert_eq!(
+            region_fields(&source.resolve(selected)),
+            ("m1", 10, 20, 30, 40)
+        );
+    }
+
+    #[test]
+    fn follow_selected_region_source_falls_back_to_the_starting_region() {
+        let source = RegionSource::FollowSelected(ScreenRegion::new("m0", 1, 2, 3, 4));
+        assert_eq!(region_fields(&source.resolve(None)), ("m0", 1, 2, 3, 4));
+    }
+
+    fn region_fields(region: &ScreenRegion) -> (&str, i32, i32, u32, u32) {
+        (
+            region.monitor_id.as_str(),
+            region.x,
+            region.y,
+            region.width,
+            region.height,
+        )
     }
 }

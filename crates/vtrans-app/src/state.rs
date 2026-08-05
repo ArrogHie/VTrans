@@ -95,7 +95,7 @@ impl AppState {
     ///
     /// Returns an application error when config, models, capture, OCR, or
     /// translation cannot initialize.
-    #[tracing::instrument(skip(app_data_dir))]
+    #[tracing::instrument(skip(app_data_dir, debug_mode))]
     pub fn new_with_debug(app_data_dir: &Path, debug_mode: bool) -> Result<Self, AppError> {
         let config_manager = ConfigManager::new(app_data_dir)?;
         let config = config_manager.load()?;
@@ -114,7 +114,6 @@ impl AppState {
             ocr_provider = ocr_provider.id(),
             translation_provider = translation_provider.id(),
             model_dir = %model_dir.display(),
-            debug_mode,
             "application state initialized"
         );
         Ok(Self {
