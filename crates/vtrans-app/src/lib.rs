@@ -5,6 +5,7 @@
 //! global shortcut registration.
 
 pub mod commands;
+pub mod debug_frame;
 pub mod error;
 pub mod events;
 pub mod hotkeys;

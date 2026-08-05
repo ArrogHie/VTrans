@@ -16,6 +16,7 @@ pub const MODEL_LOADING_PROGRESS: &str = "model_loading_progress";
 pub const REGION_SELECTED: &str = "region_selected";
 pub const OVERLAY_REGION_UPDATED: &str = "overlay_region_updated";
 pub const OVERLAY_HIDDEN: &str = "overlay_hidden";
+pub const DEBUG_FRAME_UPDATED: &str = "debug_frame_updated";
 
 #[derive(Debug, Serialize)]
 struct StatusPayload<'a> {
@@ -47,6 +48,23 @@ struct StoppedPayload<'a> {
 struct ModelProgressPayload<'a> {
     model_id: &'a str,
     progress: f32,
+}
+
+/// Payload of the Debug-only `debug_frame_updated` event.
+///
+/// `image` is the Base64-encoded JPEG thumbnail (longest edge ≤ 480 px) of
+/// the frame that entered OCR. This event exists only while Debug mode is
+/// enabled and is display-only: the frontend never persists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DebugFramePayload {
+    /// Base64-encoded JPEG thumbnail bytes.
+    pub image: String,
+    /// Screen region the frame was captured from.
+    pub region: vtrans_core::ScreenRegion,
+    /// Monotonically increasing frame sequence number (wraps on overflow).
+    pub frame_index: u64,
+    /// Capture timestamp in milliseconds since the Unix epoch.
+    pub timestamp_ms: u64,
 }
 
 /// Maps a pipeline event to its stable event name and JSON payload.
@@ -151,6 +169,21 @@ pub fn emit_overlay_hidden<R: Runtime>(app: &AppHandle<R>) {
             event = OVERLAY_HIDDEN,
             error = %error,
             "failed to emit overlay hidden event"
+        );
+    }
+}
+
+/// Emits one debug thumbnail to the frontend debug panel.
+///
+/// Emission failures are logged but never propagated: a closed debug panel
+/// must not affect the capture pipeline.
+#[tracing::instrument(skip(app), fields(frame_index = payload.frame_index))]
+pub fn emit_debug_frame<R: Runtime>(app: &AppHandle<R>, payload: DebugFramePayload) {
+    if let Err(error) = app.emit(DEBUG_FRAME_UPDATED, payload) {
+        tracing::warn!(
+            event = DEBUG_FRAME_UPDATED,
+            error = %error,
+            "failed to emit debug frame"
         );
     }
 }

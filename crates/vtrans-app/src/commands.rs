@@ -10,6 +10,7 @@ use vtrans_config::AppConfig;
 use vtrans_core::{Language, OcrResult, PipelineMode, ScreenRegion};
 use vtrans_pipeline::{PipelineError, PipelineEvent};
 
+use crate::debug_frame::spawn_debug_frame_forwarder;
 use crate::error::AppError;
 use crate::events::{emit_model_loading_progress, emit_pipeline_event};
 use crate::overlay::{hide_region_overlay, show_region_overlay};
@@ -122,9 +123,13 @@ pub async fn capture_once(
     state: State<'_, AppState>,
 ) -> Result<OcrResult, AppError> {
     let app = state.app_handle()?;
+    let frame_sink = state
+        .debug_mode()
+        .then(|| spawn_debug_frame_forwarder(app.clone()));
     // The interval and threshold are ignored for single captures; the
     // pipeline builder uses the single-mode defaults for them.
-    let pipeline = state.build_pipeline(PipelineMode::SingleCapture, region, 0, 0.03)?;
+    let pipeline =
+        state.build_pipeline(PipelineMode::SingleCapture, region, 0, 0.03, frame_sink)?;
     let (event_tx, event_rx) = mpsc::channel(16);
     let ocr_result = run_capture_pipeline(
         |event| emit_pipeline_event(&app, event),
@@ -226,11 +231,15 @@ pub(crate) async fn start_live_task(
     // webview hidden. The frontend re-positions the same values afterwards,
     // so the calls converge on an identical window placement.
     show_region_overlay(&app, &config.region);
+    let frame_sink = state
+        .debug_mode()
+        .then(|| spawn_debug_frame_forwarder(app.clone()));
     let pipeline = state.build_pipeline(
         PipelineMode::LiveRegion,
         config.region,
         config.capture_interval_ms,
         config.difference_threshold,
+        frame_sink,
     )?;
     let pipeline = state.set_pipeline(pipeline);
     let (event_tx, event_rx) = mpsc::channel(32);

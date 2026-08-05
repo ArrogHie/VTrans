@@ -1,6 +1,6 @@
 use vtrans_app::events::{
-    CAPTURE_STATUS_CHANGED, OCR_COMPLETED, OVERLAY_HIDDEN, OVERLAY_REGION_UPDATED, PIPELINE_ERROR,
-    REGION_SELECTED,
+    DebugFramePayload, CAPTURE_STATUS_CHANGED, DEBUG_FRAME_UPDATED, OCR_COMPLETED, OVERLAY_HIDDEN,
+    OVERLAY_REGION_UPDATED, PIPELINE_ERROR, REGION_SELECTED,
 };
 use vtrans_app::{AppError, AppStatus, LiveTranslationConfig};
 use vtrans_config::AppConfig;
@@ -44,6 +44,7 @@ fn public_ipc_contracts_round_trip_through_json() {
         selected_region: Some(decoded.region),
         live_running: false,
         model_progress: None,
+        debug_mode: false,
     };
     assert!(serde_json::to_string(&status).unwrap().contains("pp-ocr"));
 }
@@ -65,7 +66,24 @@ fn event_names_are_stable() {
     assert_eq!(REGION_SELECTED, "region_selected");
     assert_eq!(OVERLAY_REGION_UPDATED, "overlay_region_updated");
     assert_eq!(OVERLAY_HIDDEN, "overlay_hidden");
+    assert_eq!(DEBUG_FRAME_UPDATED, "debug_frame_updated");
     assert_eq!(Language::English.code(), "en");
+}
+
+#[test]
+fn debug_frame_payload_serializes_with_frontend_field_names() {
+    let payload = DebugFramePayload {
+        image: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"jpeg-bytes"),
+        region: ScreenRegion::new("display-1", 10, 20, 800, 400),
+        frame_index: 42,
+        timestamp_ms: 1_785_911_487_496,
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+    assert!(json.contains(r#""image":"anBlZy1ieXRlcw==""#));
+    assert!(json.contains(r#""region""#));
+    assert!(json.contains(r#""frame_index":42"#));
+    assert!(json.contains(r#""timestamp_ms":1785911487496"#));
+    assert!(json.contains(r#""monitor_id":"display-1""#));
 }
 
 #[test]

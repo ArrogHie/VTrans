@@ -39,6 +39,12 @@ pub struct AppStatus {
     pub live_running: bool,
     /// Current model loading progress, if a load is in progress.
     pub model_progress: Option<f32>,
+    /// Whether Debug mode (capture-frame preview) is enabled for this run.
+    ///
+    /// Never persisted; it is parsed from `--debug` / `VTRANS_DEBUG` at
+    /// startup and is a plain mirror for the frontend to render the debug
+    /// panel.
+    pub debug_mode: bool,
 }
 
 /// Application-wide state managed by Tauri.
@@ -61,6 +67,7 @@ pub struct AppState {
     selection_waiter: Mutex<Option<oneshot::Sender<ScreenRegion>>>,
     app_handle: std::sync::RwLock<Option<AppHandle>>,
     model_progress: std::sync::RwLock<Option<f32>>,
+    debug_mode: bool,
 }
 
 impl AppState {
@@ -75,6 +82,21 @@ impl AppState {
     /// translation cannot initialize.
     #[tracing::instrument(skip(app_data_dir))]
     pub fn new(app_data_dir: &Path) -> Result<Self, AppError> {
+        Self::new_with_debug(app_data_dir, false)
+    }
+
+    /// Constructs the application state with Debug mode explicitly enabled
+    /// or disabled.
+    ///
+    /// Debug mode is a per-run flag (command line / environment), never
+    /// persisted. See [`new`](Self::new) for the remaining contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an application error when config, models, capture, OCR, or
+    /// translation cannot initialize.
+    #[tracing::instrument(skip(app_data_dir))]
+    pub fn new_with_debug(app_data_dir: &Path, debug_mode: bool) -> Result<Self, AppError> {
         let config_manager = ConfigManager::new(app_data_dir)?;
         let config = config_manager.load()?;
         let credentials = Arc::new(CredentialManager::new()?);
@@ -92,6 +114,7 @@ impl AppState {
             ocr_provider = ocr_provider.id(),
             translation_provider = translation_provider.id(),
             model_dir = %model_dir.display(),
+            debug_mode,
             "application state initialized"
         );
         Ok(Self {
@@ -108,7 +131,14 @@ impl AppState {
             selection_waiter: Mutex::new(None),
             app_handle: std::sync::RwLock::new(None),
             model_progress: std::sync::RwLock::new(None),
+            debug_mode,
         })
+    }
+
+    /// Returns whether Debug mode is enabled for this run.
+    #[must_use]
+    pub(crate) fn debug_mode(&self) -> bool {
+        self.debug_mode
     }
 
     pub(crate) fn attach_handle(&self, app: AppHandle) {
@@ -173,12 +203,18 @@ impl AppState {
         Ok(())
     }
 
+    /// Builds a pipeline with an optional frame observer.
+    ///
+    /// The sink receives every frame that is about to enter OCR. Debug mode
+    /// attaches the debug frame forwarder; `None` keeps the exact production
+    /// capture path.
     pub(crate) fn build_pipeline(
         &self,
         mode: PipelineMode,
         region: ScreenRegion,
         capture_interval_ms: u32,
         difference_threshold: f32,
+        frame_sink: Option<std::sync::Arc<dyn vtrans_pipeline::FrameSink>>,
     ) -> Result<Pipeline, AppError> {
         region.validate().map_err(AppError::from)?;
         let monitor_count = self.capture_source.list_monitors().len();
@@ -222,9 +258,10 @@ impl AppState {
                 .unwrap_or_else(poison_inner)
                 .clone(),
         )) as Box<dyn TranslationProvider>;
-        Ok(Pipeline::new(
+        Ok(Pipeline::with_frame_sink(
             pipeline_config,
             PipelineDeps::new(capture, ocr, translation),
+            frame_sink,
         ))
     }
 
@@ -306,6 +343,7 @@ impl AppState {
             selected_region: self.selected_region(),
             live_running,
             model_progress,
+            debug_mode: self.debug_mode,
         }
     }
 
@@ -497,10 +535,12 @@ mod tests {
             selected_region: None,
             live_running: false,
             model_progress: None,
+            debug_mode: false,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("pipeline_status"));
         assert!(json.contains("mock-ocr"));
+        assert!(json.contains(r#""debug_mode":false"#));
     }
 
     #[test]

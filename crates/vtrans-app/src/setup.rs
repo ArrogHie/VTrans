@@ -17,6 +17,12 @@ use crate::overlay::OVERLAY_WINDOW_LABEL;
 use crate::state::AppState;
 use crate::tray::{setup_tray, show_main_window};
 
+/// Environment variable that enables Debug mode when set to `1`/`true`.
+const DEBUG_ENV_VAR: &str = "VTRANS_DEBUG";
+
+/// Command-line flag that enables Debug mode.
+const DEBUG_CLI_FLAG: &str = "--debug";
+
 /// Keeps the non-blocking tracing writer alive for the application lifetime.
 ///
 /// Tauri manages this value as inert state; the guard's `Drop` implementation
@@ -81,7 +87,9 @@ pub fn init_app(app: &mut App<tauri::Wry>) -> Result<(), AppError> {
     if let Some(guard) = init_app_logging(&app_data_dir, &config.log_level) {
         app.manage(LoggingGuard(guard));
     }
-    let state = AppState::new(&app_data_dir)?;
+    let debug_mode = parse_debug_mode();
+    info!(debug_mode, "debug mode flag resolved");
+    let state = AppState::new_with_debug(&app_data_dir, debug_mode)?;
     app.manage(state);
     app.state::<AppState>().attach_handle(app.handle().clone());
     setup_tray(app.handle())?;
@@ -95,6 +103,36 @@ pub fn init_app(app: &mut App<tauri::Wry>) -> Result<(), AppError> {
     }
     register_hotkeys(app.handle())?;
     Ok(())
+}
+
+/// Resolves whether Debug mode is enabled for this run.
+///
+/// Debug mode is enabled by the `--debug` command-line flag or the
+/// `VTRANS_DEBUG=1` environment variable. It is never persisted. Malformed
+/// values fall back to disabled with a warning instead of failing startup.
+fn parse_debug_mode() -> bool {
+    let from_cli = std::env::args().any(|argument| argument == DEBUG_CLI_FLAG);
+    let from_env = std::env::var(DEBUG_ENV_VAR).is_ok_and(|value| parse_debug_env_value(&value));
+    from_cli || from_env
+}
+
+/// Parses the `VTRANS_DEBUG` environment variable value.
+///
+/// `1`/`true` (case-insensitive) enable Debug mode; anything else disables
+/// it. Kept as a pure function so the accepted values are unit-testable.
+fn parse_debug_env_value(value: &str) -> bool {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => true,
+        other => {
+            if !other.is_empty() {
+                warn!(
+                    value = other,
+                    "invalid VTRANS_DEBUG value; debug mode disabled"
+                );
+            }
+            false
+        }
+    }
 }
 
 /// Builds the Tauri builder used by the desktop entry point.
@@ -163,5 +201,21 @@ mod tests {
 
         drop(first);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn debug_mode_resolution_accepts_flag_and_env_values() {
+        let cases = [
+            ("1", true),
+            ("true", true),
+            ("TRUE", true),
+            ("0", false),
+            ("false", false),
+            ("", false),
+            ("maybe", false),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(parse_debug_env_value(value), expected, "value: {value}");
+        }
     }
 }
