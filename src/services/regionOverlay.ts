@@ -10,11 +10,12 @@ const OVERLAY_LABEL = "overlay";
  * Shows the persistent screen-level region marker over the selected monitor.
  *
  * The overlay webview is a borderless, transparent, always-on-top and
- * click-through window configured in `tauri.conf.json`. It is positioned at
- * the region's monitor and sized to that monitor, then the region is
- * published through the `overlay_region_updated` event so the window draws
- * the border with pure CSS. Only coordinates cross IPC; no image data is
- * ever transferred.
+ * click-through window configured in `tauri.conf.json`. It covers the
+ * region's monitor completely (window origin = monitor origin, window size =
+ * monitor size); the region is published through the `overlay_region_updated`
+ * event and the window draws the border at the region's monitor-relative
+ * offset with pure CSS. Only coordinates cross IPC; no image data is ever
+ * transferred.
  *
  * Failures are logged but never propagated: the marker is a convenience
  * visual, and a missing capability or monitor must not break translation.
@@ -30,7 +31,7 @@ export async function showRegionOverlay(region: ScreenRegion): Promise<void> {
     const monitor = monitors.find((candidate) => candidate.name === region.monitor_id) ?? monitors[0];
     if (!monitor) return;
     await overlay.setPosition(
-      new PhysicalPosition(monitor.position.x + region.x, monitor.position.y + region.y),
+      new PhysicalPosition(monitor.position.x, monitor.position.y),
     );
     await overlay.setSize(new PhysicalSize(monitor.size.width, monitor.size.height));
     await overlay.setIgnoreCursorEvents(true);

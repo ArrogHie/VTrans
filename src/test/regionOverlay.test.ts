@@ -52,7 +52,10 @@ describe("regionOverlay", () => {
     await showRegionOverlay(REGION);
 
     expect(getByLabel).toHaveBeenCalledWith("overlay");
-    expect(windowMock.setPosition).toHaveBeenCalledWith(expect.objectContaining({ x: 2040, y: 240 }));
+    // The window covers the whole monitor; the border is drawn at the
+    // region's monitor-relative offset inside the window, so the window
+    // origin is the monitor origin, not the region origin.
+    expect(windowMock.setPosition).toHaveBeenCalledWith(expect.objectContaining({ x: 1920, y: 0 }));
     expect(windowMock.setSize).toHaveBeenCalledWith(expect.objectContaining({ width: 2560, height: 1440 }));
     expect(windowMock.setIgnoreCursorEvents).toHaveBeenCalledWith(true);
     expect(emitMock).toHaveBeenCalledWith("overlay_region_updated", REGION);
@@ -65,7 +68,7 @@ describe("regionOverlay", () => {
 
     await showRegionOverlay({ ...REGION, monitor_id: "\\\\.\\DISPLAY3" });
 
-    expect(windowMock.setPosition).toHaveBeenCalledWith(expect.objectContaining({ x: 120, y: 240 }));
+    expect(windowMock.setPosition).toHaveBeenCalledWith(expect.objectContaining({ x: 0, y: 0 }));
     expect(windowMock.setSize).toHaveBeenCalledWith(expect.objectContaining({ width: 1920, height: 1080 }));
   });
 

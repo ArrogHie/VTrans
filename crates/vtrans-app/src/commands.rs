@@ -221,6 +221,11 @@ pub(crate) async fn start_live_task(
         return Err(PipelineError::AlreadyRunning.into());
     }
     state.set_selected_region(config.region.clone()).await?;
+    // The live session captures this region; make sure the persistent marker
+    // is visible even when the session was started from a hotkey with every
+    // webview hidden. The frontend re-positions the same values afterwards,
+    // so the calls converge on an identical window placement.
+    show_region_overlay(&app, &config.region);
     let pipeline = state.build_pipeline(
         PipelineMode::LiveRegion,
         config.region,
@@ -262,8 +267,6 @@ async fn run_live_task(
             }
         }
     }
-    // Any live session end (stop, error, or cancel) clears the region marker.
-    hide_region_overlay(&app);
 }
 
 /// Stops the live pipeline and waits for its task to finish.
@@ -300,9 +303,6 @@ pub(crate) async fn stop_live_task(state: &AppState) -> Result<(), AppError> {
             .map_err(|error| AppError::Tauri(format!("live task join failed: {error}")))?;
     }
     state.clear_pipeline();
-    if let Ok(app) = state.app_handle() {
-        hide_region_overlay(&app);
-    }
     tracing::info!("live translation stopped");
     Ok(())
 }
