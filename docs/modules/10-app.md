@@ -60,6 +60,7 @@ impl AppState {
 pub fn emit_pipeline_event(app: &AppHandle, event: PipelineEvent);
 pub fn emit_overlay_region(app: &AppHandle, region: &ScreenRegion);
 pub fn emit_overlay_hidden(app: &AppHandle);
+pub fn emit_debug_frame(app: &AppHandle, payload: DebugFramePayload);
 ```
 
 ### 全局快捷键
@@ -103,6 +104,21 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
 缩略图；若产品要求屏幕缩略预览，需由 vtrans-app 提供小尺寸位图事件/命令
 （`CapturedImage` 不得跨 IPC）。命令命名约定维持 Tauri 默认 camelCase，
 如需统一 snake_case 需前后端同步修改（见 `contracts.rs` 注释）。
+
+### Debug 模式（捕获帧预览）
+
+- **开关**：`--debug` 或 `VTRANS_DEBUG=1`（`true` 亦可），默认关闭，不写入
+  config.json；解析失败不影响启动。`AppStatus.debug_mode` 透传给前端决定
+  是否渲染调试面板。
+- **帧出口**：vtrans-pipeline 的 `FrameSink`（`Pipeline::with_frame_sink`）
+  在捕获帧进入 OCR 前调用；关闭时无 sink、零开销。
+- **编码**：`encode_debug_thumbnail` 纯函数（BGRA8/RGBA8 → ≤480px JPEG80
+  Base64），在阻塞池执行；帧序号/时间戳随 payload 发送。
+- **事件**：`debug_frame_updated`（仅 Debug 开启时发射），payload 含
+  `image`/`region`/`frame_index`/`timestamp_ms`；≤10fps 节流、watch 最新值
+  语义、编码失败 `warn!` 跳过。
+- **隐私**：只显示不保存（不落盘、不进日志、不进 store/结果窗口）；此
+  缩略图跨 IPC 是 Debug-only 显式豁免（`CapturedImage` 默认禁止序列化）。
 
 ## 错误类型
 
@@ -163,6 +179,10 @@ crates/vtrans-app/
 | 托盘与窗口生命周期 | 手工验证 | 依赖系统托盘与真实窗口环境（README 第 9 条）；菜单 id 与事件名有单测 |
 | 选区 overlay | 手工验证 + 单元 | 依赖真实显示器（README 第 10 条）；overlay 坐标换算由前端单测覆盖 |
 | 单实例保护 | 手工验证 | 依赖进程级行为（README 第 11 条） |
+| Debug 模式开关 | 单元 | `parse_debug_env_value` 值域解析（setup.rs tests）✅ |
+| 缩略图编码 | 单元 | 尺寸缩放/JPEG 有效/格式与缓冲校验（debug_frame.rs tests）✅ |
+| Debug 帧出口 | 集成 | FrameSink 收到进入 OCR 前的帧、跳过未变化帧（pipeline 集成测试）✅ |
+| Debug 面板显示 | 手工验证 | 依赖真实显示器与模型（README 第 12 条） |
 | 错误映射 | 单元 | 各模块错误正确映射到 AppError（error.rs tests）✅ |
 | 事件发送 | 单元 | PipelineEvent 正确转为前端事件（events.rs tests）✅ |
 

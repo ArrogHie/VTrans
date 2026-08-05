@@ -10,6 +10,7 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - 注册配置中的全局快捷键，并把快捷键动作派发到选区、实时翻译和停止流程。
 - 管理系统托盘（关闭主窗口隐藏到托盘、托盘菜单恢复/退出）与单实例保护。
 - 维护常驻选区 overlay 窗口，在屏幕上持续显示当前捕获区域边界。
+- Debug 模式下把进入 OCR 前的捕获帧以缩略图形式实时推送到前端面板。
 - 使用 AppError 将底层错误映射为可序列化、可展示的用户错误信息。
 
 ## 依赖关系
@@ -39,6 +40,8 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - tracing：结构化生命周期和错误日志。
 - tracing-appender：持有 `WorkerGuard`，在应用生命周期内刷新非阻塞日志写入器。
 - tauri-plugin-single-instance：阻止多实例并存，避免全局快捷键冲突。
+- image：捕获帧缩放与 JPEG 编码（Debug 模式）。
+- base64：调试缩略图 Base64 编码（跨 IPC 事件 payload）。
 
 所有依赖使用 MIT 或 Apache-2.0 兼容许可证；新增依赖仅在本 crate 的 Cargo.toml 中声明。
 
@@ -49,6 +52,7 @@ pub struct AppState { /* managed by Tauri */ }
 
 impl AppState {
     pub fn new(app_data_dir: &Path) -> Result<Self, AppError>;
+    pub fn new_with_debug(app_data_dir: &Path, debug_mode: bool) -> Result<Self, AppError>;
 }
 
 pub struct AppStatus {
@@ -58,10 +62,12 @@ pub struct AppStatus {
     pub selected_region: Option<ScreenRegion>,
     pub live_running: bool,
     pub model_progress: Option<f32>,
+    pub debug_mode: bool,
 }
 ~~~
 
 AppState::new 从 app_data_dir/config.json 加载配置，默认从 app_data_dir/models/manifest.json 加载模型 manifest；AppConfig.model_dir 可以覆盖模型目录。
+AppState::new_with_debug 额外接收 Debug 模式开关（仅本次运行有效，不持久化）。
 
 ### Tauri Commands
 
@@ -127,8 +133,31 @@ emit_pipeline_event 转发以下事件：
 - region_selected
 - overlay_region_updated
 - overlay_hidden
+- debug_frame_updated（仅 Debug 模式开启时发射）
 
 事件只包含标准文本/状态结构，不携带截图图像数据。敏感凭据不会进入事件或日志。
+
+### Debug 模式（捕获帧预览）
+
+Debug 模式是**默认关闭、显式开启**的运行期开关，用于排查「OCR 识别文字与
+选区方框内实际文字不符」：开启后，进入 OCR 之前的捕获帧会以缩略图形式
+实时显示在主窗口调试面板。
+
+- **开关**：`--debug` 命令行参数或 `VTRANS_DEBUG=1` 环境变量（`true` 亦可，
+  大小写不敏感）；解析失败不影响正常启动，只记一行 `info!`（`debug_mode`
+  布尔）。开关状态**不写入 config.json**。
+- **帧出口**：`vtrans_pipeline::FrameSink` 在捕获帧通过帧差检测（live）或
+  捕获完成（single）后、进入 OCR 前调用；关闭时 pipeline 不挂 sink，
+  整条调试链路不存在、零开销。
+- **编码**：纯函数 `encode_debug_thumbnail` 把 BGRA8/RGBA8 帧缩放到最长边
+  ≤ 480px（整数等比缩放，不放大），JPEG 质量 80；在阻塞池执行。
+- **传输**：事件 `debug_frame_updated`，payload 为 Base64 JPEG + 区域 +
+  帧序号 + 时间戳；只走事件不走命令返回值。节流 ≤ 10fps，watch 通道
+  保证最新值语义（旧帧被覆盖），编码失败只 `warn!` 并跳过该帧。
+- **隐私**：只显示、不保存——不落盘、不进日志、不进 store、不进结果窗口；
+  面板只保留内存中最新一帧，Debug 退出后不保留任何帧缓存。
+- **红线豁免**：`CapturedImage` 默认禁止跨 IPC；缩略图是 Debug-only 的
+  显式豁免，仅在 Debug 开启时发射，生产 Release 默认不启用。
 
 ### 窗口生命周期与托盘
 
@@ -242,6 +271,10 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
     选区时边框消失；框选区域内的鼠标操作（点击、拖动）不受 overlay 影响。
 11. **单实例**：应用运行中再次启动 vtrans.exe，确认不会出现第二个进程，
     已有实例的主窗口被恢复显示。
+12. **Debug 模式**：以 `VTRANS_DEBUG=1` 启动应用，主窗口出现「调试：捕获
+    帧」面板；实时翻译或单次翻译运行时面板显示进入 OCR 前的区域缩略图
+    （≤480px），帧号递增且刷新率 ≤10fps；确认面板图像与 OCR 输出一致。
+    关闭 Debug 正常启动时无面板、无 `debug_frame_updated` 事件。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
@@ -270,6 +303,8 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
   不支持跨显示器拖拽，因此框选区域始终位于该显示器内。
 - overlay 边框会被 Windows Graphics Capture 截入画面（位于选区边缘，2px），
   对 OCR 文本行检测的影响可忽略；这是"屏幕常驻标记"的固有代价。
+- Debug 缩略图为 JPEG（有损）且最长边 ≤ 480px，仅用于核对 OCR 输入，不
+  保证与原始帧逐像素一致；帧差未触发时（画面无变化）不产生新调试帧。
 - 常驻方框为纯 CSS 边框，不显示区域真实缩略图；如需屏幕缩略预览，需架构
   确认后由 vtrans-app 提供小尺寸位图事件/命令（`CapturedImage` 不得跨
   IPC），前端方框已兜底，不阻塞 MVP。
