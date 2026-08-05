@@ -52,6 +52,15 @@ export interface AppStatus {
   selected_region: ScreenRegion | null;
   live_running: boolean;
   model_progress: number | null;
+  debug_mode: boolean;
+}
+
+export interface DebugFramePayload {
+  /** Base64-encoded JPEG thumbnail (longest edge ≤ 480 px). */
+  image: string;
+  region: ScreenRegion;
+  frame_index: number;
+  timestamp_ms: number;
 }
 
 export interface AppConfig {
@@ -139,6 +148,7 @@ export type EventPayloadMap = {
   region_selected: ScreenRegion;
   overlay_region_updated: ScreenRegion;
   overlay_hidden: null;
+  debug_frame_updated: DebugFramePayload;
 };
 
 export const DEFAULT_CONFIG: AppConfig = {
