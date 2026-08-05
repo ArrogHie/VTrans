@@ -15,8 +15,8 @@ use vtrans_core::truncate_for_log;
 use vtrans_core::types::{PipelineMode, PipelineStatus};
 
 use crate::{
-    image_aligned_region, normalize_result, translate_text, PipelineConfig, PipelineDeps,
-    PipelineError, PipelineEvent, PipelineState,
+    image_aligned_region, normalize_result, translate_text, FrameSink, PipelineConfig,
+    PipelineDeps, PipelineError, PipelineEvent, PipelineState,
 };
 
 /// Runs a single capture -> OCR -> translate pass.
@@ -53,6 +53,7 @@ pub(crate) async fn run_single_capture_internal(
     config: PipelineConfig,
     stop: CancellationToken,
     event_tx: &mpsc::Sender<PipelineEvent>,
+    frame_sink: Option<Arc<dyn FrameSink>>,
 ) -> Result<(), PipelineError> {
     let region = config.region;
     let options = config.ocr_options;
@@ -67,6 +68,9 @@ pub(crate) async fn run_single_capture_internal(
         result = deps.capture.capture_once(&region) => result.map_err(PipelineError::from)?,
     };
     debug!(width = image.width, height = image.height, "captured frame");
+    if let Some(sink) = &frame_sink {
+        sink.on_frame(&image);
+    }
 
     // 2. OCR.
     let _ = event_tx.send(PipelineEvent::OcrStarted).await;

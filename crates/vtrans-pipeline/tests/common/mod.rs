@@ -21,11 +21,27 @@ use vtrans_core::types::{
 };
 use vtrans_core::{CaptureError, OcrError, TranslationError};
 
-use vtrans_pipeline::PipelineEvent;
+use vtrans_pipeline::{FrameSink, PipelineEvent};
 
 /// Recovers the inner value of a poisoned lock in test code.
 pub fn poison_inner<T>(poisoned: std::sync::PoisonError<T>) -> T {
     poisoned.into_inner()
+}
+
+/// Records every frame the pipeline hands to a [`FrameSink`].
+#[derive(Default)]
+pub struct RecordingSink {
+    /// Total `on_frame` calls.
+    pub calls: AtomicUsize,
+    /// Most recently observed frame.
+    pub last: Mutex<Option<CapturedImage>>,
+}
+
+impl FrameSink for RecordingSink {
+    fn on_frame(&self, frame: &CapturedImage) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *self.last.lock().unwrap_or_else(poison_inner) = Some(frame.clone());
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

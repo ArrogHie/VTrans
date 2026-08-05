@@ -33,7 +33,7 @@ use vtrans_core::OcrError;
 use crate::cancel::TaskSlot;
 use crate::dedup::{FrameDiffer, TextDedup};
 use crate::{
-    image_aligned_region, normalize_result, poison_inner, translate_text, PipelineDeps,
+    image_aligned_region, normalize_result, poison_inner, translate_text, FrameSink, PipelineDeps,
     PipelineError, PipelineEvent, PipelineState,
 };
 
@@ -77,6 +77,7 @@ pub(crate) async fn run_live(
     state: Arc<PipelineState>,
     stop: CancellationToken,
     event_tx: mpsc::Sender<PipelineEvent>,
+    frame_sink: Option<Arc<dyn FrameSink>>,
 ) -> Result<(), PipelineError> {
     let config = state.config();
     let region = config.region;
@@ -100,7 +101,15 @@ pub(crate) async fn run_live(
     let ocr_worker = tokio::spawn(ocr_worker(ctx.clone(), frames_rx, jobs_tx, ocr_params));
     let translation_worker = tokio::spawn(translation_worker(ctx.clone(), jobs_rx));
 
-    let capture_result = capture_loop(&ctx, &frames_tx, interval_ms, threshold, &region).await;
+    let capture_result = capture_loop(
+        &ctx,
+        &frames_tx,
+        interval_ms,
+        threshold,
+        &region,
+        frame_sink,
+    )
+    .await;
 
     // The capture loop has ended (stop, session end, or failure): signal the
     // workers and wait for them to terminate before returning.
@@ -131,6 +140,7 @@ async fn capture_loop(
     interval: Duration,
     threshold: f32,
     region: &ScreenRegion,
+    frame_sink: Option<Arc<dyn FrameSink>>,
 ) -> Result<(), PipelineError> {
     let mut session_region = region.clone();
     let mut session = ctx.deps.capture.start_session(&session_region).await?;
@@ -168,6 +178,9 @@ async fn capture_loop(
                     let _ = ctx.event_tx.send(PipelineEvent::CaptureStarted).await;
                     ctx.state.set_status(PipelineStatus::Capturing);
                     if differ.is_changed(&image) {
+                        if let Some(sink) = &frame_sink {
+                            sink.on_frame(&image);
+                        }
                         match frames_tx.try_send(image) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
