@@ -29,7 +29,7 @@
 | `pnpm test` | ✅ 通过 | 修复为 `vitest run`，43 个前端测试 |
 | `pnpm build` | ✅ 通过 | tsc + vite 构建成功 |
 | `cargo tauri build --no-bundle` | ✅ 通过 | Release exe 产出并冒烟 |
-| `cargo tauri build`（含打包） | ⚠️ 部分完成 | 编译与 exe 产出成功；MSI/NSIS 打包需联网下载 WiX，本环境 GitHub 不可达（见 §6） |
+| `cargo tauri build`（含打包） | ✅ 通过 | 生成 MSI 13.6 MB + NSIS 9.2 MB 安装包；安装冒烟通过（见 §5.5） |
 
 ## 2. 契约审计结论（Step 1）
 
@@ -118,7 +118,24 @@ ocr_worker_queue_stays_bounded_under_burst 等 12 项全部通过。
 
 > 说明：无头 CLI 无法发送 Ctrl+C，实测终止方式为进程终止；干净停止由上述集成测试断言。
 
-### 5.4 Release 应用冒烟（Step 7）
+### 5.4 Release 打包与安装冒烟（Step 7）
+
+修复：`src-tauri/tauri.conf.json` 的 `bundle.icon` 补充 `icons/icon.ico`（此前仅声明
+`icons/icon.png`，WiX 打包因找不到 `.ico` 失败）。修复后完整打包成功：
+
+```text
+target/release/bundle/msi/VTrans_0.1.0_x64_en-US.msi    (13,561,856 B)
+target/release/bundle/nsis/VTrans_0.1.0_x64-setup.exe   (9,223,508 B)
+```
+
+NSIS 安装冒烟：`VTrans_0.1.0_x64-setup.exe /S` 退出码 0，安装到
+`%LOCALAPPDATA%\VTrans`（vtrans.exe 40.2 MB + uninstall.exe）；启动安装版应用后进程存活、
+主窗口标题 `VTrans`、日志确认模型 manifest 加载、OCR 三 session 加载（约 312 ms）、
+`application state initialized ocr_provider="pp-ocr" translation_provider="api"`、
+`global shortcuts registered count=3`。框选/单次/实时 GUI 交互依赖人工拖动，仍按 README
+「手工验证项」登记（§6-3）。
+
+### 5.5 Release exe 冒烟（前置验证）
 
 `cargo tauri build --no-bundle` 产出 `target/release/vtrans.exe`，部署模型到
 `%APPDATA%\com.vtrans.app\models` 后启动：
@@ -149,8 +166,8 @@ ocr_worker_queue_stays_bounded_under_burst 等 12 项全部通过。
 
 | # | 未解决项 | 处理/风险 |
 |---|----------|-----------|
-| 1 | **安装包打包**：`cargo tauri build` 的 MSI/NSIS 步骤需联网下载 WiX/NSIS，本环境 GitHub 不可达（Connection refused），仅产出并验证 Release exe | 待有网络环境执行 `cargo tauri build` 并安装冒烟；exe 级启动已验证，风险低 |
-| 2 | **无 git remote**：本仓库未配置 origin，无法 `git pull origin main` / push / 创建 PR | 已在本地完成 `integration/mvp` 分支与提交；PR 创建需配置 remote 后执行 |
+| 1 | ~~安装包打包~~：已完成 | MSI + NSIS 安装包生成并安装冒烟通过（§5.4） |
+| 2 | **PR 创建**：origin 已配置（`git@github.com:ArrogHie/VTrans.git`）且本地 main 与 origin/main 一致；`gh` CLI 未安装 | 分支已推送；PR 创建需安装并登录 gh 或使用 GitHub 网页（§9） |
 | 3 | **GUI 交互项**（拖动框选、快捷键真实触发、结果窗口交互、多显示器实机）为 `vtrans-app/README.md` 登记的手工验证项 | 本环境未自动执行；代码路径、事件契约与命令注册已核对，坐标/事件逻辑有单测 |
 | 4 | **30 分钟长稳**：未做 30 分钟内存/任务堆积实测 | 实时链路通道 cap=1、帧差过滤、指纹去重保证队列有界；集成测试覆盖 burst 场景；标记为后续人工长测项 |
 | 5 | **日文 OCR 实测**：rec_ja 模型已加载（Release 日志），但本机屏幕无日文内容，未做真实日文识别 | ocr 模块有 `ocr_verify` CLI 与测试素材；清晰日文识别验收待手工/测试图 |
