@@ -49,7 +49,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("elapsed_ms: {}", result.elapsed_ms);
     println!("lines: {}", result.lines.len());
     for line in &result.lines {
-        println!("[{}] {}", line.confidence, line.text);
+        let polygon = &line.polygon;
+        let width = (polygon[1][0] - polygon[0][0])
+            .max(polygon[3][0] - polygon[2][0])
+            .abs();
+        let height = (polygon[3][1] - polygon[0][1])
+            .max(polygon[2][1] - polygon[1][1])
+            .abs();
+        let points = polygon
+            .iter()
+            .map(|point| format!("{:.0},{:.0}", point[0], point[1]))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "[{:.6}] box={width:.0}x{height:.0} poly=[{points}] {}",
+            line.confidence, line.text
+        );
     }
     println!("--- merged ---");
     println!("{}", result.merged_text);

@@ -30,7 +30,7 @@ use crate::geometry::{rotate_90_cw, warp_perspective};
 use crate::postprocess::{
     boxes_from_map, merge_lines, sort_boxes, DetectionParams, DEFAULT_MIN_BOX_AREA,
 };
-use crate::preprocess::{det_preprocess, rgb_region, REC_HEIGHT, REC_MAX_WIDTH};
+use crate::preprocess::{det_preprocess, rgb_region, REC_HEIGHT};
 use crate::recognize::Recognizer;
 
 /// PaddleOCR-style ONNX recognition provider.
@@ -399,9 +399,14 @@ fn run_ocr_pipeline(
         let vertical = options.detect_vertical && box_.height > box_.width * 1.5;
         let line_width = if vertical { box_.height } else { box_.width };
         let line_height = if vertical { box_.width } else { box_.height };
+        // Warp to the line's proportional width at the fixed recognition
+        // height. Wide lines are split into chunks by `Recognizer::run`
+        // instead of being compressed, so characters keep a readable size.
+        // The crop width is bounded by the input image dimensions because
+        // detected boxes are clipped to the image bounds.
         let target_width = ((line_width / line_height.max(1.0)) * REC_HEIGHT as f32)
             .round()
-            .clamp(REC_HEIGHT as f32, REC_MAX_WIDTH as f32) as u32;
+            .max(REC_HEIGHT as f32) as u32;
         let crop = warp_perspective(&rgb, box_.polygon, target_width, REC_HEIGHT);
         let crop = if vertical { rotate_90_cw(&crop) } else { crop };
         let line = recognizer.run(&crop, &run_options)?;
@@ -409,15 +414,27 @@ fn run_ocr_pipeline(
             reading_order,
             confidence = line.confidence,
             text_len = line.text.chars().count(),
+            box_width = box_.width,
+            box_height = box_.height,
+            crop_width = crop.width(),
+            crop_height = crop.height(),
             "line recognized"
         );
         recognized_lines.push((box_.clone(), line));
     }
 
+    let total_lines = recognized_lines.len();
     let recognized_lines = recognized_lines
         .into_iter()
         .filter(|(_, line)| line.confidence >= options.min_confidence)
         .collect::<Vec<_>>();
+    tracing::debug!(
+        total = total_lines,
+        kept = recognized_lines.len(),
+        dropped = total_lines - recognized_lines.len(),
+        min_confidence = options.min_confidence,
+        "confidence filter applied"
+    );
     let lines: Vec<OcrLine> = recognized_lines
         .iter()
         .enumerate()
@@ -705,4 +722,5 @@ mod tests {
             Err(OcrError::InvalidManifest(_))
         ));
     }
+
 }
