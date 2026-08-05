@@ -11,6 +11,7 @@ import {
 import { getIpcErrorMessage, showResultWindow } from "./services/tauri";
 import { useAppStore } from "./stores/appStore";
 import { MainWindow } from "./windows/MainWindow";
+import { OverlayWindow } from "./windows/OverlayWindow";
 import { RegionSelector } from "./windows/RegionSelector";
 import { ResultWindow } from "./windows/ResultWindow";
 
@@ -23,6 +24,7 @@ export function App() {
   useBackendEvents();
   if (label === "selector") return <RegionSelector />;
   if (label === "result") return <ResultWindow />;
+  if (label === "overlay") return <OverlayWindow />;
   return <MainWindow />;
 }
 

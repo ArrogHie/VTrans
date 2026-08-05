@@ -137,6 +137,8 @@ export type EventPayloadMap = {
   live_session_stopped: StoppedPayload;
   model_loading_progress: ModelProgressPayload;
   region_selected: ScreenRegion;
+  overlay_region_updated: ScreenRegion;
+  overlay_hidden: null;
 };
 
 export const DEFAULT_CONFIG: AppConfig = {
