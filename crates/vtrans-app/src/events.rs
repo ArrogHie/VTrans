@@ -14,6 +14,8 @@ pub const PIPELINE_ERROR: &str = "pipeline_error";
 pub const LIVE_SESSION_STOPPED: &str = "live_session_stopped";
 pub const MODEL_LOADING_PROGRESS: &str = "model_loading_progress";
 pub const REGION_SELECTED: &str = "region_selected";
+pub const OVERLAY_REGION_UPDATED: &str = "overlay_region_updated";
+pub const OVERLAY_HIDDEN: &str = "overlay_hidden";
 
 #[derive(Debug, Serialize)]
 struct StatusPayload<'a> {
@@ -125,6 +127,34 @@ pub fn emit_model_loading_progress<R: Runtime>(app: &AppHandle<R>, model_id: &st
     }
 }
 
+/// Emits the currently selected region to the persistent overlay window.
+///
+/// The payload is the region in physical pixels relative to its monitor; the
+/// overlay webview converts it to CSS pixels for drawing. No image data is
+/// ever included.
+#[tracing::instrument(skip(app), fields(monitor_id = %region.monitor_id))]
+pub fn emit_overlay_region<R: Runtime>(app: &AppHandle<R>, region: &vtrans_core::ScreenRegion) {
+    if let Err(error) = app.emit(OVERLAY_REGION_UPDATED, region) {
+        tracing::warn!(
+            event = OVERLAY_REGION_UPDATED,
+            error = %error,
+            "failed to emit overlay region event"
+        );
+    }
+}
+
+/// Tells the persistent overlay window to hide its region marker.
+#[tracing::instrument(skip(app))]
+pub fn emit_overlay_hidden<R: Runtime>(app: &AppHandle<R>) {
+    if let Err(error) = app.emit(OVERLAY_HIDDEN, ()) {
+        tracing::warn!(
+            event = OVERLAY_HIDDEN,
+            error = %error,
+            "failed to emit overlay hidden event"
+        );
+    }
+}
+
 fn is_recoverable(error: &PipelineError) -> bool {
     matches!(error, PipelineError::Ocr(_) | PipelineError::Translation(_))
 }
@@ -200,5 +230,11 @@ mod tests {
         let (name, payload) = event_name_and_payload(PipelineEvent::Stopped);
         assert_eq!(name, LIVE_SESSION_STOPPED);
         assert_eq!(payload.unwrap()["reason"], "stopped");
+    }
+
+    #[test]
+    fn overlay_events_use_stable_names() {
+        assert_eq!(OVERLAY_REGION_UPDATED, "overlay_region_updated");
+        assert_eq!(OVERLAY_HIDDEN, "overlay_hidden");
     }
 }

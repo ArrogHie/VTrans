@@ -12,6 +12,7 @@ use vtrans_pipeline::{PipelineError, PipelineEvent};
 
 use crate::error::AppError;
 use crate::events::{emit_model_loading_progress, emit_pipeline_event};
+use crate::overlay::{hide_region_overlay, show_region_overlay};
 use crate::state::AppStatus;
 use crate::state::{store_api_key, AppState};
 
@@ -65,6 +66,8 @@ pub(crate) async fn select_region(
         tracing::warn!("selector window is not configured");
         return Err(AppError::NotInitialized);
     };
+    // A new selection invalidates the previously confirmed region marker.
+    hide_region_overlay(&app);
     if let Err(error) = window.show().and_then(|()| window.set_focus()) {
         state.cancel_region_selection().await;
         return Err(AppError::Tauri(error.to_string()));
@@ -98,6 +101,7 @@ pub async fn cancel_region_selection(state: State<'_, AppState>) -> Result<(), A
             .hide()
             .map_err(|error| AppError::Tauri(error.to_string()))?;
     }
+    hide_region_overlay(&app);
     Ok(())
 }
 
@@ -258,6 +262,8 @@ async fn run_live_task(
             }
         }
     }
+    // Any live session end (stop, error, or cancel) clears the region marker.
+    hide_region_overlay(&app);
 }
 
 /// Stops the live pipeline and waits for its task to finish.
@@ -294,6 +300,9 @@ pub(crate) async fn stop_live_task(state: &AppState) -> Result<(), AppError> {
             .map_err(|error| AppError::Tauri(format!("live task join failed: {error}")))?;
     }
     state.clear_pipeline();
+    if let Ok(app) = state.app_handle() {
+        hide_region_overlay(&app);
+    }
     tracing::info!("live translation stopped");
     Ok(())
 }
@@ -313,10 +322,12 @@ pub async fn update_live_region(
     state.set_selected_region(region.clone()).await?;
     if let Some(pipeline) = state.pipeline() {
         pipeline
-            .update_region(region)
+            .update_region(region.clone())
             .await
             .map_err(AppError::from)?;
     }
+    let app = state.app_handle()?;
+    show_region_overlay(&app, &region);
     Ok(())
 }
 

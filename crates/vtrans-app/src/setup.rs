@@ -13,7 +13,9 @@ use vtrans_core::init_logging;
 use crate::commands::invoke_handler;
 use crate::error::AppError;
 use crate::hotkeys::register_hotkeys;
+use crate::overlay::OVERLAY_WINDOW_LABEL;
 use crate::state::AppState;
+use crate::tray::{setup_tray, show_main_window};
 
 /// Keeps the non-blocking tracing writer alive for the application lifetime.
 ///
@@ -82,6 +84,15 @@ pub fn init_app(app: &mut App<tauri::Wry>) -> Result<(), AppError> {
     let state = AppState::new(&app_data_dir)?;
     app.manage(state);
     app.state::<AppState>().attach_handle(app.handle().clone());
+    setup_tray(app.handle())?;
+    if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
+        // The overlay is a pure visual marker and must never intercept mouse
+        // input; the v2 window configuration has no click-through field, so
+        // it is enabled here once at startup.
+        if let Err(error) = window.set_ignore_cursor_events(true) {
+            tracing::warn!(error = %error, "failed to enable overlay click-through");
+        }
+    }
     register_hotkeys(app.handle())?;
     Ok(())
 }
@@ -93,8 +104,30 @@ pub fn init_app(app: &mut App<tauri::Wry>) -> Result<(), AppError> {
 pub fn builder() -> Builder<tauri::Wry> {
     Builder::default()
         .plugin(GlobalShortcutBuilder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // A second process must not run: it would fight for the global
+            // shortcuts. Restore the existing instance's main window instead.
+            show_main_window(app);
+        }))
         .invoke_handler(invoke_handler())
         .setup(|app| init_app(app).map_err(|error| -> Box<dyn Error> { Box::new(error) }))
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Every VTrans window is hidden rather than destroyed: the
+                // main window keeps the process alive (live sessions, global
+                // shortcuts, tray restore) and the user can quit from the
+                // tray menu; the auxiliary windows must stay alive so
+                // `get_webview_window` can restore them later.
+                api.prevent_close();
+                if let Err(error) = window.hide() {
+                    tracing::warn!(
+                        label = window.label(),
+                        error = %error,
+                        "failed to hide window on close request"
+                    );
+                }
+            }
+        })
 }
 
 /// Returns the application handle from a Tauri setup callback.

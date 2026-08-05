@@ -36,6 +36,19 @@
         "alwaysOnTop": true,
         "fullscreen": true,
         "visible": false
+      },
+      {
+        "label": "overlay",
+        "title": "VTrans Region Overlay",
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "shadow": false,
+        "resizable": false
       }
     ],
     "security": {

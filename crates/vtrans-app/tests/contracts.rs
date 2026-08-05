@@ -1,4 +1,7 @@
-use vtrans_app::events::{CAPTURE_STATUS_CHANGED, OCR_COMPLETED, PIPELINE_ERROR, REGION_SELECTED};
+use vtrans_app::events::{
+    CAPTURE_STATUS_CHANGED, OCR_COMPLETED, OVERLAY_HIDDEN, OVERLAY_REGION_UPDATED, PIPELINE_ERROR,
+    REGION_SELECTED,
+};
 use vtrans_app::{AppError, AppStatus, LiveTranslationConfig};
 use vtrans_config::AppConfig;
 use vtrans_core::{Language, PipelineStatus, ScreenRegion};
@@ -60,6 +63,8 @@ fn event_names_are_stable() {
     assert_eq!(OCR_COMPLETED, "ocr_completed");
     assert_eq!(PIPELINE_ERROR, "pipeline_error");
     assert_eq!(REGION_SELECTED, "region_selected");
+    assert_eq!(OVERLAY_REGION_UPDATED, "overlay_region_updated");
+    assert_eq!(OVERLAY_HIDDEN, "overlay_hidden");
     assert_eq!(Language::English.code(), "en");
 }
 
