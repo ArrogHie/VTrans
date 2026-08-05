@@ -9,6 +9,7 @@ import {
   type Unlisten,
 } from "./services/events";
 import { getIpcErrorMessage, showResultWindow } from "./services/tauri";
+import { hideRegionOverlay } from "./services/regionOverlay";
 import { useAppStore } from "./stores/appStore";
 import { MainWindow } from "./windows/MainWindow";
 import { OverlayWindow } from "./windows/OverlayWindow";
@@ -76,6 +77,9 @@ function useBackendEvents() {
             const wasPaused = useAppStore.getState().livePaused;
             setStatus("idle");
             if (!wasPaused) {
+              // 会话真正结束（停止/异常终止）时移除常驻选区方框；
+              // 暂停期间保留方框，恢复后无需重新定位。
+              void hideRegionOverlay();
               setLiveConfig(null);
               setLivePaused(false);
               setMode("single");

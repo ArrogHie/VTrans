@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Save } from "lucide-react";
-import { getIpcErrorMessage, saveSettings } from "../services/tauri";
+import { getIpcErrorMessage, saveSettings, setApiKey } from "../services/tauri";
 import type {
   AppConfig,
   CaptureConfig,
@@ -54,6 +54,9 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [apiKey, setApiKeyDraft] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
+  const [keyMessage, setKeyMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
   const markDirty = () => {
     setSaveError(null);
@@ -98,6 +101,25 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
       setSaveError(getIpcErrorMessage(error));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveKey = async () => {
+    const trimmed = apiKey.trim();
+    if (!trimmed) {
+      setKeyMessage({ kind: "error", text: "请输入 API Key" });
+      return;
+    }
+    setSavingKey(true);
+    setKeyMessage(null);
+    try {
+      await setApiKey(trimmed);
+      setApiKeyDraft("");
+      setKeyMessage({ kind: "success", text: "API Key 已保存到系统凭据" });
+    } catch (error) {
+      setKeyMessage({ kind: "error", text: getIpcErrorMessage(error) });
+    } finally {
+      setSavingKey(false);
     }
   };
 
@@ -163,6 +185,33 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
                 placeholder="gpt-4o-mini"
               />
             </label>
+            <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-2.5">
+              <label className="flex flex-col gap-1">
+                <span className={labelClass}>API Key（保存到 Windows 凭据，不写入配置文件）</span>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(event) => {
+                      setApiKeyDraft(event.target.value);
+                      setKeyMessage(null);
+                    }}
+                    className={inputClass}
+                    placeholder="sk-..."
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button type="button" onClick={() => void saveKey()} disabled={savingKey} className="secondary-button shrink-0">
+                    {savingKey ? "保存中…" : "保存 Key"}
+                  </button>
+                </div>
+              </label>
+              {keyMessage && (
+                <p className={`mt-1.5 text-xs ${keyMessage.kind === "error" ? "text-red-600" : "text-emerald-600"}`} role={keyMessage.kind === "error" ? "alert" : "status"}>
+                  {keyMessage.text}
+                </p>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <label className="flex flex-col gap-1">
                 <span className={labelClass}>超时 (秒)</span>
@@ -243,7 +292,7 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
         )}
 
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-400">
-          API Key 存储依赖 vtrans-app 的凭据命令（Credential Manager），暂未开放；本地模型语言对限制见"语言与引擎"提示。
+          本地模型语言对限制见"语言与引擎"提示；API Key 仅保存在系统凭据中。
         </p>
       </div>
 

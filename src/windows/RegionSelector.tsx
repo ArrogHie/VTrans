@@ -1,6 +1,7 @@
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useState } from "react";
 import { Check, RotateCcw, X } from "lucide-react";
+import { hideRegionOverlay, showRegionOverlay } from "../services/regionOverlay";
 import { cancelRegionSelection, toPhysicalRegion, updateLiveRegion } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
 
@@ -15,6 +16,7 @@ export function RegionSelector() {
   const [message, setMessage] = useState("拖动鼠标框选要翻译的区域，松开后确认");
 
   const resetSelection = useCallback(() => {
+    void hideRegionOverlay();
     setStart(null);
     setEnd(null);
     setPhase("selecting");
@@ -22,7 +24,16 @@ export function RegionSelector() {
   }, []);
 
   const cancelSelection = useCallback(() => {
-    void cancelRegionSelection().finally(() => getCurrentWindow().hide());
+    void (async () => {
+      await hideRegionOverlay();
+      try {
+        await cancelRegionSelection();
+      } catch {
+        // 后端可能已经清理了待处理选区，忽略即可。
+      } finally {
+        await getCurrentWindow().hide();
+      }
+    })();
   }, []);
 
   const confirmSelection = useCallback(async () => {
@@ -39,6 +50,7 @@ export function RegionSelector() {
     try {
       await updateLiveRegion(region);
       setSelectedRegion(region);
+      await showRegionOverlay(region);
       await getCurrentWindow().hide();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "选区提交失败");

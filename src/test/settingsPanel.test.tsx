@@ -55,6 +55,8 @@ describe("SettingsPanel", () => {
     );
     expect(html).toContain('value="https://example.com/v1/chat"');
     expect(html).toContain('value="test-model"');
+    expect(html).toContain("API Key");
+    expect(html).toContain("保存 Key");
     expect(html).toContain("保存设置");
   });
 });

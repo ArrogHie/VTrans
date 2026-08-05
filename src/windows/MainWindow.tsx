@@ -3,10 +3,13 @@ import { FolderCheck, MousePointer2, Pause, Play, RefreshCw, Settings2, Square }
 import { LanguageSelector } from "../components/LanguageSelector";
 import { ModeToggle } from "../components/ModeToggle";
 import { ProviderToggle } from "../components/ProviderToggle";
+import { ResultCard } from "../components/ResultCard";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { StatusBar } from "../components/StatusBar";
+import { hideRegionOverlay, showRegionOverlay } from "../services/regionOverlay";
 import {
   captureOnce,
+  getAppConfig,
   getAppStatus,
   getIpcErrorMessage,
   isRegionSelectionCancelled,
@@ -47,15 +50,34 @@ export function MainWindow() {
     mode, status, error, selectedRegion, config, modelProgress, liveConfig, livePaused,
     setMode, setStatus, setSelectedRegion, setOcrResult, setProvider, setLiveConfig, setLivePaused, setConfig, updateLanguage,
   } = useAppStore();
+  const ocrResult = useAppStore((state) => state.ocrResult);
+  const translationResult = useAppStore((state) => state.translationResult);
   const [busy, setBusy] = useState(false);
   const [modelMessage, setModelMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
-    void getAppStatus().then((snapshot) => {
-      useAppStore.getState().applyStatus(snapshot);
-      if (snapshot.selected_region) setSelectedRegion(snapshot.selected_region);
-    }).catch(() => undefined);
+    let active = true;
+    void (async () => {
+      try {
+        const [config, snapshot] = await Promise.all([getAppConfig(), getAppStatus()]);
+        if (!active) return;
+        // 先水合真实配置再应用状态快照，保证整包 save_settings
+        // 不会用前端默认值覆盖后端字段（OCR 语言、日志级别等）。
+        useAppStore.getState().setConfig(config);
+        useAppStore.getState().applyStatus(snapshot);
+        if (snapshot.selected_region) {
+          setSelectedRegion(snapshot.selected_region);
+          // 重启后恢复常驻选区方框，与后端已选区域保持一致。
+          void showRegionOverlay(snapshot.selected_region);
+        }
+      } catch {
+        // 水合失败时保留默认配置与初始状态，用户仍可手动操作。
+      }
+    })();
+    return () => {
+      active = false;
+    };
   }, [setSelectedRegion]);
 
   const regionLabel = useMemo(() => {
@@ -65,6 +87,8 @@ export function MainWindow() {
 
   const selectRegion = async () => {
     setBusy(true);
+    // 重新选区期间不保留旧方框。
+    void hideRegionOverlay();
     // 选区期间暂停实时任务，避免旧区域在框选过程中持续触发识别。
     const liveWasRunning = mode === "live" && !livePaused && Boolean(liveConfig);
     if (liveWasRunning) {
@@ -171,6 +195,7 @@ export function MainWindow() {
   const stopLive = async () => {
     setBusy(true);
     try {
+      void hideRegionOverlay();
       if (liveConfig && !livePaused) {
         await stopLiveTranslation();
       }
@@ -305,6 +330,21 @@ export function MainWindow() {
               </p>
             </div>
           )}
+        </section>
+
+        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold">翻译结果</h2>
+            {mode === "live" && (
+              <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-600">
+                {livePaused ? "已暂停" : "实时更新中"}
+              </span>
+            )}
+          </div>
+          <div className="space-y-3">
+            <ResultCard title="原文" text={ocrResult?.merged_text ?? ""} />
+            <ResultCard title="译文" text={translationResult?.translated_text ?? ""} />
+          </div>
         </section>
 
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">

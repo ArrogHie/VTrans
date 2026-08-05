@@ -107,6 +107,17 @@ export function saveSettings(settings: AppConfig): Promise<void> {
   return call<void>("save_settings", { settings });
 }
 
+/** Stores the translation API key in the OS credential vault. */
+export function setApiKey(apiKey: string): Promise<void> {
+  // Tauri 2 maps the backend parameter `api_key` to the camelCase `apiKey`.
+  return call<void>("set_api_key", { apiKey });
+}
+
+/** Returns the complete persisted application configuration. */
+export function getAppConfig(): Promise<AppConfig> {
+  return call<AppConfig>("get_app_config");
+}
+
 /** Returns a frontend-safe application status snapshot. */
 export function getAppStatus(): Promise<AppStatus> {
   return call<AppStatus>("get_app_status");
