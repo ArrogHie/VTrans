@@ -92,7 +92,9 @@ export function setTargetLanguage(language: AppConfig["translation"]["target_lan
 
 /** Persists the selected translation provider. */
 export function setTranslationProvider(providerId: AppConfig["translation"]["provider"]): Promise<void> {
-  return call<void>("set_translation_provider", { provider_id: providerId });
+  // Tauri 2 maps Rust command arguments to camelCase keys by default, so the
+  // backend parameter `provider_id` is received as `providerId`.
+  return call<void>("set_translation_provider", { providerId });
 }
 
 /** Verifies installed local model files. */

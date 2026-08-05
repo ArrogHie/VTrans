@@ -16,6 +16,10 @@ import { ResultWindow } from "./windows/ResultWindow";
 
 export function App() {
   const label = getWindowLabel();
+  useEffect(() => {
+    // 让全局样式可以按窗口隔离（例如选区窗口需要透明背景）。
+    document.documentElement.dataset.window = label;
+  }, [label]);
   useBackendEvents();
   if (label === "selector") return <RegionSelector />;
   if (label === "result") return <ResultWindow />;

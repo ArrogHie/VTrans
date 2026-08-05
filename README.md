@@ -123,7 +123,7 @@ pnpm tauri dev
 ## 已知限制
 
 1. 当前 `vtrans-app::capture_once` 公开命令返回 OCR 结果；单次翻译的译文依赖后续 app 层命令契约完善，前端不会伪造译文。
-2. 完整 `AppConfig` 尚未由当前 app 层通过 IPC 返回，因此设置面板为只读，避免用未 hydrate 的默认值覆盖用户配置；OCR 语言、源/目标语言和翻译 Provider 均通过专用 command 立即保存（`set_source_language` / `set_target_language` 由模块 10 实施，见交接说明）。源/目标语言选择器在对应 app IPC 落地前保持禁用。
+2. 设置面板可编辑采集参数、API 端点/模型/超时/重试、快捷键与结果窗口置顶，通过 `save_settings` 整包保存。由于 app 层暂未提供完整配置读取命令（缺 `get_app_config`），OCR 语言、日志级别等未在表单中的字段沿用前端当前值保存，可能覆盖后端其它配置；建议 vtrans-app 补充配置读取或局部更新命令。API Key 管理依赖 vtrans-app 新增 `set_api_key` 命令（vtrans-security 的 Credential Manager 已具备写入能力），前端暂未开放 API Key 输入。
 3. 结果窗口初始可见性、透明选区和窗口尺寸由 `src-tauri/tauri.conf.json` 管理；前端只负责运行时显示、隐藏和置顶。
 4. `model_dir` 是 Rust 配置中的 `PathBuf`，前端仅回传字符串或 `null`，不会读取模型文件。
 5. 事件监听在每个 webview 中安装，窗口销毁时统一清理；事件到达前关闭的窗口不会补发历史结果。

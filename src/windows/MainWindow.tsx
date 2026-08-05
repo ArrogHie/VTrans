@@ -3,6 +3,7 @@ import { FolderCheck, MousePointer2, Pause, Play, RefreshCw, Settings2, Square }
 import { LanguageSelector } from "../components/LanguageSelector";
 import { ModeToggle } from "../components/ModeToggle";
 import { ProviderToggle } from "../components/ProviderToggle";
+import { SettingsPanel } from "../components/SettingsPanel";
 import { StatusBar } from "../components/StatusBar";
 import {
   captureOnce,
@@ -24,6 +25,7 @@ import {
   stopLiveTranslation,
 } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
+import { regionPreviewBox } from "../utils/regionPreview";
 import { isLocalPairSupported } from "../types";
 import type { LanguageCode, Mode } from "../types";
 
@@ -43,7 +45,7 @@ const TARGET_LANGUAGES = [
 export function MainWindow() {
   const {
     mode, status, error, selectedRegion, config, modelProgress, liveConfig, livePaused,
-    setMode, setStatus, setSelectedRegion, setOcrResult, setProvider, setLiveConfig, setLivePaused, updateLanguage,
+    setMode, setStatus, setSelectedRegion, setOcrResult, setProvider, setLiveConfig, setLivePaused, setConfig, updateLanguage,
   } = useAppStore();
   const [busy, setBusy] = useState(false);
   const [modelMessage, setModelMessage] = useState<string | null>(null);
@@ -260,49 +262,14 @@ export function MainWindow() {
       </header>
 
       {settingsOpen && (
-        <section className="mb-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-sm font-semibold">设置</h2>
-            <span className="text-xs text-slate-400">只读</span>
-          </div>
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-            <div>
-              <dt className="text-xs text-slate-400">捕获间隔</dt>
-              <dd className="mt-0.5 text-slate-700">{config.capture.interval_ms} ms</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-slate-400">差异阈值</dt>
-              <dd className="mt-0.5 text-slate-700">{config.capture.difference_threshold}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-slate-400">API 超时</dt>
-              <dd className="mt-0.5 text-slate-700">{config.translation.timeout_seconds} s</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-slate-400">最大重试</dt>
-              <dd className="mt-0.5 text-slate-700">{config.translation.max_retries}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-slate-400">选择并翻译</dt>
-              <dd className="mt-0.5 text-slate-700">{config.hotkeys.select_and_translate}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-slate-400">实时翻译</dt>
-              <dd className="mt-0.5 text-slate-700">{config.hotkeys.live_translate}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-slate-400">停止实时</dt>
-              <dd className="mt-0.5 text-slate-700">{config.hotkeys.stop_live}</dd>
-            </div>
-            <div>
-              <dt className="text-xs text-slate-400">结果窗口置顶</dt>
-              <dd className="mt-0.5 text-slate-700">{config.result_window.always_on_top ? "是" : "否"}</dd>
-            </div>
-          </dl>
-          <p className="mt-3 border-t border-slate-100 pt-2 text-xs text-slate-400">
-            OCR 语言与翻译引擎可即时修改并保存；完整编辑将在设置 IPC 开放后提供。
-          </p>
-        </section>
+        <SettingsPanel
+          config={config}
+          onSaved={(next) => {
+            setConfig(next);
+            setStatus("idle");
+          }}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
 
       <div className="space-y-4">
@@ -324,6 +291,20 @@ export function MainWindow() {
           <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button w-full">
             <MousePointer2 size={16} />选择屏幕区域
           </button>
+          {selectedRegion && (
+            <div className="mt-3">
+              <div className="relative mx-auto h-24 w-40 overflow-hidden rounded-md border border-slate-200 bg-slate-50">
+                <div
+                  className="absolute rounded border-2 border-indigo-400 bg-indigo-400/20"
+                  style={regionPreviewBox(selectedRegion, 160, 96)}
+                  data-testid="region-preview"
+                />
+              </div>
+              <p className="mt-1 text-center text-[11px] text-slate-400">
+                位置 ({selectedRegion.x}, {selectedRegion.y}) · {selectedRegion.width} × {selectedRegion.height}（物理像素）
+              </p>
+            </div>
+          )}
         </section>
 
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -364,7 +345,7 @@ export function MainWindow() {
           </div>
           {modelMessage && <p className="mt-2 text-xs text-slate-500">{modelMessage}</p>}
         </section>
-        <div className="flex items-center justify-center gap-2 px-2 text-center text-xs text-slate-400"><RefreshCw size={14} />OCR 语言和翻译引擎会立即保存；完整编辑将在设置 IPC 开放后提供。</div>
+        <div className="flex items-center justify-center gap-2 px-2 text-center text-xs text-slate-400"><RefreshCw size={14} />OCR 语言与翻译引擎即时保存；API 参数在设置面板保存；API Key 管理待后端支持。</div>
       </div>
     </main>
   );

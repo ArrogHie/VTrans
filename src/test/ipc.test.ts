@@ -6,6 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const {
   cancelRegionSelection,
   captureOnce,
+  setTranslationProvider,
   setSourceLanguage,
   setTargetLanguage,
   startLiveTranslation,
@@ -42,5 +43,12 @@ describe("tauri IPC service", () => {
     invoke.mockResolvedValueOnce(undefined);
     await setTargetLanguage("en");
     expect(invoke).toHaveBeenCalledWith("set_target_language", { language: "en" });
+  });
+
+  it("passes the provider id under the Tauri camelCase argument name", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setTranslationProvider("local");
+    // 后端参数名为 `provider_id`，Tauri 2 默认映射为 camelCase `providerId`。
+    expect(invoke).toHaveBeenCalledWith("set_translation_provider", { providerId: "local" });
   });
 });
