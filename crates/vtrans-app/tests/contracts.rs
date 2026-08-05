@@ -1,7 +1,25 @@
 use vtrans_app::events::{CAPTURE_STATUS_CHANGED, OCR_COMPLETED, PIPELINE_ERROR, REGION_SELECTED};
 use vtrans_app::{AppError, AppStatus, LiveTranslationConfig};
+use vtrans_config::AppConfig;
 use vtrans_core::{Language, PipelineStatus, ScreenRegion};
 use vtrans_pipeline::PipelineError;
+
+// IPC argument-name contract:
+//
+// Tauri 2 maps Rust snake_case command parameters to camelCase on the
+// frontend by default, and `vtrans-app` keeps that default (no `rename_all`
+// attributes). The frontend therefore sends:
+//
+//   set_api_key               -> { apiKey }
+//   set_translation_provider  -> { providerId }
+//   set_source_language       -> { language }
+//   set_target_language       -> { language }
+//   set_ocr_language          -> { language }
+//   start_live_translation    -> { config }
+//
+// Do not add `rename_all = "snake_case"` to a command without updating
+// `src/services/tauri.ts` and `src/test/ipc.test.ts` on the frontend branch
+// in the same change.
 
 #[test]
 fn public_ipc_contracts_round_trip_through_json() {
@@ -43,4 +61,31 @@ fn event_names_are_stable() {
     assert_eq!(PIPELINE_ERROR, "pipeline_error");
     assert_eq!(REGION_SELECTED, "region_selected");
     assert_eq!(Language::English.code(), "en");
+}
+
+#[test]
+fn app_config_serializes_with_frontend_field_names() {
+    let config = AppConfig::default();
+    let json = serde_json::to_string(&config).unwrap();
+    // Field names consumed by the frontend settings panel and type definitions.
+    assert!(json.contains(r#""capture""#));
+    assert!(json.contains(r#""interval_ms""#));
+    assert!(json.contains(r#""difference_threshold""#));
+    assert!(json.contains(r#""hotkeys""#));
+    assert!(json.contains(r#""live_translate""#));
+    assert!(json.contains(r#""log_level""#));
+    // Language codes match the frontend `LanguageCode` union.
+    assert!(json.contains(r#""language":"auto""#));
+    // The API key never travels inside AppConfig.
+    assert!(!json.contains("api_key"));
+    assert!(!json.contains("apiKey"));
+}
+
+#[test]
+fn api_key_validation_errors_are_frontend_safe_strings() {
+    let error = AppError::InvalidApiKey("key must not be empty".to_string());
+    assert_eq!(
+        serde_json::to_string(&error).unwrap(),
+        r#""invalid api key: key must not be empty""#
+    );
 }

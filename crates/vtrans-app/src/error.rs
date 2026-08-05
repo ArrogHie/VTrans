@@ -56,6 +56,10 @@ pub enum AppError {
     #[error("invalid region: {0}")]
     InvalidRegion(String),
 
+    /// An API key failed validation before being stored.
+    #[error("invalid api key: {0}")]
+    InvalidApiKey(String),
+
     /// A Tauri operation failed.
     #[error("tauri error: {0}")]
     Tauri(String),
@@ -147,6 +151,9 @@ mod tests {
         assert!(AppError::InvalidRegion("zero width".into())
             .to_string()
             .contains("invalid region"));
+        assert!(AppError::InvalidApiKey("key must not be empty".into())
+            .to_string()
+            .contains("invalid api key"));
         assert!(AppError::Tauri("boom".into())
             .to_string()
             .contains("tauri error"));

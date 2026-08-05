@@ -12,8 +12,8 @@ use vtrans_pipeline::{PipelineError, PipelineEvent};
 
 use crate::error::AppError;
 use crate::events::{emit_model_loading_progress, emit_pipeline_event};
-use crate::state::AppState;
 use crate::state::AppStatus;
+use crate::state::{store_api_key, AppState};
 
 /// Input accepted by `start_live_translation`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +35,10 @@ fn default_capture_interval_ms() -> u32 {
 fn default_difference_threshold() -> f32 {
     0.03
 }
+
+/// Maximum accepted length of an API key, guarding against accidental
+/// pastes of huge payloads into the OS credential vault.
+const MAX_API_KEY_LEN: usize = 4096;
 
 /// Opens the selector window and waits for the frontend to confirm a region.
 ///
@@ -477,6 +481,86 @@ pub async fn save_settings(
     Ok(())
 }
 
+/// Stores the translation API key in the OS credential vault.
+///
+/// The key is written to the Windows Credential Manager through
+/// `CredentialManager` and never enters `config.json`, the frontend store,
+/// or any log. When the configured provider is `"api"`, the running API
+/// provider is rebuilt with the new key immediately so the change applies
+/// without a restart.
+///
+/// The frontend passes the key as `{ apiKey }` (Tauri 2 maps the Rust
+/// `api_key` parameter to camelCase by default).
+///
+/// # Errors
+///
+/// Returns an application error when the key is empty after trimming, exceeds
+/// [`MAX_API_KEY_LEN`] characters, the credential vault write fails, a live
+/// task is running, or the API provider cannot be rebuilt.
+#[tauri::command]
+#[tracing::instrument(skip(state, api_key))]
+pub async fn set_api_key(api_key: String, state: State<'_, AppState>) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
+    if state.live_task_is_running().await {
+        return Err(PipelineError::AlreadyRunning.into());
+    }
+    let api_key = validate_api_key(&api_key)?;
+    let masked_key = vtrans_core::mask_sensitive(&api_key);
+    let credentials = std::sync::Arc::clone(&state.credentials);
+    tokio::task::spawn_blocking(move || store_api_key(&credentials, &api_key))
+        .await
+        .map_err(|error| AppError::Tauri(format!("api key store task failed: {error}")))??;
+
+    let config = state.load_config()?;
+    if config.translation.provider == "api" {
+        let provider = state.prepare_translation_provider(config).await?;
+        state.replace_translation_provider(provider);
+    }
+    tracing::info!(
+        masked_key = %masked_key,
+        "translation API key updated"
+    );
+    Ok(())
+}
+
+/// Validates and normalizes an API key before storage.
+///
+/// The key is trimmed, must not be empty, and must not exceed
+/// [`MAX_API_KEY_LEN`] characters. Kept as a pure function so the exact
+/// validation performed by [`set_api_key`] is unit-testable without a Tauri
+/// runtime.
+///
+/// # Errors
+///
+/// Returns `AppError::InvalidApiKey` when the key fails validation.
+fn validate_api_key(api_key: &str) -> Result<String, AppError> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidApiKey("key must not be empty".to_string()));
+    }
+    if trimmed.chars().count() > MAX_API_KEY_LEN {
+        return Err(AppError::InvalidApiKey(format!(
+            "key exceeds {MAX_API_KEY_LEN} characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Returns the complete persisted application configuration.
+///
+/// The frontend hydrates its settings panel from this snapshot before
+/// calling `save_settings`, so a full save never overwrites backend fields
+/// (OCR language, log level, model directory, ...) with frontend defaults.
+///
+/// # Errors
+///
+/// Returns an application error when the configuration cannot be loaded.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn get_app_config(state: State<'_, AppState>) -> Result<AppConfig, AppError> {
+    state.load_config()
+}
+
 /// Returns a frontend-safe application status snapshot.
 ///
 /// # Errors
@@ -505,6 +589,8 @@ pub fn invoke_handler<R: tauri::Runtime>(
         set_translation_provider,
         load_local_models,
         save_settings,
+        set_api_key,
+        get_app_config,
         get_app_status,
     ]
 }
@@ -551,6 +637,28 @@ mod tests {
         let mut config = AppConfig::default();
         apply_target_language(&mut config, Language::Auto);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn api_key_validation_trims_and_accepts_normal_keys() {
+        assert_eq!(
+            validate_api_key("  sk-test-1234  ").unwrap(),
+            "sk-test-1234"
+        );
+    }
+
+    #[test]
+    fn api_key_validation_rejects_empty_and_whitespace() {
+        for key in ["", "   ", "\t\n"] {
+            let error = validate_api_key(key).unwrap_err();
+            assert!(matches!(error, AppError::InvalidApiKey(_)));
+        }
+    }
+
+    #[test]
+    fn api_key_validation_rejects_oversized_keys() {
+        let error = validate_api_key(&"a".repeat(MAX_API_KEY_LEN + 1)).unwrap_err();
+        assert!(matches!(error, AppError::InvalidApiKey(_)));
     }
 
     fn ocr_result(text: &str) -> OcrResult {

@@ -49,7 +49,7 @@ pub struct AppStatus {
 /// ownership contract required by `PipelineDeps`.
 pub struct AppState {
     pub(crate) config: std::sync::RwLock<ConfigManager>,
-    pub(crate) credentials: CredentialManager,
+    pub(crate) credentials: Arc<CredentialManager>,
     pub(crate) pipeline: std::sync::RwLock<Option<Arc<Pipeline>>>,
     pub(crate) ocr_provider: std::sync::RwLock<Arc<dyn OcrProvider>>,
     pub(crate) translation_provider: std::sync::RwLock<Arc<dyn TranslationProvider>>,
@@ -77,7 +77,7 @@ impl AppState {
     pub fn new(app_data_dir: &Path) -> Result<Self, AppError> {
         let config_manager = ConfigManager::new(app_data_dir)?;
         let config = config_manager.load()?;
-        let credentials = CredentialManager::new()?;
+        let credentials = Arc::new(CredentialManager::new()?);
         let model_dir = config
             .model_dir
             .clone()
@@ -459,6 +459,25 @@ fn load_api_key(credentials: &CredentialManager, config: &AppConfig) -> Result<S
     }))
 }
 
+/// Stores the translation API key in the OS credential vault.
+///
+/// The logical target must match [`load_api_key`] (`"translation"`) so keys
+/// written by `set_api_key` are read by provider construction. The key is
+/// never logged.
+///
+/// # Errors
+///
+/// Returns `AppError::Security` when the underlying store cannot persist the
+/// key.
+pub(crate) fn store_api_key(
+    credentials: &CredentialManager,
+    api_key: &str,
+) -> Result<(), AppError> {
+    credentials
+        .store("translation", api_key)
+        .map_err(AppError::from)
+}
+
 fn poison_inner<T>(poisoned: std::sync::PoisonError<T>) -> T {
     debug!("recovering poisoned application state lock");
     poisoned.into_inner()
@@ -467,6 +486,7 @@ fn poison_inner<T>(poisoned: std::sync::PoisonError<T>) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vtrans_security::InMemoryCredentialStore;
 
     #[test]
     fn status_snapshot_contract_is_serializable() {
@@ -519,6 +539,29 @@ mod tests {
         assert_eq!(
             config.translation.provider,
             AppConfig::default().translation.provider
+        );
+    }
+
+    #[test]
+    fn store_api_key_writes_to_the_translation_target() {
+        let store = Arc::new(InMemoryCredentialStore::new());
+        let manager = CredentialManager::with_store(store);
+        store_api_key(&manager, "sk-test-1234").unwrap();
+        assert_eq!(
+            manager.load("translation").unwrap().as_deref(),
+            Some("sk-test-1234")
+        );
+    }
+
+    #[test]
+    fn store_api_key_overwrites_a_previous_key() {
+        let store = Arc::new(InMemoryCredentialStore::new());
+        let manager = CredentialManager::with_store(store);
+        store_api_key(&manager, "sk-old").unwrap();
+        store_api_key(&manager, "sk-new").unwrap();
+        assert_eq!(
+            manager.load("translation").unwrap().as_deref(),
+            Some("sk-new")
         );
     }
 }
