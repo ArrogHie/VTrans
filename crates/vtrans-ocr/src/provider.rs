@@ -233,33 +233,67 @@ impl PaddleOcrProvider {
         })
     }
 
-    /// Pick the recognizer for a language and the language to report when
-    /// auto-detection selected a single-language model.
+    /// Pick the recognizer for a language and the language to report.
     fn select_recognizer(
         &self,
         language: Language,
     ) -> Result<(Arc<Recognizer>, Option<Language>), OcrError> {
-        match language {
-            Language::Japanese => Ok((Arc::clone(&self.rec_ja), Some(Language::Japanese))),
-            Language::English => Ok((Arc::clone(&self.rec_en), Some(Language::English))),
-            Language::ChineseSimplified => self
-                .rec_multi
-                .as_ref()
-                .map(|recognizer| (Arc::clone(recognizer), Some(Language::ChineseSimplified)))
-                .ok_or_else(|| {
+        let choice = choose_recognizer(language, self.rec_multi.is_some())?;
+        match choice {
+            RecognizerChoice::Japanese => Ok((Arc::clone(&self.rec_ja), Some(Language::Japanese))),
+            RecognizerChoice::English => Ok((Arc::clone(&self.rec_en), Some(Language::English))),
+            RecognizerChoice::Multi => {
+                let multi = self.rec_multi.as_ref().ok_or_else(|| {
                     OcrError::Inference(format!(
                         "no recognition model configured for language {}",
                         language.code()
                     ))
-                }),
-            Language::Auto => {
-                if let Some(multi) = &self.rec_multi {
-                    Ok((Arc::clone(multi), None))
-                } else {
-                    Ok((Arc::clone(&self.rec_ja), Some(Language::Japanese)))
-                }
+                })?;
+                let detected = match language {
+                    Language::Auto => None,
+                    Language::ChineseSimplified => Some(Language::ChineseSimplified),
+                    Language::Japanese | Language::English => {
+                        unreachable!("single-language choices never map to the multi model")
+                    }
+                };
+                Ok((Arc::clone(multi), detected))
             }
         }
+    }
+}
+
+/// Which recognition model slot to use for a requested language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecognizerChoice {
+    /// Japanese single-language model.
+    Japanese,
+    /// English single-language model.
+    English,
+    /// Multi-language model (also serves `zh-CN` and `auto`).
+    Multi,
+}
+
+/// Pick the recognizer slot for a language.
+///
+/// `auto` requires the multi-language model: silently falling back to a
+/// single-language model would recognize the wrong script (e.g. the Japanese
+/// model on English text) without the caller knowing. When no multi-language
+/// model is configured, `auto` returns [`OcrError::Inference`] with an
+/// actionable message instead.
+fn choose_recognizer(language: Language, has_multi: bool) -> Result<RecognizerChoice, OcrError> {
+    match language {
+        Language::Japanese => Ok(RecognizerChoice::Japanese),
+        Language::English => Ok(RecognizerChoice::English),
+        Language::ChineseSimplified | Language::Auto if has_multi => Ok(RecognizerChoice::Multi),
+        Language::ChineseSimplified => Err(OcrError::Inference(format!(
+            "no recognition model configured for language {}",
+            language.code()
+        ))),
+        Language::Auto => Err(OcrError::Inference(
+            "auto language detection requires a multi-language recognition model; \
+             please select a language manually"
+                .to_string(),
+        )),
     }
 }
 
@@ -292,7 +326,17 @@ impl OcrProvider for PaddleOcrProvider {
         if cancel.is_cancelled() {
             return Err(OcrError::Cancelled);
         }
-        let (recognizer, detected_language) = self.select_recognizer(options.language)?;
+        let (recognizer, detected_language) = match self.select_recognizer(options.language) {
+            Ok(selected) => selected,
+            Err(error) => {
+                tracing::warn!(
+                    language = %options.language.code(),
+                    error = %error,
+                    "recognizer selection failed"
+                );
+                return Err(error);
+            }
+        };
         let run_options = Arc::new(
             RunOptions::new()
                 .map_err(|e| OcrError::OrtRuntime(format!("create ONNX run options: {e}")))?,
@@ -723,4 +767,55 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn auto_without_multi_returns_inference_error() {
+        let error = choose_recognizer(Language::Auto, false).unwrap_err();
+        assert!(matches!(error, OcrError::Inference(_)));
+        assert!(error.to_string().contains("multi-language"));
+        assert!(error.to_string().contains("select a language manually"));
+    }
+
+    #[test]
+    fn auto_with_multi_uses_multi_model() {
+        assert_eq!(
+            choose_recognizer(Language::Auto, true).unwrap(),
+            RecognizerChoice::Multi
+        );
+    }
+
+    #[test]
+    fn explicit_languages_route_to_their_models() {
+        assert_eq!(
+            choose_recognizer(Language::Japanese, false).unwrap(),
+            RecognizerChoice::Japanese
+        );
+        assert_eq!(
+            choose_recognizer(Language::English, false).unwrap(),
+            RecognizerChoice::English
+        );
+        assert_eq!(
+            choose_recognizer(Language::ChineseSimplified, true).unwrap(),
+            RecognizerChoice::Multi
+        );
+    }
+
+    #[test]
+    fn explicit_languages_ignore_multi_presence() {
+        // Explicit single-language choices never consult the multi model.
+        assert_eq!(
+            choose_recognizer(Language::Japanese, true).unwrap(),
+            RecognizerChoice::Japanese
+        );
+        assert_eq!(
+            choose_recognizer(Language::English, true).unwrap(),
+            RecognizerChoice::English
+        );
+    }
+
+    #[test]
+    fn chinese_simplified_without_multi_returns_error() {
+        let error = choose_recognizer(Language::ChineseSimplified, false).unwrap_err();
+        assert!(matches!(error, OcrError::Inference(_)));
+        assert!(error.to_string().contains("zh-CN"));
+    }
 }

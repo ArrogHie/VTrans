@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use tokio_util::sync::CancellationToken;
 
+use vtrans_core::error::OcrError;
 use vtrans_core::types::{CapturedImage, Language, OcrOptions, PixelFormat, ScreenRegion};
 use vtrans_core::OcrProvider;
 use vtrans_models::ModelManager;
@@ -84,5 +85,25 @@ async fn long_english_lines_are_recognized_completely() {
             result.merged_text.contains(phrase),
             "long sentence fragment missing: {phrase}"
         );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires local PP-OCR ONNX models"]
+async fn auto_without_multi_model_returns_actionable_error() {
+    let image = load_fixture("test1_lines.png");
+    let region = ScreenRegion::new("test", 0, 0, image.width, image.height);
+    let options = OcrOptions::new(Language::Auto);
+    let error = provider()
+        .recognize(&image, &region, &options, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    match &error {
+        OcrError::Inference(message) => {
+            assert!(message.contains("multi-language"));
+            assert!(message.contains("select a language manually"));
+        }
+        other => panic!("expected OcrError::Inference, got {other:?}"),
     }
 }
