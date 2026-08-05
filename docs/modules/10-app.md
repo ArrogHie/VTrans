@@ -30,6 +30,8 @@ t::generate_handler![
     set_translation_provider,
     load_local_models,
     save_settings,
+    set_api_key,
+    get_app_config,
     get_app_status,
 ]
 ```
@@ -88,6 +90,8 @@ pub enum AppError {
     Ocr(#[from] OcrError),
     #[error("translation error: {0}")]
     Translation(#[from] TranslationError),
+    #[error("invalid api key: {0}")]
+    InvalidApiKey(String),
     #[error("tauri error: {0}")]
     Tauri(String),
     #[error("hotkey registration failed: {0}")]
@@ -118,6 +122,8 @@ crates/vtrans-app/
 | save_settings | 手工验证 + 单元 | 全链路（IPC → 持久化 → 重启生效）手工验证（README 第 2 条）；配置校验与原子持久化由 vtrans-config 单测覆盖 |
 | get_app_status | 手工验证 + 单元 | 全链路手工验证（README 第 3 条）；`AppStatus` 序列化契约有单测 |
 | Provider 切换 | 手工验证 + 单元 | 全链路手工验证（README 第 4 条）；`validate_translation_provider_id` / `update_translation_provider_config` 有单测 |
+| set_api_key | 手工验证 + 单元 | 全链路手工验证（README 第 7 条）；key 校验与凭据存储有单测，IPC 参数契约见 contracts.rs |
+| get_app_config | 手工验证 + 单元 | 前端水合手工验证（README 第 8 条）；AppConfig 序列化字段契约见 contracts.rs |
 | 快捷键注册 | 手工验证 | 依赖真实全局快捷键注册环境（README 第 5 条）；动作分派枚举有单测 |
 | 错误映射 | 单元 | 各模块错误正确映射到 AppError（error.rs tests）✅ |
 | 事件发送 | 单元 | PipelineEvent 正确转为前端事件（events.rs tests）✅ |
@@ -159,4 +165,7 @@ crates/vtrans-app/
 - src-tauri/main.rs 只调用 vtrans-app::init_app，保持薄层
 - 合并顺序：`feat/10-app` 必须先于 `feat/11-frontend` 合并——模块 11 已调用
   `set_source_language` / `set_target_language`，若前端先合并，运行时会出现
-  command 不存在错误。
+  command 不存在错误。`set_api_key` / `get_app_config` 同理，前端
+  `SettingsPanel` 已按 `{ apiKey }`（Tauri 2 默认 camelCase）参数名约定等待
+  这两个命令落地；新增 command 不得添加 `rename_all = "snake_case"`，否则
+  需同步修改前端 `src/services/tauri.ts` 与 `src/test/ipc.test.ts`。

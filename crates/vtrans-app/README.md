@@ -77,6 +77,8 @@ set_target_language(language: Language) -> Result<(), AppError>
 set_translation_provider(provider_id: String) -> Result<(), AppError>
 load_local_models() -> Result<VerifyReport, AppError>
 save_settings(settings: AppConfig) -> Result<(), AppError>
+set_api_key(api_key: String) -> Result<(), AppError>
+get_app_config() -> Result<AppConfig, AppError>
 get_app_status() -> Result<AppStatus, AppError>
 ~~~
 
@@ -88,6 +90,18 @@ get_app_status() -> Result<AppStatus, AppError>
 实时会话运行中拒绝修改（`PipelineError::AlreadyRunning`），仅局部更新配置并
 清除缓存的 pipeline。目标语言为 `Language::Auto` 时由配置校验拒绝
 （`translation.target_language must not be "auto"`）。
+
+`set_api_key` 把翻译 API Key 写入 Windows Credential Manager（target 固定为
+`"translation"`，与 `load_api_key` 读取的 target 一致），Key 不进入
+`config.json`、前端 store、事件或日志。写入通过 `spawn_blocking` 在阻塞池
+执行；当 `config.translation.provider == "api"` 时，保存后用新 Key 重建 API
+provider，无需重启即生效。空串/纯空白或超过 4096 字符的 Key 返回
+`AppError::InvalidApiKey`。前端参数名为 `{ apiKey }`（Tauri 2 默认
+camelCase，命令未加 `rename_all`）。
+
+`get_app_config` 返回当前配置的完整快照（clone，不长时间持有锁），前端
+挂载时用它水合设置面板，避免整包 `save_settings` 用前端默认值覆盖后端
+其它字段（OCR 语言、日志级别、模型目录等）。
 
 LiveTranslationConfig 包含 region、capture_interval_ms 和 difference_threshold，字段可直接由前端 JSON 反序列化。
 
@@ -155,7 +169,10 @@ cargo check -p vtrans
 - 日志在 setup::init_app 中初始化；若 tracing 已被宿主或测试环境初始化，
   初始化失败会降级为不记录滚动文件，应用仍可启动。
 - 错误路径记录 warn! 或 error!，正常生命周期记录 info!。
-- API key 从 CredentialManager 读取，不写入 config、事件或日志；翻译 Provider 的 upstream crate 负责 bearer token 注入。
+- API key 通过 `set_api_key` 写入 CredentialManager（target `"translation"`），
+  从 CredentialManager 读取，不写入 config、事件或日志；日志引用 Key 时仅
+  记录 `vtrans_core::mask_sensitive` 掩码值；翻译 Provider 的 upstream crate
+  负责 bearer token 注入。
 - 前端事件不传递 CapturedImage，避免截图通过 JSON/Base64 跨越 IPC。
 
 ## 手工验证项
@@ -178,6 +195,13 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 6. **源/目标语言切换**：在设置面板切换源语言（含 auto）与目标语言
    （zh-CN/ja/en），确认立即生效且 `get_app_status` 后状态正常；实时会话
    运行中切换应返回 `AlreadyRunning` 错误；重启应用确认配置持久化。
+7. **set_api_key 全链路**：在设置面板输入 API Key 保存，确认日志只有掩码
+   形式（`sk-****1234`）；重启应用后 Key 仍在（Credential Manager），且
+   provider 为 `"api"` 时翻译请求携带新 Key 生效；输入空串/超长 Key 确认
+   前端展示校验错误且不写入凭据。
+8. **get_app_config 水合**：在设置面板保存配置后修改配置文件中其它字段
+   （如 OCR 语言），重启应用打开设置面板，确认显示后端真实值而非前端默认
+   值；整包保存后其它字段不被覆盖。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
