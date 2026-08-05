@@ -1,155 +1,176 @@
-# frontend（模块 11）
+# VTrans
 
-VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选择器和翻译结果窗口；所有业务操作通过 Tauri IPC 调用 `vtrans-app`，不直接接触截图、模型或凭据。
+VTrans 是一款面向 Windows 的桌面屏幕翻译工具：框选屏幕任意区域即可 OCR 识别其中的文字并翻译为目标语言；也可以固定一个区域，在画面或文本变化时自动实时翻译。
 
-## 模块职责
+技术栈：Rust + Tauri 2 + React + TypeScript + ONNX Runtime（ort）+ Tokio。
 
-- 路由 Tauri 的 `main`、`selector`、`result` 三个窗口。
-- 提供单次翻译和实时翻译的控制面板。
-- 通过拖动框选生成物理像素坐标的 `ScreenRegion`。
-- 监听后端 pipeline/model 事件，并在多个 Tauri WebView 间同步结果和实时会话状态。
-- 展示 OCR 原文和翻译结果，支持复制、重新翻译、暂停/继续、置顶和窗口拖动。
-- 提供只读设置面板（捕获间隔、差异阈值、超时、重试、快捷键、置顶），显示当前后端配置。
-- Debug 模式下实时显示进入 OCR 前的捕获帧缩略图（仅显示、不保存、不持久化）。
+## 功能特性
 
-## 依赖关系
+- **单次框选翻译**：按下-拖动-松开确定区域 → 截屏 → OCR → 文本标准化 → 翻译 → 结果展示。
+- **固定区域实时翻译**：持续捕获 + 帧差检测，仅当画面或文本变化时触发 OCR/翻译，指纹去重避免重复输出；通道有界，任务不堆积。
+- **双翻译引擎**：云端 API 与本地 ONNX 模型可通过配置切换，业务流水线无需改动。
+- **多窗口架构**：主窗口（控制与设置）、选区窗口（透明框选）、结果窗口（翻译展示）、overlay 窗口（屏幕常驻选区方框）。
+- **全局快捷键**：Alt+Shift+A 选区翻译、Alt+Shift+R 实时翻译、Alt+Shift+S 停止实时。
+- **托盘与单实例**：关闭主窗口隐藏到系统托盘（左键/菜单恢复、菜单退出）；重复启动自动恢复已有实例，避免全局热键冲突。
+- **Debug 模式**：`--debug` 或 `VTRANS_DEBUG=1` 启动时，实时显示进入 OCR 之前的捕获帧缩略图（仅显示、不保存、不持久化）。
+- **隐私优先**：默认不保存截图、OCR 文本与译文；API Key 存入 Windows Credential Manager，不进入配置文件和日志；截图图像不跨 IPC 传输。
 
-### 上游
+## 仓库结构
 
-- `vtrans-app`：唯一的 Rust/Tauri IPC 边界。
-- `vtrans-core`：通过 `vtrans-app` 序列化 `ScreenRegion`、`OcrResult`、`TranslationResult` 和 `PipelineStatus`。
+| 路径 | 说明 |
+| --- | --- |
+| `crates/vtrans-core` | 核心类型、Provider trait、错误类型、日志初始化（层级 0，契约冻结） |
+| `crates/vtrans-config` | AppConfig schema、持久化与迁移（层级 1） |
+| `crates/vtrans-security` | Windows Credential Manager 凭据存取（层级 1） |
+| `crates/vtrans-text` | 文本清洗、行合并、指纹去重（层级 1） |
+| `crates/vtrans-models` | 模型 manifest、SHA-256 校验、生命周期（层级 1） |
+| `crates/vtrans-capture` | Windows Graphics Capture 屏幕采集（层级 2） |
+| `crates/vtrans-ocr` | PP-OCR ONNX 检测 + 识别（层级 2） |
+| `crates/vtrans-translation` | 云端 API 与本地 ONNX 翻译 Provider（层级 2） |
+| `crates/vtrans-pipeline` | 捕获-OCR-翻译编排、帧差检测、有界通道、Debug 帧出口（层级 3） |
+| `crates/vtrans-app` | Tauri Commands/Events、AppState、全局快捷键、托盘、overlay、Debug 模式（层级 4） |
+| `src/` | React + TypeScript 前端（主/选区/结果/overlay 窗口，层级 4） |
+| `src-tauri/` | Tauri 2 宿主（薄层，委托给 vtrans-app） |
+| `scripts/` | 模型下载脚本 |
+| `docs/` | 架构、开发环境、Git 工作流、模块规格与整合报告 |
 
-### 外部
+> 层级 N 的 crate 只能依赖层级 < N 的 crate。模块拆分、冻结契约与依赖图详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-- React 18、TypeScript、Vite
-- Zustand：不可变前端状态
-- `@tauri-apps/api` v2：`invoke`、`listen`、窗口控制
-- Tailwind CSS：组件样式
-- Lucide React：图标
-- Vitest：前端单元测试
+## 快速开始
 
-所有新增依赖均使用项目已有的 `package.json` 依赖；未修改 workspace Cargo 配置。
+### 环境要求
 
-## 公开 API 概要
-
-### IPC service
-
-```ts
-export function startRegionSelection(): Promise<ScreenRegion>;
-export function captureOnce(region: ScreenRegion): Promise<OcrResult>;
-export function startLiveTranslation(config: PipelineConfig): Promise<void>;
-export function stopLiveTranslation(): Promise<void>;
-export function saveSettings(settings: AppConfig): Promise<void>;
-export function getAppStatus(): Promise<AppStatus>;
-```
-
-其余命令封装包括 `cancelRegionSelection`、`updateLiveRegion`、`setOcrLanguage`、`setTranslationProvider` 和 `loadLocalModels`。
-
-### Event service
-
-```ts
-export function listenToEvent<K extends keyof EventPayloadMap>(
-  event: K,
-  callback: (payload: EventPayloadMap[K]) => void,
-): Promise<Unlisten>;
-export function subscribeToBackendEvents(handlers: ...): Promise<Unlisten>;
-```
-
-Debug 帧服务（仅 Debug 模式启用）：
-
-```ts
-export function subscribeToDebugFrames(
-  onFrame: (frame: DebugFramePayload) => void,
-): Promise<Unlisten>;
-export function createLatestFrameStore<T>(): LatestFrameStore<T>;
-export function useDebugFrame(enabled: boolean): DebugFramePayload | null;
-```
-
-`debug_frame_updated` 事件携带 base64 JPEG 缩略图（最长边 ≤ 480px）、区域坐标/尺寸、
-帧序号和时间戳；`AppStatus.debug_mode` 决定面板是否渲染。
-
-### Store
-
-```ts
-interface AppState {
-  mode: "single" | "live";
-  status: PipelineStatus;
-  ocrResult: OcrResult | null;
-  translationResult: TranslationResult | null;
-  error: string | null;
-  setMode(mode: "single" | "live"): void;
-  setStatus(status: PipelineStatus): void;
-}
-```
-
-## 构建与测试
-
-在仓库根目录执行：
+- Windows 10 1903+ 或 Windows 11（x64，桌面会话，支持 Graphics Capture）
+- Rust 工具链（rustup，≥ 1.75），含 clippy / rustfmt
+- Node.js LTS + pnpm
+- Visual Studio 2022 Build Tools（Desktop development with C++，含 Windows 10 SDK）
+- WebView2 Runtime（Windows 11 已预装）
+- Tauri 2 CLI
 
 ```powershell
-# 安装依赖（首次或 lockfile 更新后）
+winget install Rustlang.Rustup
+winget install OpenJS.NodeJS.LTS
+npm install -g pnpm
+cargo install tauri-cli --version "^2.0"
+```
+
+### 克隆、安装依赖与准备模型
+
+```powershell
+git clone <repo-url> VTrans
+cd VTrans
 pnpm install
+cargo fetch
 
-# 前端生产构建
-pnpm build
+# 下载 OCR/翻译模型（需网络；模型文件不提交 Git）
+.\scripts\download_models.ps1
 
-# 单元测试
-pnpm test -- --run
-
-# 开发模式
-pnpm dev
-
-# Tauri 开发模式（需要 Rust/Tauri 环境）
-pnpm tauri dev
+# 校验模型完整性（与应用内 load_local_models 同一逻辑）
+cargo run --bin vtrans-verify-models
 ```
 
-也可以直接使用已安装依赖运行类型检查：
+模型目录布局（`src-tauri/resources/models/`，`manifest.json` 提交 Git，模型文件由 `.gitignore` 排除）：
+
+```text
+manifest.json
+ocr/det.onnx
+ocr/rec_ja.onnx
+ocr/rec_en.onnx
+ocr/dict_ja.txt
+ocr/dict_en.txt
+translation/model.onnx
+translation/tokenizer.json
+```
+
+### 开发模式运行
 
 ```powershell
-.\\node_modules\\.bin\\tsc.cmd --noEmit
+cargo tauri dev
 ```
 
-## 测试覆盖
+也可以分别启动前端与宿主：
 
-- Zustand store 的 mode/status、嵌套配置不可变更新和错误状态。
-- IPC command 参数名和 payload 结构（含选区取消识别）。
-- 物理像素坐标转换（含反向拖拽）和零尺寸选区拒绝。
-- pipeline 状态标签和序列化错误分支。
-- 事件监听回调（含 `onOcrCompleted` 等便捷封装）的 payload 解包。
-- 最新值帧缓冲：多次推送只保留最新一帧，`clear` 释放缓存，绝不累积。
-- `debug_frame_updated` 事件订阅：事件名、payload 解包与注销清理。
-- DebugPanel 渲染：「Debug 模式 · 仅显示不保存」文案、缩略图 data URL、坐标/尺寸/帧号/
-  时间戳叠加、可选 OCR 对照行的展示与截断。
-- 后端 provider id（`"api"` / `"local-onnx"`）到前端配置标识符的映射与未知值回退。
-- 模式切换控件在实时会话运行期间的禁用行为。
+```powershell
+pnpm dev          # Vite 开发服务器（HMR）
+cargo run -p vtrans
+```
 
-### 手工验证项
+### Debug 模式
 
-以下行为依赖真实 Tauri 运行时与 Windows 桌面环境，未纳入自动化测试，按模块规格测试计划登记为手动验证项：
+```powershell
+cargo tauri dev -- --debug
+# 或设置环境变量
+$env:VTRANS_DEBUG="1"; cargo tauri dev
+```
 
-| 验证项 | 步骤 | 预期 |
-|--------|------|------|
-| 选区交互 | 主窗口点击“选择屏幕区域”，在选区窗口拖动生成矩形 | 出现高亮边框与尺寸标注；Enter 确认后主窗口显示区域信息 |
-| 选区取消 | 在选区窗口按 Esc | 选区窗口隐藏，主窗口不显示错误；实时会话若被暂停则保持暂停 |
-| 多显示器选区 | 在非主显示器上拖动选区 | 返回的 `ScreenRegion` 落在该显示器物理像素坐标内（`monitor_id` 与 DPI 缩放正确） |
-| 结果展示 | 完成一次单次翻译 | 结果窗口显示原文与译文；复制按钮写入剪贴板；重新翻译更新结果且清空旧译文 |
-| 状态同步 | 发起实时翻译后观察主窗口与结果窗口 | 两窗口的状态/暂停/继续/停止保持一致 |
-| 实时暂停 | 实时运行中点暂停再点继续 | 后端任务停止后前端显示暂停态；继续后恢复识别 |
-| 快捷键会话 | 使用全局快捷键启动实时翻译 | 主窗口进入实时模式，暂停/停止按钮可用（依赖 `frontend_live_config` 事件，见已知限制 6） |
-| 窗口控制 | 拖动/缩放主窗口与结果窗口，切换结果窗口置顶 | 窗口可拖动、可缩放；置顶开关即时生效 |
-| Debug 帧显示 | 以 `--debug` 或 `VTRANS_DEBUG=1` 启动，开启实时翻译或单次翻译 | 主窗口出现「Debug 模式 · 仅显示不保存」面板，缩略图随捕获帧实时更新；正常启动时主窗口无该区块 |
-| Debug 退出清理 | Debug 模式下停止翻译并退出应用 | 面板帧数据随窗口销毁释放，不落盘、不写入日志、不进入结果窗口 |
+开启后主窗口出现「Debug 模式 · 仅显示不保存」面板，实时显示进入 OCR 前的捕获帧缩略图（最长边 ≤ 480px、≤ 10fps 节流），用于定位「识别文字与选区方框内容不符」等捕获/区域问题。Debug 关闭时整条链路零开销，不落盘、不写日志。
 
-## 已知限制
+### Release 构建
 
-1. 当前 `vtrans-app::capture_once` 公开命令返回 OCR 结果；单次翻译的译文依赖后续 app 层命令契约完善，前端不会伪造译文。
-2. 设置面板可编辑采集参数、API 端点/模型/超时/重试、快捷键与结果窗口置顶，通过 `save_settings` 整包保存。由于 app 层暂未提供完整配置读取命令（缺 `get_app_config`），OCR 语言、日志级别等未在表单中的字段沿用前端当前值保存，可能覆盖后端其它配置；建议 vtrans-app 补充配置读取或局部更新命令。API Key 管理依赖 vtrans-app 新增 `set_api_key` 命令（vtrans-security 的 Credential Manager 已具备写入能力），前端暂未开放 API Key 输入。
-3. 结果窗口初始可见性、透明选区和窗口尺寸由 `src-tauri/tauri.conf.json` 管理；前端只负责运行时显示、隐藏和置顶。
-4. `model_dir` 是 Rust 配置中的 `PathBuf`，前端仅回传字符串或 `null`，不会读取模型文件。
-5. 事件监听在每个 webview 中安装，窗口销毁时统一清理；事件到达前关闭的窗口不会补发历史结果。
-6. 通过全局快捷键启动的实时会话依赖 `vtrans-app` 在快捷键路径补发 `frontend_live_config` 事件；`applyStatus` 保留回退逻辑：收到 `live_running && selected_region` 且本地没有 `liveConfig` 时，用 `config.capture` 默认值构造配置，让暂停/停止在事件到达前立即可用。若后端版本未补发该事件，捕获间隔/阈值会以默认值近似。
-7. API Key、完整原文/译文、截图像素和模型原始输出不存储在前端 store，也不会写入浏览器日志。
-8. Debug 面板仅在应用以 `--debug` 或 `VTRANS_DEBUG=1` 启动时出现（开关不写入 config.json）。
-   帧图像由后端以 ≤10fps 节流、最长边 ≤480px 的 base64 JPEG 缩略图经 `debug_frame_updated`
-   事件推送；前端仅保留内存中最新一帧，关闭 Debug 模式或退出即释放，不落盘、不写日志、
-   不发送到结果窗口。Debug 关闭时前端不订阅该事件，整条链路零开销。
+```powershell
+cargo tauri build
+```
+
+安装包输出到 `src-tauri/target/release/bundle/`（MSI + NSIS）。
+
+## 测试与质量门禁
+
+| 命令 | 说明 |
+| --- | --- |
+| `cargo test --workspace` | 全部 Rust 测试 |
+| `cargo clippy --workspace --all-targets` | 零警告（workspace 级 pedantic） |
+| `cargo fmt --all -- --check` | 零差异 |
+| `pnpm test` | 前端 vitest 单测 |
+| `pnpm build` | tsc + vite 生产构建 |
+| `cargo tauri build` | Release 打包 |
+
+## 无头验证 CLI
+
+无需启动 GUI 即可验证模块链路（OCR/翻译仍需要模型目录与真实桌面捕获环境）：
+
+```powershell
+# 单次链路：本地翻译（当前模型仅支持 en -> zh-CN）
+cargo run -p vtrans-pipeline --example pipeline_verify -- `
+  --models src-tauri/resources/models --language en --target zh-CN --mode single
+
+# 实时链路：静止区域不重复输出，Ctrl+C 停止
+cargo run -p vtrans-pipeline --example pipeline_verify -- `
+  --models src-tauri/resources/models --language en --target zh-CN --mode live `
+  --region 100,100,800,400 --interval-ms 500
+
+# 单次链路：API 翻译（日文 -> 中文）
+cargo run -p vtrans-pipeline --example pipeline_verify -- `
+  --models src-tauri/resources/models --api-endpoint <url> --api-model <name> `
+  --api-key <key> --language ja --target zh-CN --mode single
+
+# 单独验证 OCR / 翻译 / 采集
+cargo run -p vtrans-ocr --example ocr_verify -- `
+  --models src-tauri/resources/models --image path/to/image.png
+cargo run -p vtrans-translation --example translation_verify -- `
+  --text "hello" --source en --target zh-CN --models src-tauri/resources/models
+cargo run -p vtrans-capture --example capture_demo
+```
+
+## 文档索引
+
+| 文档 | 内容 |
+| --- | --- |
+| `windows_screen_translator_agent_spec.md` | 原始产品规格 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 模块拆分、冻结契约、横切标准 |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 开发环境搭建、构建/测试命令 |
+| [docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md) | 分支策略与提交规范 |
+| [docs/modules/NN-*.md](docs/modules/) | 11 个模块的详细规格 |
+| [docs/integration-report.md](docs/integration-report.md) | MVP 整合报告 |
+| `crates/*/README.md` | 各模块 README（公开 API、已知限制、手工验证项） |
+| [src/README.md](src/README.md) | 前端模块说明 |
+
+## 已知限制（MVP）
+
+- 本地翻译模型仅支持 **en → zh-CN**；其它源语言（如日文）必须使用云端 API Provider。UI 在本地引擎 + 不支持语言对时会给出明确提示，不会静默失败。
+- 修改全局快捷键后需**重启应用**生效（当前已知限制）。
+- 仅支持 Windows（依赖 Graphics Capture / Credential Manager），需在桌面会话运行。
+- Debug 模式下的捕获帧缩略图仅保存在内存最新一帧，随窗口销毁或退出释放；默认关闭。
+
+## 许可证
+
+MIT OR Apache-2.0
