@@ -1,4 +1,4 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   EventPayloadMap,
   OcrResult,
@@ -60,6 +60,7 @@ export const FRONTEND_OCR_RESULT = "frontend_ocr_result";
 export const FRONTEND_LIVE_CONFIG = "frontend_live_config";
 export const FRONTEND_LIVE_PAUSED = "frontend_live_paused";
 export const FRONTEND_LIVE_STOPPED = "frontend_live_stopped";
+export const FRONTEND_FLOATER_ENABLED = "frontend_floater_enabled";
 
 /** Listen for a single-capture result shared between Tauri webviews. */
 export function listenToFrontendOcrResult(callback: (result: OcrResult) => void): Promise<Unlisten> {
@@ -79,4 +80,30 @@ export function listenToFrontendLivePaused(callback: () => void): Promise<Unlist
 /** Listen for an explicit frontend live-session stop. */
 export function listenToFrontendLiveStopped(callback: () => void): Promise<Unlisten> {
   return listen(FRONTEND_LIVE_STOPPED, callback);
+}
+
+/** Payload of the internal floating-ball visibility event. */
+export interface FloaterEnabledPayload {
+  enabled: boolean;
+}
+
+/**
+ * Tells every webview whether the floating ball should be visible.
+ *
+ * This is a frontend-only event: the main window setting panel publishes it
+ * when the switch changes, and the floater webview listens for it to show or
+ * hide itself immediately. It never crosses the Rust boundary and carries no
+ * sensitive data.
+ */
+export function publishFrontendFloaterEnabled(enabled: boolean): Promise<void> {
+  return emit<FloaterEnabledPayload>(FRONTEND_FLOATER_ENABLED, { enabled });
+}
+
+/** Listens for floating-ball visibility changes from other webviews. */
+export function listenToFrontendFloaterEnabled(
+  callback: (payload: FloaterEnabledPayload) => void,
+): Promise<Unlisten> {
+  return listen<FloaterEnabledPayload>(FRONTEND_FLOATER_ENABLED, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
 }

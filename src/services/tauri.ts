@@ -161,6 +161,17 @@ export async function showResultWindow(): Promise<void> {
   await window.setFocus();
 }
 
+/** Shows and focuses the main control webview. */
+export async function showMainWindow(): Promise<void> {
+  const window = await WebviewWindow.getByLabel("main");
+  if (!window) {
+    console.warn("[vtrans] main window is not configured");
+    return;
+  }
+  await window.show();
+  await window.setFocus();
+}
+
 /**
  * Normalizes a selection rectangle to physical pixels.
  *

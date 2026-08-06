@@ -70,6 +70,7 @@ export interface AppConfig {
   ocr: OcrConfig;
   translation: TranslationConfig;
   result_window: ResultWindowConfig;
+  floating_ball: FloatingBallConfig;
   hotkeys: HotkeyConfig;
   log_level: string;
   model_dir: string | null;
@@ -98,6 +99,15 @@ export interface TranslationConfig {
 
 export interface ResultWindowConfig {
   always_on_top: boolean;
+  /** Background opacity of the mini-bar result popup (0.3–1.0). */
+  opacity: number;
+  /** Translation text font size in pixels (12–24). */
+  font_size_px: number;
+}
+
+export interface FloatingBallConfig {
+  /** Whether the floating ball is visible after startup. */
+  enabled: boolean;
 }
 
 export interface HotkeyConfig {
@@ -165,7 +175,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     api_model: "gpt-4o-mini",
     max_retries: 3,
   },
-  result_window: { always_on_top: true },
+  result_window: { always_on_top: true, opacity: 0.95, font_size_px: 14 },
+  floating_ball: { enabled: false },
   hotkeys: {
     select_and_translate: "Alt+Shift+A",
     live_translate: "Alt+Shift+R",
@@ -175,6 +186,15 @@ export const DEFAULT_CONFIG: AppConfig = {
   model_dir: null,
   version: 1,
 };
+
+/** Allowed range for the mini-bar background opacity. */
+export const RESULT_OPACITY_MIN = 0.3;
+/** Allowed range for the mini-bar background opacity. */
+export const RESULT_OPACITY_MAX = 1.0;
+/** Allowed range for the mini-bar translation font size. */
+export const RESULT_FONT_SIZE_MIN = 12;
+/** Allowed range for the mini-bar translation font size. */
+export const RESULT_FONT_SIZE_MAX = 24;
 
 export function isPipelineError(status: PipelineStatus): status is { error: string } {
   return typeof status === "object" && status !== null && "error" in status;
