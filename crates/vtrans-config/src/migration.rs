@@ -35,6 +35,11 @@ const MIGRATIONS: &[Migration] = &[
         to: 2,
         apply: migrate_v1_to_v2,
     },
+    Migration {
+        from: 2,
+        to: 3,
+        apply: migrate_v2_to_v3,
+    },
 ];
 
 /// The outcome of migrating raw config JSON.
@@ -113,6 +118,16 @@ fn migrate_v1_to_v2(config: &mut AppConfig) {
     config.version = 2;
 }
 
+/// Migrates a version-`2` config to version `3`.
+///
+/// v3 adds `floating_ball.opacity` and `floating_ball.size_px`. Fields
+/// absent from v2 files are backfilled with defaults by `serde(default)`
+/// during deserialization (see [`crate::defaults`]), while fields a v2 file
+/// happens to contain are preserved; this step only stamps the new version.
+fn migrate_v2_to_v3(config: &mut AppConfig) {
+    config.version = 3;
+}
+
 /// Minimal deserialization target used to read the `version` field.
 #[derive(Deserialize)]
 struct VersionProbe {
@@ -159,19 +174,19 @@ mod tests {
     #[test]
     fn current_version_passes_through() {
         let raw = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "capture": { "interval_ms": 700 }
         });
         let config = migrate_value(raw).unwrap().config;
-        assert_eq!(config.version, 2);
+        assert_eq!(config.version, 3);
         assert_eq!(config.capture.interval_ms, 700);
     }
 
     #[test]
     fn newer_version_is_rejected() {
-        let raw = serde_json::json!({ "version": 3 });
+        let raw = serde_json::json!({ "version": 4 });
         let err = migrate_value(raw).unwrap_err();
-        assert!(matches!(err, ConfigError::UnsupportedVersion(3)));
+        assert!(matches!(err, ConfigError::UnsupportedVersion(4)));
     }
 
     #[test]
@@ -210,10 +225,10 @@ mod tests {
 
     #[test]
     fn migrated_flag_is_false_for_current_version() {
-        let raw = serde_json::json!({ "version": 2 });
+        let raw = serde_json::json!({ "version": 3 });
         let migrated = migrate_value(raw).unwrap();
         assert!(!migrated.migrated);
-        assert_eq!(migrated.from_version, 2);
+        assert_eq!(migrated.from_version, 3);
     }
 
     #[test]
@@ -255,7 +270,35 @@ mod tests {
     }
 
     #[test]
-    fn v0_config_is_migrated_through_v2() {
+    fn v2_missing_new_fields_is_migrated_with_defaults() {
+        let raw = serde_json::json!({
+            "version": 2,
+            "floating_ball": { "enabled": true }
+        });
+        let migrated = migrate_value(raw).unwrap();
+        assert!(migrated.migrated);
+        assert_eq!(migrated.from_version, 2);
+        assert_eq!(migrated.config.version, CURRENT_CONFIG_VERSION);
+        assert!(migrated.config.floating_ball.enabled);
+        assert!((migrated.config.floating_ball.opacity - 1.0).abs() < f64::EPSILON);
+        assert_eq!(migrated.config.floating_ball.size_px, 48);
+    }
+
+    #[test]
+    fn v2_present_new_fields_are_preserved() {
+        let raw = serde_json::json!({
+            "version": 2,
+            "floating_ball": { "enabled": true, "opacity": 0.85, "size_px": 64 }
+        });
+        let config = migrate_value(raw).unwrap().config;
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert!(config.floating_ball.enabled);
+        assert!((config.floating_ball.opacity - 0.85).abs() < f64::EPSILON);
+        assert_eq!(config.floating_ball.size_px, 64);
+    }
+
+    #[test]
+    fn v0_config_is_migrated_through_current() {
         let raw = serde_json::json!({ "version": 0 });
         let migrated = migrate_value(raw).unwrap();
         assert_eq!(migrated.from_version, 0);
@@ -263,5 +306,7 @@ mod tests {
         assert!((migrated.config.result_window.opacity - 0.95).abs() < f64::EPSILON);
         assert_eq!(migrated.config.result_window.font_size_px, 14);
         assert!(!migrated.config.floating_ball.enabled);
+        assert!((migrated.config.floating_ball.opacity - 1.0).abs() < f64::EPSILON);
+        assert_eq!(migrated.config.floating_ball.size_px, 48);
     }
 }
