@@ -177,7 +177,7 @@ VTrans 共声明 5 个窗口（`src-tauri/tauri.conf.json`）：
 | label | 角色 | 关键配置 |
 |-------|------|---------|
 | main | 主窗口 | 420×600，可缩放，应用入口 |
-| result | 结果窗口 | 400×300，默认隐藏、置顶；透明度由前端按配置 CSS 应用（Tauri 2 无 setOpacity，见「已知限制」） |
+| result | 结果窗口 | 360×140（迷你条形态）、默认隐藏、置顶、`transparent: true`、可缩放 |
 | selector | 选区窗口 | 全屏、透明、无边框，默认隐藏 |
 | overlay | 选区方框 | 全屏、透明、无边框、置顶、可点穿，默认隐藏 |
 | floater | 悬浮球 | 48×48、透明、无边框、置顶、跳过任务栏、不抢焦点（`focus: false`），默认隐藏 |
@@ -226,16 +226,17 @@ API 复核：`allow-available-monitors`、`allow-set-position`、
 权限）；无多余权限。
 
 **透明度能力验证结论（feat/10-floating-ball-window）**：锁定的 Tauri
-2.11.5（tauri-runtime-wry 2.11.4、@tauri-apps/api 2.11.1）不提供窗口
+2.11.5（tauri-runtime-wry 2.11.4、@tauri-apps/api 2.11.1）不提供**运行时**
 opacity 能力——Rust 侧 `WebviewWindow` 无 `set_opacity`，JS 侧
 `getCurrentWindow().setOpacity()` 不存在，ACL 中也没有
 `core:window:allow-set-opacity` 权限（tauri-build 编译期实测报
 `Permission core:window:allow-set-opacity not found`；tauri/tauri-runtime/
 tauri-runtime-wry/tao/wry 全量源码 grep 无 opacity 命中）。因此 capability
-**不含** opacity 权限。结果窗口透明度由前端按 `result_window.opacity`
-配置值以 CSS 兜底；若要半透明真正透出桌面，需要 result 窗口声明
-`transparent: true`（与 overlay/selector 相同的 WebView2 透明机制），该
-前置条件随前端适配（模块 11）协调合入，本分支不改 result 窗口的生产行为。
+**不含** opacity 权限（透明是窗口配置属性，不需要 ACL）。result 窗口已
+声明 `transparent: true`（追加提交，与 overlay/selector 相同的 WebView2
+透明机制），前端可直接用 CSS 背景 alpha 实现半透明透出桌面；运行时透明度
+调节（setOpacity）不可用，需要时由前端按 `result_window.opacity` 配置在
+CSS 层应用。
 
 ### Tauri bootstrap
 
@@ -331,10 +332,12 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 13. **悬浮球窗口**：启动应用确认无悬浮球（默认隐藏）；开启
     `floating_ball.enabled` 后出现 48×48 透明置顶悬浮球，可拖动且不点穿
     （悬浮球区域仍能接收鼠标）；点击悬浮球唤起主窗口。
-14. **结果窗口透明度（CSS 兜底）**：确认 Tauri 2.11.5 无 `setOpacity`
-    （见「已知限制」）；前端按 `result_window.opacity` 对结果窗口内容应用
-    CSS 透明度，确认在 result 窗口声明 `transparent: true` 之前半透明为
-    「内容与窗口背景混合」而非穿透桌面，并据此推进模块 11 的适配。
+14. **结果窗口透明（方案 1 迷你条）**：确认 result 窗口以 360×140 迷你条
+    形态启动（默认隐藏）；模块 11 合并前前端背景仍不透明，无可见回归；
+    前端按 `result_window.opacity` 应用 CSS 背景 alpha 后，半透明内容透出
+    桌面（无需 setOpacity，窗口已声明 `transparent: true`）。同时检查
+    Windows 下透明窗口的文字渲染清晰、拖动/缩放重绘无残留、原生阴影表现
+    正常（若有不完善处见「已知限制」建议）。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
@@ -372,11 +375,15 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
   IPC），前端方框已兜底，不阻塞 MVP。
 - capability 清单由模块 10 统一维护（见「capability 归属」一节）；生产构建
   应按窗口和 command 最小化 capability。
-- 锁定的 Tauri 2.11.5 不提供窗口 opacity 能力（Rust/JS/ACL 均无，
-  `core:window:allow-set-opacity` 不存在，添加会导致构建失败）；结果窗口
-  透明度由前端 CSS 兜底。CSS 半透明要真正透出桌面，需要 result 窗口声明
-  `transparent: true` 并配合前端 alpha 背景（仓库已用该机制支撑
-  overlay/selector）；该改动留待前端适配时随模块 11 协调合入。
+- 锁定的 Tauri 2.11.5 不提供**运行时**窗口 opacity 能力（Rust/JS/ACL 均
+  无，`core:window:allow-set-opacity` 不存在，添加会导致构建失败）；result
+  窗口已声明 `transparent: true`（窗口级透明属性，无需 ACL），前端用 CSS
+  背景 alpha 实现半透明。Windows 透明窗口的已知注意事项：原生标题栏区域
+  不透出桌面（result 保留 decorations，CSS 半透明作用于客户区；如需整窗
+  无边框透出，另行协调 `decorations: false`）；原生阴影在分层窗口
+  （WS_EX_LAYERED）上可能不渲染或呈矩形，需要时建议 `shadow: false` +
+  CSS box-shadow；文字渲染与缩放重绘依赖 WebView2 Evergreen 运行时，
+  overlay/selector 已用同一机制渲染文字标签，表现一致。
 - 悬浮球窗口默认隐藏（`visible: false`），由前端按 `floating_ball.enabled`
   配置显示；全局 hide-on-close 策略对 floater 同样生效（关闭隐藏不销毁）。
   悬浮球不点穿，未配置 `setIgnoreCursorEvents`。
