@@ -87,6 +87,8 @@ set_target_language(language: Language) -> Result<(), AppError>
 set_translation_provider(provider_id: String) -> Result<(), AppError>
 load_local_models() -> Result<VerifyReport, AppError>
 save_settings(settings: AppConfig) -> Result<(), AppError>
+update_result_window_appearance(opacity: f64, font_size_px: u32) -> Result<(), AppError>
+update_floating_ball_appearance(opacity: f64, size_px: u32) -> Result<(), AppError>
 set_api_key(api_key: String) -> Result<(), AppError>
 get_app_config() -> Result<AppConfig, AppError>
 get_app_status() -> Result<AppStatus, AppError>
@@ -112,6 +114,17 @@ camelCase，命令未加 `rename_all`）。
 `get_app_config` 返回当前配置的完整快照（clone，不长时间持有锁），前端
 挂载时用它水合设置面板，避免整包 `save_settings` 用前端默认值覆盖后端
 其它字段（OCR 语言、日志级别、模型目录等）。
+
+`update_result_window_appearance` / `update_floating_ball_appearance` 只
+持久化对应窗口的两个外观字段（`result_window.opacity`/`font_size_px` 与
+`floating_ball.opacity`/`size_px`）：加载配置 → 修改字段 → `save_config`
+（内部校验 + 原子写）。与 `save_settings` 不同，它们**不获取 live 生命周期
+锁、不检查 live 任务是否在运行、不重建 Provider**，因此外观调整在实时
+会话运行中也能保存（bug 2 后端侧修复）。越界值由配置校验返回
+`ConfigError::Validation`，经 `#[from]` 映射为 `AppError::Config`。前端
+参数名遵循 Tauri 2 默认 camelCase：`{ opacity, fontSizePx }` 与
+`{ opacity, sizePx }`（契约见 `tests/contracts.rs`）。窗口样式本身由前端
+按持久化字段应用，命令不触碰窗口 API。
 
 LiveTranslationConfig 包含 region、capture_interval_ms 和 difference_threshold，字段可直接由前端 JSON 反序列化。
 
@@ -177,7 +190,7 @@ VTrans 共声明 5 个窗口（`src-tauri/tauri.conf.json`）：
 | label | 角色 | 关键配置 |
 |-------|------|---------|
 | main | 主窗口 | 420×600，可缩放，应用入口 |
-| result | 结果窗口 | 360×140（迷你条形态）、默认隐藏、置顶、`transparent: true`、可缩放 |
+| result | 结果窗口 | 360×140（迷你条形态）、默认隐藏、置顶、`transparent: true`、无边框（`decorations: false`）、可缩放 |
 | selector | 选区窗口 | 全屏、透明、无边框，默认隐藏 |
 | overlay | 选区方框 | 全屏、透明、无边框、置顶、可点穿，默认隐藏 |
 | floater | 悬浮球 | 48×48、透明、无边框、置顶、跳过任务栏、不抢焦点（`focus: false`），默认隐藏 |
@@ -332,12 +345,14 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 13. **悬浮球窗口**：启动应用确认无悬浮球（默认隐藏）；开启
     `floating_ball.enabled` 后出现 48×48 透明置顶悬浮球，可拖动且不点穿
     （悬浮球区域仍能接收鼠标）；点击悬浮球唤起主窗口。
-14. **结果窗口透明（方案 1 迷你条）**：确认 result 窗口以 360×140 迷你条
-    形态启动（默认隐藏）；模块 11 合并前前端背景仍不透明，无可见回归；
-    前端按 `result_window.opacity` 应用 CSS 背景 alpha 后，半透明内容透出
-    桌面（无需 setOpacity，窗口已声明 `transparent: true`）。同时检查
-    Windows 下透明窗口的文字渲染清晰、拖动/缩放重绘无残留、原生阴影表现
-    正常（若有不完善处见「已知限制」建议）。
+14. **结果窗口无边框透明（方案 1 迷你条）**：确认 result 窗口以 360×140
+    迷你条形态启动（默认隐藏），无原生标题栏（`decorations: false`），
+    拖动区域与关闭按钮由前端提供（`data-tauri-drag-region` /
+    `startDragging`，capability 已含 `allow-start-dragging`）；模块 11 合并
+    前前端背景仍不透明，无可见回归；前端按 `result_window.opacity` 应用
+    CSS 背景 alpha 后，半透明内容透出桌面（无需 setOpacity，窗口已声明
+    `transparent: true`）。同时检查 Windows 下透明窗口的文字渲染清晰、
+    缩放重绘无残留、原生阴影表现正常（若有不完善处见「已知限制」建议）。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
@@ -378,12 +393,14 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 - 锁定的 Tauri 2.11.5 不提供**运行时**窗口 opacity 能力（Rust/JS/ACL 均
   无，`core:window:allow-set-opacity` 不存在，添加会导致构建失败）；result
   窗口已声明 `transparent: true`（窗口级透明属性，无需 ACL），前端用 CSS
-  背景 alpha 实现半透明。Windows 透明窗口的已知注意事项：原生标题栏区域
-  不透出桌面（result 保留 decorations，CSS 半透明作用于客户区；如需整窗
-  无边框透出，另行协调 `decorations: false`）；原生阴影在分层窗口
-  （WS_EX_LAYERED）上可能不渲染或呈矩形，需要时建议 `shadow: false` +
-  CSS box-shadow；文字渲染与缩放重绘依赖 WebView2 Evergreen 运行时，
-  overlay/selector 已用同一机制渲染文字标签，表现一致。
+  背景 alpha 实现半透明。Windows 透明窗口的已知注意事项：result 已声明
+  `decorations: false`（无原生标题栏），标题栏/边框由前端 CSS 提供，原生
+  拖动与关闭按钮不可用（前端用 `data-tauri-drag-region` /
+  `startDragging` 与自定义关闭按钮兜底，capability 已含
+  `allow-start-dragging`）；原生阴影在分层窗口（WS_EX_LAYERED）上可能
+  不渲染或呈矩形，需要时建议 `shadow: false` + CSS box-shadow；文字渲染
+  与缩放重绘依赖 WebView2 Evergreen 运行时，overlay/selector 已用同一
+  机制渲染文字标签，表现一致。
 - 悬浮球窗口默认隐藏（`visible: false`），由前端按 `floating_ball.enabled`
   配置显示；全局 hide-on-close 策略对 floater 同样生效（关闭隐藏不销毁）。
   悬浮球不点穿，未配置 `setIgnoreCursorEvents`。

@@ -550,6 +550,98 @@ pub async fn save_settings(
     Ok(())
 }
 
+/// Updates the persisted result-window appearance (opacity and font size).
+///
+/// The change is applied to the two `result_window` fields and persisted
+/// through `save_config`, which validates the values and writes the file
+/// atomically. Out-of-range values surface as `ConfigError::Validation`
+/// mapped to `AppError::Config`.
+///
+/// Unlike `save_settings`, this command never acquires the live lifecycle
+/// lock, never checks whether a live task is running, and never rebuilds a
+/// translation provider: appearance changes are independent of capture,
+/// OCR, and translation state, so they apply even while a live session is
+/// active. The window itself is styled by the frontend from the persisted
+/// fields; this command only persists them.
+///
+/// The frontend passes the arguments as `{ opacity, fontSizePx }` (Tauri 2
+/// maps the `font_size_px` parameter to camelCase by default).
+///
+/// # Errors
+///
+/// Returns an application error when the configuration cannot be loaded or
+/// persisted.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn update_result_window_appearance(
+    opacity: f64,
+    font_size_px: u32,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let mut config = state.load_config()?;
+    apply_result_window_appearance(&mut config, opacity, font_size_px);
+    state.save_config(&config)?;
+    tracing::info!(opacity, font_size_px, "result window appearance updated");
+    Ok(())
+}
+
+/// Updates the persisted floating-ball appearance (opacity and size).
+///
+/// The change is applied to the two `floating_ball` fields and persisted
+/// through `save_config`, which validates the values and writes the file
+/// atomically. Out-of-range values surface as `ConfigError::Validation`
+/// mapped to `AppError::Config`.
+///
+/// Like [`update_result_window_appearance`], this command never acquires
+/// the live lifecycle lock, never checks whether a live task is running,
+/// and never rebuilds a translation provider, so appearance changes apply
+/// while a live session is active.
+///
+/// The frontend passes the arguments as `{ opacity, sizePx }` (Tauri 2
+/// maps the `size_px` parameter to camelCase by default).
+///
+/// # Errors
+///
+/// Returns an application error when the configuration cannot be loaded or
+/// persisted.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn update_floating_ball_appearance(
+    opacity: f64,
+    size_px: u32,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let mut config = state.load_config()?;
+    apply_floating_ball_appearance(&mut config, opacity, size_px);
+    state.save_config(&config)?;
+    tracing::info!(opacity, size_px, "floating ball appearance updated");
+    Ok(())
+}
+
+/// Applies a result-window appearance change to a configuration snapshot.
+///
+/// Kept as a pure function so the exact mutation performed by
+/// [`update_result_window_appearance`] can be unit-tested without a Tauri
+/// runtime. Out-of-range values are not rejected here; they surface as
+/// `ConfigError::Validation` when the snapshot is persisted by
+/// `vtrans-config`.
+fn apply_result_window_appearance(config: &mut AppConfig, opacity: f64, font_size_px: u32) {
+    config.result_window.opacity = opacity;
+    config.result_window.font_size_px = font_size_px;
+}
+
+/// Applies a floating-ball appearance change to a configuration snapshot.
+///
+/// Kept as a pure function so the exact mutation performed by
+/// [`update_floating_ball_appearance`] can be unit-tested without a Tauri
+/// runtime. Out-of-range values are not rejected here; they surface as
+/// `ConfigError::Validation` when the snapshot is persisted by
+/// `vtrans-config`.
+fn apply_floating_ball_appearance(config: &mut AppConfig, opacity: f64, size_px: u32) {
+    config.floating_ball.opacity = opacity;
+    config.floating_ball.size_px = size_px;
+}
+
 /// Stores the translation API key in the OS credential vault.
 ///
 /// The key is written to the Windows Credential Manager through
@@ -658,6 +750,8 @@ pub fn invoke_handler<R: tauri::Runtime>(
         set_translation_provider,
         load_local_models,
         save_settings,
+        update_result_window_appearance,
+        update_floating_ball_appearance,
         set_api_key,
         get_app_config,
         get_app_status,
@@ -667,7 +761,42 @@ pub fn invoke_handler<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use vtrans_config::{ConfigError, ConfigManager};
     use vtrans_core::{OcrLine, TranslationResult};
+
+    /// Isolated config directory for persistence tests, removed on drop.
+    ///
+    /// std-only (no extra dev-dependency): the directory name combines the
+    /// process id with a monotonic counter so parallel tests never collide.
+    struct TestConfigDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TestConfigDir {
+        fn new() -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let unique = format!(
+                "vtrans-app-appearance-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestConfigDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[test]
     fn live_config_defaults_are_stable() {
@@ -706,6 +835,141 @@ mod tests {
         let mut config = AppConfig::default();
         apply_target_language(&mut config, Language::Auto);
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn result_window_appearance_mutates_only_its_two_fields() {
+        let mut config = AppConfig::default();
+        apply_result_window_appearance(&mut config, 0.8, 18);
+        assert!((config.result_window.opacity - 0.8).abs() < f64::EPSILON);
+        assert_eq!(config.result_window.font_size_px, 18);
+        assert_eq!(
+            config.result_window.always_on_top,
+            AppConfig::default().result_window.always_on_top
+        );
+        assert_eq!(config.floating_ball, AppConfig::default().floating_ball);
+        assert_eq!(config.capture, AppConfig::default().capture);
+        assert_eq!(config.translation, AppConfig::default().translation);
+    }
+
+    #[test]
+    fn floating_ball_appearance_mutates_only_its_two_fields() {
+        let mut config = AppConfig::default();
+        apply_floating_ball_appearance(&mut config, 0.75, 56);
+        assert!((config.floating_ball.opacity - 0.75).abs() < f64::EPSILON);
+        assert_eq!(config.floating_ball.size_px, 56);
+        assert_eq!(
+            config.floating_ball.enabled,
+            AppConfig::default().floating_ball.enabled
+        );
+        assert_eq!(config.result_window, AppConfig::default().result_window);
+        assert_eq!(config.hotkeys, AppConfig::default().hotkeys);
+    }
+
+    #[test]
+    fn result_window_appearance_out_of_range_is_rejected_by_validation() {
+        for (opacity, font_size_px) in [(0.2, 14), (1.1, 14), (0.8, 11), (0.8, 25)] {
+            let mut config = AppConfig::default();
+            apply_result_window_appearance(&mut config, opacity, font_size_px);
+            let error = AppError::from(config.validate().unwrap_err());
+            assert!(
+                matches!(error, AppError::Config(ConfigError::Validation(_))),
+                "expected ConfigError::Validation for ({opacity}, {font_size_px})"
+            );
+        }
+    }
+
+    #[test]
+    fn floating_ball_appearance_out_of_range_is_rejected_by_validation() {
+        for (opacity, size_px) in [(0.2, 48), (1.1, 48), (1.0, 31), (1.0, 73)] {
+            let mut config = AppConfig::default();
+            apply_floating_ball_appearance(&mut config, opacity, size_px);
+            let error = AppError::from(config.validate().unwrap_err());
+            assert!(
+                matches!(error, AppError::Config(ConfigError::Validation(_))),
+                "expected ConfigError::Validation for ({opacity}, {size_px})"
+            );
+        }
+    }
+
+    #[test]
+    fn appearance_updates_persist_and_survive_reload() {
+        let dir = TestConfigDir::new();
+        let manager = ConfigManager::new(dir.path()).unwrap();
+        manager.save(&AppConfig::default()).unwrap();
+
+        let mut config = manager.load().unwrap();
+        apply_result_window_appearance(&mut config, 0.85, 16);
+        apply_floating_ball_appearance(&mut config, 0.9, 60);
+        manager.save(&config).unwrap();
+
+        let persisted = manager.load().unwrap();
+        assert!((persisted.result_window.opacity - 0.85).abs() < f64::EPSILON);
+        assert_eq!(persisted.result_window.font_size_px, 16);
+        assert!((persisted.floating_ball.opacity - 0.9).abs() < f64::EPSILON);
+        assert_eq!(persisted.floating_ball.size_px, 60);
+        assert_eq!(persisted.translation, AppConfig::default().translation);
+    }
+
+    #[test]
+    fn appearance_update_out_of_range_is_rejected_without_writing() {
+        let dir = TestConfigDir::new();
+        let manager = ConfigManager::new(dir.path()).unwrap();
+        manager.save(&AppConfig::default()).unwrap();
+
+        let mut config = manager.load().unwrap();
+        apply_result_window_appearance(&mut config, 0.2, 14);
+        let error = manager.save(&config).unwrap_err();
+        assert!(matches!(error, ConfigError::Validation(_)));
+
+        // The on-disk config is untouched.
+        assert_eq!(manager.load().unwrap(), AppConfig::default());
+    }
+
+    #[test]
+    fn appearance_boundary_values_are_accepted() {
+        let dir = TestConfigDir::new();
+        let manager = ConfigManager::new(dir.path()).unwrap();
+        manager.save(&AppConfig::default()).unwrap();
+
+        // Inclusive range boundaries: opacity 0.3/1.0, font 12/24, size 32/72.
+        let mut config = manager.load().unwrap();
+        apply_result_window_appearance(&mut config, 0.3, 12);
+        apply_floating_ball_appearance(&mut config, 1.0, 72);
+        manager.save(&config).unwrap();
+
+        let persisted = manager.load().unwrap();
+        assert!((persisted.result_window.opacity - 0.3).abs() < f64::EPSILON);
+        assert_eq!(persisted.result_window.font_size_px, 12);
+        assert!((persisted.floating_ball.opacity - 1.0).abs() < f64::EPSILON);
+        assert_eq!(persisted.floating_ball.size_px, 72);
+    }
+
+    #[test]
+    fn appearance_persistence_is_independent_of_live_and_provider_state() {
+        // Regression for bug 2 (backend side): appearance updates used to be
+        // routed through the `save_settings` gate, which acquires the live
+        // lifecycle lock, rejects saves while a live task is running, and
+        // rebuilds the translation provider. The new commands persist through
+        // a `ConfigManager`-only path — no live lifecycle, no live-task
+        // handle, and no provider state is consulted — so they apply while a
+        // live session is active. This test pins that contract by exercising
+        // the exact mutation + save cycle the commands run with only a
+        // `ConfigManager` in scope.
+        let dir = TestConfigDir::new();
+        let manager = ConfigManager::new(dir.path()).unwrap();
+        manager.save(&AppConfig::default()).unwrap();
+
+        let mut config = manager.load().unwrap();
+        apply_result_window_appearance(&mut config, 0.8, 18);
+        apply_floating_ball_appearance(&mut config, 0.7, 48);
+        manager.save(&config).unwrap();
+
+        // Persisting appearance never touches translation/OCR/capture state.
+        let persisted = manager.load().unwrap();
+        assert_eq!(persisted.translation, AppConfig::default().translation);
+        assert_eq!(persisted.ocr, AppConfig::default().ocr);
+        assert_eq!(persisted.capture, AppConfig::default().capture);
     }
 
     #[test]

@@ -27,7 +27,8 @@
         "resizable": true,
         "visible": false,
         "alwaysOnTop": true,
-        "transparent": true
+        "transparent": true,
+        "decorations": false
       },
       {
         "label": "selector",
