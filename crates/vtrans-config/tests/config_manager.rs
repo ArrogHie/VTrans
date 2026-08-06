@@ -61,6 +61,8 @@ fn save_and_load_round_trip_preserves_all_sections() {
     config.result_window.opacity = 0.8;
     config.result_window.font_size_px = 18;
     config.floating_ball.enabled = true;
+    config.floating_ball.opacity = 0.9;
+    config.floating_ball.size_px = 56;
     config.hotkeys.live_translate = "Ctrl+Shift+L".to_string();
     config.log_level = "debug".to_string();
     config.model_dir = Some(dir.path().join("models"));
@@ -101,7 +103,7 @@ fn update_on_missing_file_returns_not_found() {
 #[test]
 fn invalid_range_is_rejected_on_load() {
     let dir = tempdir().unwrap();
-    write_config(dir.path(), r#"{"capture":{"interval_ms":10},"version":2}"#);
+    write_config(dir.path(), r#"{"capture":{"interval_ms":10},"version":3}"#);
     let manager = ConfigManager::new(dir.path()).unwrap();
 
     let err = manager.load().unwrap_err();
@@ -180,9 +182,9 @@ fn update_migrates_v0_file_before_applying_mutation() {
 #[test]
 fn load_does_not_rewrite_current_version_file() {
     let dir = tempdir().unwrap();
-    // Compact v2 JSON: loading must not touch the file when it is already
+    // Compact v3 JSON: loading must not touch the file when it is already
     // at the current version (no pretty-printing, no field expansion).
-    let raw = r#"{"version":2,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
+    let raw = r#"{"version":3,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
     write_config(dir.path(), raw);
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -221,6 +223,8 @@ fn v1_config_missing_new_fields_is_migrated_with_defaults() {
         Some(14)
     );
     assert_eq!(persisted["floating_ball"]["enabled"].as_bool(), Some(false));
+    assert_eq!(persisted["floating_ball"]["opacity"].as_f64(), Some(1.0));
+    assert_eq!(persisted["floating_ball"]["size_px"].as_u64(), Some(48));
 }
 
 #[test]
@@ -228,7 +232,7 @@ fn invalid_opacity_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":2,"result_window":{"opacity":0.2}}"#,
+        r#"{"version":3,"result_window":{"opacity":0.2}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -244,13 +248,88 @@ fn invalid_font_size_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":2,"result_window":{"font_size_px":30}}"#,
+        r#"{"version":3,"result_window":{"font_size_px":30}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
     let err = manager.load().unwrap_err();
     match err {
         ConfigError::Validation(msg) => assert!(msg.contains("result_window.font_size_px")),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[test]
+fn v2_config_missing_new_fields_is_migrated_with_defaults() {
+    let dir = tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"{"version":2,"floating_ball":{"enabled":true}}"#,
+    );
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let config = manager.load().unwrap();
+
+    assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+    assert!(config.floating_ball.enabled);
+    assert!((config.floating_ball.opacity - 1.0).abs() < f64::EPSILON);
+    assert_eq!(config.floating_ball.size_px, 48);
+
+    // The migrated file is persisted with the new fields and version.
+    let persisted = read_raw(dir.path());
+    assert_eq!(
+        persisted["version"].as_u64(),
+        Some(u64::from(CURRENT_CONFIG_VERSION))
+    );
+    assert_eq!(persisted["floating_ball"]["opacity"].as_f64(), Some(1.0));
+    assert_eq!(persisted["floating_ball"]["size_px"].as_u64(), Some(48));
+}
+
+#[test]
+fn v2_config_present_new_fields_are_preserved() {
+    let dir = tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"{"version":2,"floating_ball":{"enabled":true,"opacity":0.85,"size_px":64}}"#,
+    );
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let config = manager.load().unwrap();
+
+    assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+    assert!(config.floating_ball.enabled);
+    assert!((config.floating_ball.opacity - 0.85).abs() < f64::EPSILON);
+    assert_eq!(config.floating_ball.size_px, 64);
+}
+
+#[test]
+fn invalid_floating_ball_opacity_is_rejected_on_load() {
+    let dir = tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"{"version":3,"floating_ball":{"opacity":0.2}}"#,
+    );
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let err = manager.load().unwrap_err();
+    match err {
+        ConfigError::Validation(msg) => assert!(msg.contains("floating_ball.opacity")),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_floating_ball_size_is_rejected_on_load() {
+    let dir = tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"{"version":3,"floating_ball":{"size_px":80}}"#,
+    );
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let err = manager.load().unwrap_err();
+    match err {
+        ConfigError::Validation(msg) => assert!(msg.contains("floating_ball.size_px")),
         other => panic!("expected Validation, got {other:?}"),
     }
 }

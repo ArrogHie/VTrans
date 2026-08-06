@@ -29,6 +29,9 @@ const OPACITY_RANGE: std::ops::RangeInclusive<f64> = 0.3..=1.0;
 /// Valid range for `result_window.font_size_px`.
 const FONT_SIZE_PX_RANGE: std::ops::RangeInclusive<u32> = 12..=24;
 
+/// Valid range for `floating_ball.size_px`.
+const FLOATING_BALL_SIZE_PX_RANGE: std::ops::RangeInclusive<u32> = 32..=72;
+
 impl AppConfig {
     /// Validates every configuration field against its documented rules.
     ///
@@ -51,6 +54,7 @@ impl AppConfig {
         self.validate_ocr()?;
         self.validate_translation()?;
         self.validate_result_window()?;
+        self.validate_floating_ball()?;
         self.validate_hotkeys()?;
         self.validate_common()?;
         Ok(())
@@ -128,8 +132,17 @@ impl AppConfig {
     }
 
     fn validate_result_window(&self) -> Result<(), ConfigError> {
-        validate_opacity(self.result_window.opacity).map_err(ConfigError::Validation)?;
+        validate_opacity("result_window.opacity", self.result_window.opacity)
+            .map_err(ConfigError::Validation)?;
         validate_font_size_px(self.result_window.font_size_px).map_err(ConfigError::Validation)?;
+        Ok(())
+    }
+
+    fn validate_floating_ball(&self) -> Result<(), ConfigError> {
+        validate_opacity("floating_ball.opacity", self.floating_ball.opacity)
+            .map_err(ConfigError::Validation)?;
+        validate_floating_ball_size_px(self.floating_ball.size_px)
+            .map_err(ConfigError::Validation)?;
         Ok(())
     }
 
@@ -177,21 +190,27 @@ impl AppConfig {
     }
 }
 
-/// Validates a result-window opacity value against the `0.3..=1.0` range.
+/// Validates an opacity value against the `0.3..=1.0` range.
 ///
 /// The range is inclusive on both ends; `NaN` is rejected because it never
 /// satisfies a `<=` comparison.
+///
+/// # Arguments
+///
+/// * `field` - Field path used in the error message (e.g.
+///   `"result_window.opacity"` or `"floating_ball.opacity"`).
+/// * `opacity` - The value to validate.
 ///
 /// # Errors
 ///
 /// Returns `Err` with a field-specific message when `opacity` is out of
 /// range.
-fn validate_opacity(opacity: f64) -> Result<(), String> {
+fn validate_opacity(field: &str, opacity: f64) -> Result<(), String> {
     if OPACITY_RANGE.contains(&opacity) {
         Ok(())
     } else {
         Err(format!(
-            "result_window.opacity must be within {OPACITY_RANGE:?}, got {opacity}"
+            "{field} must be within {OPACITY_RANGE:?}, got {opacity}"
         ))
     }
 }
@@ -208,6 +227,22 @@ fn validate_font_size_px(font_size_px: u32) -> Result<(), String> {
     } else {
         Err(format!(
             "result_window.font_size_px must be within {FONT_SIZE_PX_RANGE:?}, got {font_size_px}"
+        ))
+    }
+}
+
+/// Validates a floating-ball diameter against the `32..=72` range (inclusive).
+///
+/// # Errors
+///
+/// Returns `Err` with a field-specific message when `size_px` is out of
+/// range.
+fn validate_floating_ball_size_px(size_px: u32) -> Result<(), String> {
+    if FLOATING_BALL_SIZE_PX_RANGE.contains(&size_px) {
+        Ok(())
+    } else {
+        Err(format!(
+            "floating_ball.size_px must be within {FLOATING_BALL_SIZE_PX_RANGE:?}, got {size_px}"
         ))
     }
 }
@@ -371,7 +406,7 @@ mod tests {
 
     #[test]
     fn invalid_version_is_rejected() {
-        let config = config_with(|c| c.version = 3);
+        let config = config_with(|c| c.version = 4);
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Validation(ref msg)) if msg.contains("version")
@@ -447,11 +482,11 @@ mod tests {
 
     #[test]
     fn validate_opacity_pure_function() {
-        assert!(validate_opacity(0.3).is_ok());
-        assert!(validate_opacity(1.0).is_ok());
-        assert!(validate_opacity(0.29).is_err());
-        assert!(validate_opacity(1.01).is_err());
-        assert!(validate_opacity(f64::NAN).is_err());
+        assert!(validate_opacity("result_window.opacity", 0.3).is_ok());
+        assert!(validate_opacity("floating_ball.opacity", 1.0).is_ok());
+        assert!(validate_opacity("result_window.opacity", 0.29).is_err());
+        assert!(validate_opacity("floating_ball.opacity", 1.01).is_err());
+        assert!(validate_opacity("result_window.opacity", f64::NAN).is_err());
     }
 
     #[test]
@@ -462,12 +497,96 @@ mod tests {
         assert!(validate_font_size_px(25).is_err());
     }
 
+    #[test]
+    fn floating_ball_opacity_out_of_range_low() {
+        let config = config_with(|c| c.floating_ball.opacity = 0.29);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Validation(ref msg) if msg.contains("floating_ball.opacity")
+        ));
+    }
+
+    #[test]
+    fn floating_ball_opacity_out_of_range_high() {
+        let config = config_with(|c| c.floating_ball.opacity = 1.01);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation(ref msg)) if msg.contains("floating_ball.opacity")
+        ));
+    }
+
+    #[test]
+    fn floating_ball_opacity_boundaries_are_valid() {
+        assert!(config_with(|c| c.floating_ball.opacity = 0.3)
+            .validate()
+            .is_ok());
+        assert!(config_with(|c| c.floating_ball.opacity = 1.0)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn floating_ball_opacity_nan_is_rejected() {
+        let config = config_with(|c| c.floating_ball.opacity = f64::NAN);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation(ref msg)) if msg.contains("floating_ball.opacity")
+        ));
+    }
+
+    #[test]
+    fn floating_ball_size_px_out_of_range_low() {
+        let config = config_with(|c| c.floating_ball.size_px = 31);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Validation(ref msg) if msg.contains("floating_ball.size_px")
+        ));
+    }
+
+    #[test]
+    fn floating_ball_size_px_out_of_range_high() {
+        let config = config_with(|c| c.floating_ball.size_px = 73);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation(ref msg)) if msg.contains("floating_ball.size_px")
+        ));
+    }
+
+    #[test]
+    fn floating_ball_size_px_boundaries_are_valid() {
+        assert!(config_with(|c| c.floating_ball.size_px = 32)
+            .validate()
+            .is_ok());
+        assert!(config_with(|c| c.floating_ball.size_px = 72)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_floating_ball_size_px_pure_function() {
+        assert!(validate_floating_ball_size_px(32).is_ok());
+        assert!(validate_floating_ball_size_px(72).is_ok());
+        assert!(validate_floating_ball_size_px(31).is_err());
+        assert!(validate_floating_ball_size_px(73).is_err());
+    }
+
     // Guard against the schema gaining fields that are never validated.
     #[test]
     fn result_window_schema_fields_covered() {
         let config = config_with(|c| c.result_window.opacity = 0.2);
         assert!(config.validate().is_err());
         let config = config_with(|c| c.result_window.font_size_px = 0);
+        assert!(config.validate().is_err());
+    }
+
+    // Guard against the schema gaining fields that are never validated.
+    #[test]
+    fn floating_ball_schema_fields_covered() {
+        let config = config_with(|c| c.floating_ball.opacity = 0.2);
+        assert!(config.validate().is_err());
+        let config = config_with(|c| c.floating_ball.size_px = 0);
         assert!(config.validate().is_err());
     }
 

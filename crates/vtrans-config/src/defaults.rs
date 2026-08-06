@@ -90,6 +90,16 @@ pub(crate) const fn default_floating_ball_enabled() -> bool {
     false
 }
 
+/// Default floating-ball opacity (fully opaque).
+pub(crate) const fn default_floating_ball_opacity() -> f64 {
+    1.0
+}
+
+/// Default floating-ball diameter in pixels.
+pub(crate) const fn default_floating_ball_size_px() -> u32 {
+    48
+}
+
 /// Default hotkey for manual region select and translate.
 pub(crate) fn default_select_and_translate() -> String {
     "Alt+Shift+A".to_string()
@@ -166,6 +176,8 @@ impl Default for FloatingBallConfig {
     fn default() -> Self {
         Self {
             enabled: default_floating_ball_enabled(),
+            opacity: default_floating_ball_opacity(),
+            size_px: default_floating_ball_size_px(),
         }
     }
 }
@@ -241,6 +253,8 @@ mod tests {
     fn floating_ball_defaults() {
         let config = FloatingBallConfig::default();
         assert!(!config.enabled);
+        assert!((config.opacity - 1.0).abs() < f64::EPSILON);
+        assert_eq!(config.size_px, 48);
     }
 
     #[test]
