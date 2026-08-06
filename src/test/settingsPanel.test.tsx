@@ -43,6 +43,27 @@ describe("validateSettings", () => {
     config.hotkeys.stop_live = "";
     expect(validateSettings(config)).toContain("快捷键");
   });
+
+  it("rejects an opacity outside 0.3..1.0", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.result_window.opacity = 0.2;
+    expect(validateSettings(config)).toContain("透明度");
+
+    config.result_window.opacity = 1.1;
+    expect(validateSettings(config)).toContain("透明度");
+  });
+
+  it("rejects a font size outside 12..24 or non-integer", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.result_window.font_size_px = 11;
+    expect(validateSettings(config)).toContain("字体大小");
+
+    config.result_window.font_size_px = 25;
+    expect(validateSettings(config)).toContain("字体大小");
+
+    config.result_window.font_size_px = 14.5;
+    expect(validateSettings(config)).toContain("字体大小");
+  });
 });
 
 describe("SettingsPanel", () => {
@@ -58,5 +79,8 @@ describe("SettingsPanel", () => {
     expect(html).toContain("API Key");
     expect(html).toContain("保存 Key");
     expect(html).toContain("保存设置");
+    expect(html).toContain("显示悬浮球");
+    expect(html).toContain("弹窗背景透明度");
+    expect(html).toContain("弹窗字体大小");
   });
 });
