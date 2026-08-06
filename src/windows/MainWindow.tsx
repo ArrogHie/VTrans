@@ -31,6 +31,7 @@ import {
 } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
 import { regionPreviewBox } from "../utils/regionPreview";
+import { shouldRestoreOverlay } from "../utils/overlayVisibility";
 import { isLocalPairSupported } from "../types";
 import type { LanguageCode, Mode } from "../types";
 
@@ -73,9 +74,8 @@ export function MainWindow() {
         setDebugMode(snapshot.debug_mode);
         if (snapshot.selected_region) {
           setSelectedRegion(snapshot.selected_region);
-          // 仅在后端确认处于实时会话模式时恢复常驻选区方框；
-          // 单次模式的选择区域不显示常驻方框。
-          if (snapshot.mode === "live") {
+          // 仅实时会话模式恢复常驻选区方框；单次模式不恢复。
+          if (shouldRestoreOverlay(snapshot)) {
             void showRegionOverlay(snapshot.selected_region);
           }
         }
@@ -120,6 +120,9 @@ export function MainWindow() {
         setOcrResult(result);
         void publishFrontendOcrResult(result);
         setStatus("completed");
+        // 单次翻译完成后常驻选区方框必须隐藏。后端在单次捕获结束也会
+        // 隐藏，这里显式执行一次，保证任何路径下都不残留。
+        void hideRegionOverlay();
         void showResultWindow();
       } else {
         if (!liveConfig) {

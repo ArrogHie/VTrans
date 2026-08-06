@@ -2,7 +2,12 @@ import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useState } from "react";
 import { Check, RotateCcw, X } from "lucide-react";
 import { hideRegionOverlay } from "../services/regionOverlay";
-import { cancelRegionSelection, toPhysicalRegion, updateLiveRegion } from "../services/tauri";
+import {
+  cancelRegionSelection,
+  getAppStatus,
+  toPhysicalRegion,
+  updateLiveRegion,
+} from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
 
 type Phase = "selecting" | "confirmed";
@@ -17,6 +22,22 @@ export function RegionSelector() {
   // 决定常驻方框的显隐，单次模式确认不会显示方框。
   const mode = useAppStore((state) => state.mode);
   const [message, setMessage] = useState("拖动鼠标框选要翻译的区域，松开后确认");
+
+  // 选区窗口是独立 WebView：store 的 mode 依赖跨窗口事件同步，打开时
+  // 可能滞后。打开时主动拉取一次后端状态，让确认按真实会话模式提交
+  // （实时重选区显示方框、单次确认不显示）。拉取失败时保持现状，
+  // 默认 single 是安全降级（不显示方框）。
+  useEffect(() => {
+    let active = true;
+    void getAppStatus()
+      .then((snapshot) => {
+        if (active) useAppStore.getState().applyStatus(snapshot);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const resetSelection = useCallback(() => {
     void hideRegionOverlay();
