@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use vtrans_core::Language;
 
 use crate::schema::{
-    AppConfig, CaptureConfig, HotkeyConfig, OcrConfig, ResultWindowConfig, TranslationConfig,
-    CURRENT_CONFIG_VERSION,
+    AppConfig, CaptureConfig, FloatingBallConfig, HotkeyConfig, OcrConfig, ResultWindowConfig,
+    TranslationConfig, CURRENT_CONFIG_VERSION,
 };
 
 /// Default capture interval in milliseconds.
@@ -73,6 +73,21 @@ pub(crate) const fn default_max_retries() -> u32 {
 /// Default "keep result window on top" flag.
 pub(crate) const fn default_always_on_top() -> bool {
     true
+}
+
+/// Default result-window opacity.
+pub(crate) const fn default_opacity() -> f64 {
+    0.95
+}
+
+/// Default result-window font size in pixels.
+pub(crate) const fn default_font_size_px() -> u32 {
+    14
+}
+
+/// Default floating-ball visibility (hidden).
+pub(crate) const fn default_floating_ball_enabled() -> bool {
+    false
 }
 
 /// Default hotkey for manual region select and translate.
@@ -141,6 +156,16 @@ impl Default for ResultWindowConfig {
     fn default() -> Self {
         Self {
             always_on_top: default_always_on_top(),
+            opacity: default_opacity(),
+            font_size_px: default_font_size_px(),
+        }
+    }
+}
+
+impl Default for FloatingBallConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_floating_ball_enabled(),
         }
     }
 }
@@ -162,6 +187,7 @@ impl Default for AppConfig {
             ocr: OcrConfig::default(),
             translation: TranslationConfig::default(),
             result_window: ResultWindowConfig::default(),
+            floating_ball: FloatingBallConfig::default(),
             hotkeys: HotkeyConfig::default(),
             log_level: default_log_level(),
             model_dir: default_model_dir(),
@@ -207,6 +233,14 @@ mod tests {
     fn result_window_defaults() {
         let config = ResultWindowConfig::default();
         assert!(config.always_on_top);
+        assert!((config.opacity - 0.95).abs() < f64::EPSILON);
+        assert_eq!(config.font_size_px, 14);
+    }
+
+    #[test]
+    fn floating_ball_defaults() {
+        let config = FloatingBallConfig::default();
+        assert!(!config.enabled);
     }
 
     #[test]
@@ -224,6 +258,7 @@ mod tests {
         assert_eq!(config.ocr, OcrConfig::default());
         assert_eq!(config.translation, TranslationConfig::default());
         assert_eq!(config.result_window, ResultWindowConfig::default());
+        assert_eq!(config.floating_ball, FloatingBallConfig::default());
         assert_eq!(config.hotkeys, HotkeyConfig::default());
         assert_eq!(config.log_level, "info");
         assert_eq!(config.model_dir, None);

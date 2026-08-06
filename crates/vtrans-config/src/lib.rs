@@ -18,8 +18,8 @@ pub mod validation;
 
 pub use manager::{default_config_path, ConfigManager, CONFIG_FILE_NAME};
 pub use schema::{
-    AppConfig, CaptureConfig, HotkeyConfig, OcrConfig, ResultWindowConfig, TranslationConfig,
-    CURRENT_CONFIG_VERSION,
+    AppConfig, CaptureConfig, FloatingBallConfig, HotkeyConfig, OcrConfig, ResultWindowConfig,
+    TranslationConfig, CURRENT_CONFIG_VERSION,
 };
 
 use std::path::PathBuf;

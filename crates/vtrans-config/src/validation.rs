@@ -23,6 +23,12 @@ const TIMEOUT_SECONDS_RANGE: std::ops::RangeInclusive<u32> = 1..=3600;
 /// Valid range for `translation.max_retries`.
 const MAX_RETRIES_RANGE: std::ops::RangeInclusive<u32> = 0..=10;
 
+/// Valid range for `result_window.opacity`.
+const OPACITY_RANGE: std::ops::RangeInclusive<f64> = 0.3..=1.0;
+
+/// Valid range for `result_window.font_size_px`.
+const FONT_SIZE_PX_RANGE: std::ops::RangeInclusive<u32> = 12..=24;
+
 impl AppConfig {
     /// Validates every configuration field against its documented rules.
     ///
@@ -44,6 +50,7 @@ impl AppConfig {
         self.validate_capture()?;
         self.validate_ocr()?;
         self.validate_translation()?;
+        self.validate_result_window()?;
         self.validate_hotkeys()?;
         self.validate_common()?;
         Ok(())
@@ -120,6 +127,12 @@ impl AppConfig {
         Ok(())
     }
 
+    fn validate_result_window(&self) -> Result<(), ConfigError> {
+        validate_opacity(self.result_window.opacity).map_err(ConfigError::Validation)?;
+        validate_font_size_px(self.result_window.font_size_px).map_err(ConfigError::Validation)?;
+        Ok(())
+    }
+
     fn validate_hotkeys(&self) -> Result<(), ConfigError> {
         let hotkeys = [
             ("select_and_translate", &self.hotkeys.select_and_translate),
@@ -161,6 +174,41 @@ impl AppConfig {
             )));
         }
         Ok(())
+    }
+}
+
+/// Validates a result-window opacity value against the `0.3..=1.0` range.
+///
+/// The range is inclusive on both ends; `NaN` is rejected because it never
+/// satisfies a `<=` comparison.
+///
+/// # Errors
+///
+/// Returns `Err` with a field-specific message when `opacity` is out of
+/// range.
+fn validate_opacity(opacity: f64) -> Result<(), String> {
+    if OPACITY_RANGE.contains(&opacity) {
+        Ok(())
+    } else {
+        Err(format!(
+            "result_window.opacity must be within {OPACITY_RANGE:?}, got {opacity}"
+        ))
+    }
+}
+
+/// Validates a result-window font size against the `12..=24` range (inclusive).
+///
+/// # Errors
+///
+/// Returns `Err` with a field-specific message when `font_size_px` is out
+/// of range.
+fn validate_font_size_px(font_size_px: u32) -> Result<(), String> {
+    if FONT_SIZE_PX_RANGE.contains(&font_size_px) {
+        Ok(())
+    } else {
+        Err(format!(
+            "result_window.font_size_px must be within {FONT_SIZE_PX_RANGE:?}, got {font_size_px}"
+        ))
     }
 }
 
@@ -323,11 +371,104 @@ mod tests {
 
     #[test]
     fn invalid_version_is_rejected() {
-        let config = config_with(|c| c.version = 2);
+        let config = config_with(|c| c.version = 3);
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Validation(ref msg)) if msg.contains("version")
         ));
+    }
+
+    #[test]
+    fn opacity_out_of_range_low() {
+        let config = config_with(|c| c.result_window.opacity = 0.29);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Validation(ref msg) if msg.contains("result_window.opacity")
+        ));
+    }
+
+    #[test]
+    fn opacity_out_of_range_high() {
+        let config = config_with(|c| c.result_window.opacity = 1.01);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation(ref msg)) if msg.contains("result_window.opacity")
+        ));
+    }
+
+    #[test]
+    fn opacity_boundaries_are_valid() {
+        assert!(config_with(|c| c.result_window.opacity = 0.3)
+            .validate()
+            .is_ok());
+        assert!(config_with(|c| c.result_window.opacity = 1.0)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn opacity_nan_is_rejected() {
+        let config = config_with(|c| c.result_window.opacity = f64::NAN);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation(ref msg)) if msg.contains("result_window.opacity")
+        ));
+    }
+
+    #[test]
+    fn font_size_px_out_of_range_low() {
+        let config = config_with(|c| c.result_window.font_size_px = 11);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Validation(ref msg) if msg.contains("result_window.font_size_px")
+        ));
+    }
+
+    #[test]
+    fn font_size_px_out_of_range_high() {
+        let config = config_with(|c| c.result_window.font_size_px = 25);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation(ref msg)) if msg.contains("result_window.font_size_px")
+        ));
+    }
+
+    #[test]
+    fn font_size_px_boundaries_are_valid() {
+        assert!(config_with(|c| c.result_window.font_size_px = 12)
+            .validate()
+            .is_ok());
+        assert!(config_with(|c| c.result_window.font_size_px = 24)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_opacity_pure_function() {
+        assert!(validate_opacity(0.3).is_ok());
+        assert!(validate_opacity(1.0).is_ok());
+        assert!(validate_opacity(0.29).is_err());
+        assert!(validate_opacity(1.01).is_err());
+        assert!(validate_opacity(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn validate_font_size_px_pure_function() {
+        assert!(validate_font_size_px(12).is_ok());
+        assert!(validate_font_size_px(24).is_ok());
+        assert!(validate_font_size_px(11).is_err());
+        assert!(validate_font_size_px(25).is_err());
+    }
+
+    // Guard against the schema gaining fields that are never validated.
+    #[test]
+    fn result_window_schema_fields_covered() {
+        let config = config_with(|c| c.result_window.opacity = 0.2);
+        assert!(config.validate().is_err());
+        let config = config_with(|c| c.result_window.font_size_px = 0);
+        assert!(config.validate().is_err());
     }
 
     #[test]

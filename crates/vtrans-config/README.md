@@ -61,15 +61,16 @@ fn main() -> Result<(), vtrans_config::ConfigError> {
 
 | 类型 / 函数 | 用途 |
 |------|------|
-| `AppConfig` | 配置根结构（capture / ocr / translation / result_window / hotkeys / log_level / model_dir / version） |
+| `AppConfig` | 配置根结构（capture / ocr / translation / result_window / floating_ball / hotkeys / log_level / model_dir / version） |
 | `CaptureConfig` | 采集：`interval_ms`、`difference_threshold` |
 | `OcrConfig` | OCR：`language`、`min_confidence` |
 | `TranslationConfig` | 翻译：provider、语言对、超时、API endpoint/model、重试次数 |
-| `ResultWindowConfig` | 结果窗口：`always_on_top` |
+| `ResultWindowConfig` | 结果窗口：`always_on_top`、`opacity`（0.3–1.0，默认 0.95）、`font_size_px`（12–24，默认 14） |
+| `FloatingBallConfig` | 悬浮球：`enabled`（默认 `false`，不显示） |
 | `HotkeyConfig` | 三个全局热键字符串 |
 | `ConfigManager` | 配置持久化入口 |
 | `ConfigError` | 错误枚举（NotFound / Parse / Validation / Io / UnsupportedVersion） |
-| `CURRENT_CONFIG_VERSION` | 当前 schema 版本（`1`） |
+| `CURRENT_CONFIG_VERSION` | 当前 schema 版本（`2`） |
 | `CONFIG_FILE_NAME` | 配置文件名（`config.json`） |
 | `default_config_path()` | 平台默认配置路径（`config_dir/vtrans/config.json`） |
 
@@ -99,7 +100,7 @@ impl AppConfig {
 }
 ```
 
-serde 表示（跨 JSON / IPC 边界）：`Language` 序列化为字符串 `auto` / `zh-CN` / `ja` / `en`；`model_dir` 为字符串或 `null`；`version` 为整数；反序列化时未知字段被忽略（前向兼容）。完整字段规格见 `docs/modules/02-config.md`。
+serde 表示（跨 JSON / IPC 边界）：`Language` 序列化为字符串 `auto` / `zh-CN` / `ja` / `en`；`model_dir` 为字符串或 `null`；`version` 为整数；`floating_ball` 为 `{"enabled": bool}` 对象；反序列化时未知字段被忽略（前向兼容）。完整字段规格见 `docs/modules/02-config.md`。
 
 ## 5. 行为契约
 
@@ -113,6 +114,7 @@ serde 表示（跨 JSON / IPC 边界）：`Language` 序列化为字符串 `auto
 - **取消语义**：无异步 API、无 `CancellationToken`；所有读写为同步文件 IO，单次调用时长有限，不阻塞事件循环之外的资源。
 - **资源生命周期**：`ConfigManager` 无需显式关闭；drop 无副作用；每次写入先 `sync_all` 再原子重命名，进程崩溃不会留下半写文件。
 - **边界条件**：空文件 / 非法 JSON → `Parse`；缺失字段 → 默认值填充；`NaN` 阈值 → `Validation`；无 `version` 字段 → 按 v0 自动迁移。
+- **版本迁移**：v0（无 `version`）→ v1 仅补版本号；v1 → v2 补齐 `result_window.opacity`、`result_window.font_size_px` 与 `floating_ball` 字段——缺失字段由 `serde(default)` 兜底（`0.95` / `14` / `false`），已存在的字段原样保留；迁移结果写回磁盘。
 
 ## 6. 集成注意事项
 
@@ -133,6 +135,7 @@ serde 表示（跨 JSON / IPC 边界）：`Language` 序列化为字符串 `auto
 | `update` 要求文件已存在 | 暴露「未加载就更新」的调用顺序错误，避免静默写入被篡改的默认值 | 缺失时从默认值开始（掩盖编程错误） |
 | 缺失字段用 serde default 填充 | 旧文件 / 手写精简文件自动补全，前向兼容 | 严格 schema（旧文件全部解析失败） |
 | 无 `version` 字段按 v0 迁移 | 兼容早期无版本号文件，升级透明 | 要求用户手动补版本号 |
+| v1→v2 新字段由 serde default 补齐而非迁移函数显式赋值 | 迁移函数只负责版本戳；缺字段自动补默认值、已有值不覆盖 | 迁移函数逐字段写默认值（会覆盖 v1 文件中已存在的新字段） |
 | 版本解析单一来源（`VersionProbe` + `migrate_value`） | 避免多处解析版本导致行为漂移 | 独立 `raw_version` 函数（review 后移除） |
 | 配置中不保存 API Key | 凭据归 `vtrans-security`，缩小泄露面 | 密钥写入配置 JSON（泄露风险高） |
 
@@ -145,7 +148,7 @@ serde 表示（跨 JSON / IPC 边界）：`Language` 序列化为字符串 `auto
 
 设计使然：
 
-- 校验取值范围（`difference_threshold` 0.0–1.0、`timeout_seconds` 1–3600、`max_retries` 0–10）是工程默认，可评审调整。缓解：修改 `validation.rs` 中常量并同步规格文档。
+- 校验取值范围（`difference_threshold` 0.0–1.0、`timeout_seconds` 1–3600、`max_retries` 0–10、`opacity` 0.3–1.0、`font_size_px` 12–24）是工程默认，可评审调整。缓解：修改 `validation.rs` 中常量并同步规格文档。
 - 并发 `save` 无序（last-writer-wins）。缓解：高频写场景用 `update` 或调用方自行串行化。
 
 ## 9. 构建与测试
