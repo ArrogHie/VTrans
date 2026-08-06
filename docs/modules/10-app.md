@@ -30,11 +30,20 @@ t::generate_handler![
     set_translation_provider,
     load_local_models,
     save_settings,
+    update_result_window_appearance, // (opacity, fontSizePx)
+    update_floating_ball_appearance, // (opacity, sizePx)
     set_api_key,
     get_app_config,
     get_app_status,
 ]
 ```
+
+`update_result_window_appearance(opacity, font_size_px)` 与
+`update_floating_ball_appearance(opacity, size_px)` 只持久化对应窗口的两个
+外观字段（加载配置 → 修改 → `save_config` 校验 + 原子写），**不获取 live
+生命周期锁、不检查 live 任务、不重建 Provider**——外观调整在实时会话运行中
+仍可保存（bug 2 后端侧）。越界值由配置校验返回 `ConfigError::Validation`
+并映射为 `AppError::Config`。参数名遵循 Tauri 2 默认 camelCase。
 
 ### AppState
 
@@ -109,7 +118,7 @@ VTrans 共声明 5 个窗口（`src-tauri/tauri.conf.json`，由模块 10 维护
 | label | 角色 | 关键配置 |
 |-------|------|---------|
 | main | 主窗口 | 420×600，可缩放，应用入口 |
-| result | 结果窗口 | 360×140（迷你条形态）、默认隐藏、置顶、`transparent: true`、可缩放 |
+| result | 结果窗口 | 360×140（迷你条形态）、默认隐藏、置顶、`transparent: true`、无边框（`decorations: false`）、可缩放 |
 | selector | 选区窗口 | 全屏、透明、无边框，默认隐藏 |
 | overlay | 选区方框 | 全屏、透明、无边框、置顶、可点穿，默认隐藏 |
 | floater | 悬浮球 | 48×48、透明、无边框、置顶、跳过任务栏、`focus: false`、默认隐藏 |
@@ -141,8 +150,9 @@ opacity 能力——Rust `WebviewWindow` 无 `set_opacity`、JS 无
 需要 ACL；result 窗口已声明 `transparent: true`（追加提交），前端可直接
 用 CSS 背景 alpha 实现半透明透出桌面。Windows 透明窗口验证结论：文字
 渲染/缩放重绘与 overlay/selector 同机制（overlay 已在透明窗口渲染尺寸
-标签）；原生标题栏不透出桌面、原生阴影在分层窗口上可能不渲染，登记
-README 手工验证项 14。
+标签）；result 已声明 `decorations: false`（无原生标题栏，标题栏/关闭按钮
+由前端 CSS + `startDragging` 提供，capability 已含 `allow-start-dragging`）；
+原生阴影在分层窗口上可能不渲染，登记 README 手工验证项 14。
 
 **待架构确认（不阻塞 MVP）**：常驻方框目前为纯 CSS 边框，不显示区域真实
 缩略图；若产品要求屏幕缩略预览，需由 vtrans-app 提供小尺寸位图事件/命令
@@ -321,6 +331,24 @@ crates/vtrans-app/
 - [x] 验证结论已记录：配置经 `cargo check -p vtrans` 构建期校验；文字
       渲染/缩放/阴影表现登记 README 手工验证项 14（overlay/selector 已用
       同一机制渲染文字标签）
+- [x] 回归：fmt / clippy / app 单测 / workspace check 全绿；未修改其他
+      crate 与 vtrans-core
+
+### 无边框弹窗与外观命令验收（fix/10-window-appearance-commands）
+
+- [x] result 窗口新增 `decorations: false`（无原生标题栏；`resizable` /
+      `visible` / `alwaysOnTop` / `transparent` 保留）
+- [x] `update_result_window_appearance(opacity, font_size_px)`：加载配置 →
+      修改 `result_window` 两字段 → `save_config`（内部校验 + 原子写）；
+      不获取 live 生命周期、不检查 live 任务、不重建 Provider
+- [x] `update_floating_ball_appearance(opacity, size_px)`：同上，修改
+      `floating_ball` 两字段
+- [x] 越界值由 `save_config` 校验返回 `ConfigError::Validation`，映射为
+      `AppError::Config`
+- [x] 两个命令已注册进 `invoke_handler`；contracts.rs 补充 camelCase
+      参数契约（`{ opacity, fontSizePx }` / `{ opacity, sizePx }`）
+- [x] 测试：字段更新范围、越界拒绝且不落盘、边界值接受、live 运行中仍可
+      保存（持久化路径独立于 pipeline/provider 状态）
 - [x] 回归：fmt / clippy / app 单测 / workspace check 全绿；未修改其他
       crate 与 vtrans-core
 

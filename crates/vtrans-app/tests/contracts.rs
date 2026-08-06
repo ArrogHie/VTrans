@@ -20,10 +20,50 @@ use vtrans_pipeline::PipelineError;
 //   set_ocr_language          -> { language }
 //   start_live_translation    -> { config }
 //   update_live_region        -> { region, mode }
+//   update_result_window_appearance  -> { opacity, fontSizePx }
+//   update_floating_ball_appearance  -> { opacity, sizePx }
 //
 // Do not add `rename_all = "snake_case"` to a command without updating
 // `src/services/tauri.ts` and `src/test/ipc.test.ts` on the frontend branch
 // in the same change.
+
+/// Mirrors the wire shape of `update_result_window_appearance` arguments.
+///
+/// Tauri 2 maps the Rust `font_size_px` parameter to camelCase by default,
+/// so the frontend must send `{ opacity, fontSizePx }`.
+#[derive(serde::Deserialize)]
+struct ResultWindowAppearanceArgs {
+    opacity: f64,
+    #[serde(rename = "fontSizePx")]
+    font_size_px: u32,
+}
+
+/// Mirrors the wire shape of `update_floating_ball_appearance` arguments.
+///
+/// Tauri 2 maps the Rust `size_px` parameter to camelCase by default, so
+/// the frontend must send `{ opacity, sizePx }`.
+#[derive(serde::Deserialize)]
+struct FloatingBallAppearanceArgs {
+    opacity: f64,
+    #[serde(rename = "sizePx")]
+    size_px: u32,
+}
+
+#[test]
+fn update_result_window_appearance_args_use_camel_case() {
+    let args: ResultWindowAppearanceArgs =
+        serde_json::from_str(r#"{"opacity":0.8,"fontSizePx":18}"#).unwrap();
+    assert!((args.opacity - 0.8).abs() < f64::EPSILON);
+    assert_eq!(args.font_size_px, 18);
+}
+
+#[test]
+fn update_floating_ball_appearance_args_use_camel_case() {
+    let args: FloatingBallAppearanceArgs =
+        serde_json::from_str(r#"{"opacity":0.9,"sizePx":56}"#).unwrap();
+    assert!((args.opacity - 0.9).abs() < f64::EPSILON);
+    assert_eq!(args.size_px, 56);
+}
 
 #[test]
 fn public_ipc_contracts_round_trip_through_json() {
