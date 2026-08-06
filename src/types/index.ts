@@ -184,7 +184,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   log_level: "info",
   model_dir: null,
-  version: 1,
+  version: 2,
 };
 
 /** Allowed range for the mini-bar background opacity. */

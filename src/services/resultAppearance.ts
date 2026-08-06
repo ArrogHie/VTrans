@@ -49,6 +49,22 @@ export function applyResultAppearance(
 }
 
 /**
+ * Applies the persisted result-window appearance from a hydrated config.
+ *
+ * Returns the clamped values so the caller can also feed them into local
+ * React state; this keeps hydration testable without a DOM.
+ */
+export function applyHydratedAppearance(
+  config: Pick<AppConfig, "result_window">,
+  root?: { style: { setProperty(name: string, value: string): void } } | null,
+): { opacity: number; fontSizePx: number } {
+  const opacity = clampResultOpacity(config.result_window.opacity);
+  const fontSizePx = clampResultFontSize(config.result_window.font_size_px);
+  if (root) applyResultAppearance(root, opacity, fontSizePx);
+  return { opacity, fontSizePx };
+}
+
+/**
  * Persists the mini-bar appearance by saving the whole configuration.
  *
  * The appearance controls apply changes immediately through

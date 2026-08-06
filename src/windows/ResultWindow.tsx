@@ -13,6 +13,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { ErrorBanner } from "../components/ErrorBanner";
 import {
+  applyHydratedAppearance,
   applyResultAppearance,
   clampResultFontSize,
   clampResultOpacity,
@@ -20,6 +21,7 @@ import {
 } from "../services/resultAppearance";
 import { getIpcErrorMessage, captureOnce, publishFrontendOcrResult } from "../services/tauri";
 import { toggleLivePause } from "../services/translateActions";
+import { getAppConfig } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
 import {
   RESULT_FONT_SIZE_MAX,
@@ -63,11 +65,37 @@ export function ResultWindow() {
     clampResultFontSize(config.result_window.font_size_px),
   );
 
-  // 挂载时把持久化的外观应用到根节点 CSS 变量。
+  // 挂载首帧把当前外观写入 CSS 变量，避免闪烁。
   useEffect(() => {
     if (rootRef.current) applyResultAppearance(rootRef.current, opacity, fontSizePx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 启动水合：每个 WebView 的 store 相互隔离，主窗口的水合不会同步到
+  // 结果窗口。挂载时自行拉取持久化配置，把 opacity/font_size_px 应用到
+  // 本地 state 与根节点 CSS 变量，保证重启后外观保持用户保存值。
+  useEffect(() => {
+    let active = true;
+    void getAppConfig()
+      .then((hydrated) => {
+        if (!active) return;
+        useAppStore.getState().setConfig(hydrated);
+        const next = applyHydratedAppearance(hydrated, rootRef.current);
+        setOpacityValue(next.opacity);
+        setFontSizePx(next.fontSizePx);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // 本地外观变化（滑块或水合）时即时应用到 CSS 变量；
+  // 窗口存活期间 store 配置变化（如主窗口设置面板保存）时，
+  // 通过 setConfig 驱动本 effect 重新应用，保证两个 WebView 一致。
+  useEffect(() => {
+    if (rootRef.current) applyResultAppearance(rootRef.current, opacity, fontSizePx);
+  }, [opacity, fontSizePx]);
 
   useEffect(() => {
     void getCurrentWindow()
