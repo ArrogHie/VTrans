@@ -50,6 +50,8 @@
 - 迷你条形态：译文为主体，原文默认收起、点击展开
 - 工具栏一行图标：置顶、暂停/继续（实时）、重新翻译（单次）、外观、关闭
 - 外观控制：背景透明度（0.3–1.0）与字号（12–24px），CSS 变量即时生效并 `save_settings` 持久化
+- 启动水合：挂载时自行 `get_app_config` 应用持久化外观（各 WebView store 隔离，
+  不依赖主窗口）；窗口存活期间 store 配置变化时同步重新应用
 - 可置顶、可拖动、可缩放；`transparent: true` 由 vtrans-app 声明，半透明用 CSS 背景 alpha 实现
 
 ### 悬浮球 (FloatingBall.tsx)
@@ -82,6 +84,7 @@ export function toggleLiveFromFloater(): Promise<TranslateActionResult>;
 // resultAppearance.ts：迷你条外观（CSS 变量，无窗口 opacity API）
 export function applyResultAppearance(root, opacity, fontSizePx): void;
 export function persistResultAppearance(config, opacity, fontSizePx): Promise<AppConfig>;
+export function applyHydratedAppearance(config, root?): { opacity; fontSizePx };
 
 export function onOcrCompleted(cb: (result: OcrResult) => void): Unlisten;
 export function onTranslationCompleted(cb: (result: TranslationResult) => void): Unlisten;
