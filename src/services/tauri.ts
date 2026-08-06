@@ -114,6 +114,32 @@ export function saveSettings(settings: AppConfig): Promise<void> {
   return call<void>("save_settings", { settings });
 }
 
+/**
+ * Persists only the mini-bar appearance (background alpha and font size).
+ *
+ * Unlike `save_settings` this command never acquires the live lifecycle
+ * lock, so appearance changes apply while a live session is running. Tauri 2
+ * maps the backend parameters `opacity` / `font_size_px` to the camelCase
+ * keys `opacity` / `fontSizePx`.
+ */
+export function updateResultWindowAppearance(
+  opacity: number,
+  fontSizePx: number,
+): Promise<void> {
+  return call<void>("update_result_window_appearance", { opacity, fontSizePx });
+}
+
+/**
+ * Persists only the floating-ball appearance (background alpha and size).
+ *
+ * Like `updateResultWindowAppearance` this never touches the live lifecycle
+ * lock. Tauri 2 maps the backend parameters `opacity` / `size_px` to the
+ * camelCase keys `opacity` / `sizePx`.
+ */
+export function updateFloatingBallAppearance(opacity: number, sizePx: number): Promise<void> {
+  return call<void>("update_floating_ball_appearance", { opacity, sizePx });
+}
+
 /** Stores the translation API key in the OS credential vault. */
 export function setApiKey(apiKey: string): Promise<void> {
   // Tauri 2 maps the backend parameter `api_key` to the camelCase `apiKey`.

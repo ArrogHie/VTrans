@@ -40,11 +40,17 @@ const APPEARANCE_PERSIST_MS = 350;
  * hidden by default. A single toolbar row provides pin, pause/resume
  * (live), retranslate (single), appearance and close actions. Appearance
  * (font size and background alpha) is applied instantly through CSS custom
- * properties on the root node and persisted through `save_settings`; the
- * text itself never fades — only the background alpha changes, letting the
- * desktop show through the transparent window.
+ * properties on the root node and persisted through the dedicated
+ * `update_result_window_appearance` command; the text itself never fades —
+ * only the background alpha changes, letting the desktop show through the
+ * transparent window.
+ *
+ * `initialSourceOpen` is a test seam only; production always starts with the
+ * source text collapsed.
  */
-export function ResultWindow() {
+export function ResultWindow({
+  initialSourceOpen = false,
+}: { initialSourceOpen?: boolean } = {}) {
   const ocrResult = useAppStore((state) => state.ocrResult);
   const translationResult = useAppStore((state) => state.translationResult);
   const mode = useAppStore((state) => state.mode);
@@ -58,7 +64,7 @@ export function ResultWindow() {
   const rootRef = useRef<HTMLElement | null>(null);
   const persistTimer = useRef<number | undefined>(undefined);
   const [alwaysOnTop, setAlwaysOnTop] = useState(config.result_window.always_on_top);
-  const [sourceOpen, setSourceOpen] = useState(false);
+  const [sourceOpen, setSourceOpen] = useState(initialSourceOpen);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [opacity, setOpacityValue] = useState(() => clampResultOpacity(config.result_window.opacity));
   const [fontSizePx, setFontSizePx] = useState(() =>
@@ -108,12 +114,20 @@ export function ResultWindow() {
   const schedulePersist = (nextOpacity: number, nextFontSizePx: number) => {
     window.clearTimeout(persistTimer.current);
     persistTimer.current = window.setTimeout(() => {
-      void persistResultAppearance(
-        useAppStore.getState().config,
-        nextOpacity,
-        nextFontSizePx,
-      )
-        .then((next) => useAppStore.getState().setConfig(next))
+      void persistResultAppearance(nextOpacity, nextFontSizePx)
+        .then(() => {
+          // 后端命令已持久化，这里只把同一份值写回本地 store，
+          // 让其他依赖 config 的 UI（如主窗口）保持同步。
+          const current = useAppStore.getState().config;
+          useAppStore.getState().setConfig({
+            ...current,
+            result_window: {
+              ...current.result_window,
+              opacity: nextOpacity,
+              font_size_px: nextFontSizePx,
+            },
+          });
+        })
         .catch((persistError) => setError(getIpcErrorMessage(persistError)));
     }, APPEARANCE_PERSIST_MS);
   };
@@ -156,10 +170,14 @@ export function ResultWindow() {
     <main
       ref={rootRef}
       data-testid="result-mini-bar"
-      className="result-mini-bar flex min-h-screen flex-col gap-1.5 rounded-xl border border-slate-200 p-2 text-slate-900"
+      className="result-mini-bar flex min-h-screen flex-col gap-1.5 rounded-xl border border-slate-200 p-2 text-slate-900 shadow-lg"
     >
-      <header className="flex items-center justify-between gap-2" data-tauri-drag-region>
-        <div className="flex min-w-0 items-center gap-2" data-tauri-drag-region>
+      {/* 无原生标题栏：整个顶栏都是拖动区域（deep），按钮等可交互元素仍可点击。 */}
+      <header
+        className="flex w-full select-none items-center justify-between gap-2"
+        data-tauri-drag-region="deep"
+      >
+        <div className="flex min-w-0 items-center gap-2">
           <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-indigo-500">
             VTRANS
           </span>
@@ -207,7 +225,7 @@ export function ResultWindow() {
           >
             <Settings2 size={14} />
           </button>
-          <button type="button" onClick={close} className="icon-button" title="关闭">
+          <button type="button" onClick={close} className="result-close-button" title="关闭">
             <X size={14} />
           </button>
         </div>
@@ -260,13 +278,13 @@ export function ResultWindow() {
         原文
       </button>
       {sourceOpen && (
-        <p className="result-text max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-100/70 p-1.5 text-xs leading-5 text-slate-500" data-testid="result-source-text">
+        <p className="result-text max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-100/70 p-1.5 leading-5 text-slate-500" data-testid="result-source-text">
           {ocrResult?.merged_text || "暂无内容"}
         </p>
       )}
 
       <p
-        className="result-text flex-1 whitespace-pre-wrap break-words text-sm leading-6 text-slate-800"
+        className="result-text flex-1 whitespace-pre-wrap break-words leading-6 text-slate-800"
         data-testid="result-translation-text"
         data-tauri-drag-region
       >

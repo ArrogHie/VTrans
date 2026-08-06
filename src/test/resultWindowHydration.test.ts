@@ -36,19 +36,15 @@ describe("applyHydratedAppearance", () => {
 });
 
 describe("persistResultAppearance with hydrated config", () => {
-  it("saves the hydrated config version 2 when persisting appearance", async () => {
+  it("persists appearance through the dedicated command without whole-config saves", async () => {
     invoke.mockResolvedValueOnce(undefined);
-    const config = structuredClone(DEFAULT_CONFIG);
-    const next = await persistResultAppearance(config, 0.8, 18);
-    expect(next.version).toBe(2);
+    await persistResultAppearance(0.8, 18);
+    // 水合后的外观保存不再整包回传配置（也避免了后端对旧 schema 版本的
+    // 校验拒绝）；前端 schema 版本与后端一致由 types 测试断言。
     expect(invoke).toHaveBeenCalledWith(
-      "save_settings",
-      expect.objectContaining({
-        settings: expect.objectContaining({
-          version: 2,
-          result_window: expect.objectContaining({ opacity: 0.8, font_size_px: 18 }),
-        }),
-      }),
+      "update_result_window_appearance",
+      { opacity: 0.8, fontSizePx: 18 },
     );
+    expect(invoke).not.toHaveBeenCalledWith("save_settings", expect.anything());
   });
 });

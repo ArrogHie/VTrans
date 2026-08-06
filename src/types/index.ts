@@ -108,6 +108,10 @@ export interface ResultWindowConfig {
 export interface FloatingBallConfig {
   /** Whether the floating ball is visible after startup. */
   enabled: boolean;
+  /** Background opacity of the floating ball (0.3–1.0). */
+  opacity: number;
+  /** Diameter of the floating ball in pixels (32–72). */
+  size_px: number;
 }
 
 export interface HotkeyConfig {
@@ -176,7 +180,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     max_retries: 3,
   },
   result_window: { always_on_top: true, opacity: 0.95, font_size_px: 14 },
-  floating_ball: { enabled: false },
+  floating_ball: { enabled: false, opacity: 1, size_px: 48 },
   hotkeys: {
     select_and_translate: "Alt+Shift+A",
     live_translate: "Alt+Shift+R",
@@ -184,7 +188,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   log_level: "info",
   model_dir: null,
-  version: 2,
+  version: 3,
 };
 
 /** Allowed range for the mini-bar background opacity. */
@@ -195,6 +199,14 @@ export const RESULT_OPACITY_MAX = 1.0;
 export const RESULT_FONT_SIZE_MIN = 12;
 /** Allowed range for the mini-bar translation font size. */
 export const RESULT_FONT_SIZE_MAX = 24;
+/** Allowed range for the floating ball background opacity. */
+export const FLOATER_OPACITY_MIN = 0.3;
+/** Allowed range for the floating ball background opacity. */
+export const FLOATER_OPACITY_MAX = 1.0;
+/** Allowed range for the floating ball diameter in pixels. */
+export const FLOATER_SIZE_MIN = 32;
+/** Allowed range for the floating ball diameter in pixels. */
+export const FLOATER_SIZE_MAX = 72;
 
 export function isPipelineError(status: PipelineStatus): status is { error: string } {
   return typeof status === "object" && status !== null && "error" in status;
