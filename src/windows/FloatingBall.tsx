@@ -29,13 +29,10 @@ import {
   FLOATER_SIZE_MIN,
 } from "../types";
 import { createFloaterDragHandlers } from "../utils/floaterDrag";
+import { computeFloaterWindowSize, FLOATER_PADDING_PX } from "../utils/floaterLayout";
 import { clampFloaterPosition, loadFloaterPosition, saveFloaterPosition } from "../utils/floaterPosition";
 import { applyFloaterVisibility } from "../utils/floaterVisibility";
 
-/** Width of the expanded floating ball window while the menu is open. */
-const MENU_WIDTH = 220;
-/** Height of the expanded menu panel below the ball (excluding the ball). */
-const MENU_HEIGHT = 300;
 /** Debounce delay for persisting floating ball appearance changes (ms). */
 const APPEARANCE_PERSIST_MS = 350;
 
@@ -134,7 +131,9 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
   const [opacity, setOpacity] = useState(1);
   const [sizePx, setSizePx] = useState(48);
   const [hydrated, setHydrated] = useState(false);
+  const [menuHeight, setMenuHeight] = useState<number | null>(null);
   const rootRef = useRef<HTMLElement | null>(null);
+  const menuRef = useRef<HTMLElement | null>(null);
   const persistTimer = useRef<number | undefined>(undefined);
   const mode = useAppStore((state) => state.mode);
   const livePaused = useAppStore((state) => state.livePaused);
@@ -193,7 +192,8 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
       const monitors = await availableMonitors().catch(() => []);
       const saved = loadFloaterPosition(window.localStorage);
       if (saved && monitors.length > 0) {
-        const clamped = clampFloaterPosition(saved, monitors, sizePx);
+        // 夹取用整个窗口尺寸（球径 + 2×边距），保证透明边距也在屏内。
+        const clamped = clampFloaterPosition(saved, monitors, sizePx + 2 * FLOATER_PADDING_PX);
         await tauriWindow
           .setPosition(new PhysicalPosition(clamped.x, clamped.y))
           .catch(() => undefined);
@@ -215,18 +215,31 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 位置恢复只在水合后执行一次。
   }, [hydrated]);
 
-  // 悬浮球直径（与展开/收起状态）驱动窗口尺寸；水合后的大小变化同样生效。
+  // 展开时测量菜单面板实际高度，窗口高度与内容精确对齐（无空白带），
+  // 面板阴影也始终落在窗口底边内侧。
+  useEffect(() => {
+    if (!open) return;
+    const node = menuRef.current;
+    if (!node) return;
+    const measure = () => setMenuHeight(node.offsetHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [open]);
+
+  // 悬浮球直径/展开状态（以及测量后的菜单高度）驱动窗口尺寸；
+  // 收起窗口 = 球径 + 2×边距，球在窗口内居中，ring/shadow 不被裁剪。
   useEffect(() => {
     const tauriWindow = getFloaterWindow();
     if (!tauriWindow) return;
-    const logical = open
-      ? new LogicalSize(MENU_WIDTH, sizePx + MENU_HEIGHT)
-      : new LogicalSize(sizePx, sizePx);
+    const { width, height } = computeFloaterWindowSize(open, sizePx, menuHeight);
+    const logical = new LogicalSize(width, height);
     const resize = tauriWindow.setSize?.(logical);
     if (resize && typeof resize.catch === "function") {
       resize.catch(() => undefined);
     }
-  }, [open, sizePx]);
+  }, [open, sizePx, menuHeight]);
 
   const schedulePersist = (nextOpacity: number, nextSizePx: number) => {
     window.clearTimeout(persistTimer.current);
@@ -316,7 +329,8 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
       </button>
       {open && (
         <nav
-          className="floater-menu-panel absolute left-0 w-[220px] space-y-1 rounded-xl border border-slate-200 bg-white p-2 shadow-xl"
+          ref={menuRef}
+          className="floater-menu-panel space-y-1 rounded-xl border border-slate-200 bg-white p-2 shadow-xl"
           data-testid="floating-ball-menu"
         >
           <button

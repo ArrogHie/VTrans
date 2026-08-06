@@ -47,6 +47,15 @@ describe("FloatingBall", () => {
     expect(html).not.toContain("style=");
   });
 
+  it("positions the ball and the menu through the shared CSS classes", () => {
+    const collapsed = renderToStaticMarkup(<FloatingBall />);
+    expect(collapsed).toContain("floater-ball");
+    const expanded = renderToStaticMarkup(<FloatingBall initialOpen />);
+    expect(expanded).toContain("floater-menu-panel");
+    // 定位交给 CSS（--floater-padding / --floater-size），组件不内联坐标。
+    expect(expanded).not.toContain('class="floater-menu-panel absolute');
+  });
+
   it("renders the expanded menu with appearance controls", () => {
     const html = renderToStaticMarkup(<FloatingBall initialOpen />);
     expect(html).toContain('data-testid="floating-ball-menu"');

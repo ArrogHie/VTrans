@@ -21,7 +21,11 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 /**
- * Clamps a floating ball position so the whole ball stays on a monitor.
+ * Clamps a floating ball position so the whole window stays on a monitor.
+ *
+ * The third argument is the full window size in physical pixels (ball
+ * diameter plus the transparent padding on both sides), not the ball size:
+ * the transparent margin around the ball must also stay on screen.
  *
  * The monitor that contains the ball's centre wins; when the saved position
  * no longer matches any monitor (display topology changed), the first
@@ -30,11 +34,11 @@ function clamp(value: number, min: number, max: number): number {
 export function clampFloaterPosition(
   position: FloaterPosition,
   monitors: readonly FloaterMonitor[],
-  ballSize = FLOATER_BALL_SIZE,
+  windowSize = FLOATER_BALL_SIZE,
 ): FloaterPosition {
   if (monitors.length === 0) return position;
-  const centreX = position.x + ballSize / 2;
-  const centreY = position.y + ballSize / 2;
+  const centreX = position.x + windowSize / 2;
+  const centreY = position.y + windowSize / 2;
   const target =
     monitors.find(
       (monitor) =>
@@ -44,8 +48,8 @@ export function clampFloaterPosition(
         centreY <= monitor.position.y + monitor.size.height,
     ) ?? monitors[0];
   return {
-    x: clamp(position.x, target.position.x, target.position.x + target.size.width - ballSize),
-    y: clamp(position.y, target.position.y, target.position.y + target.size.height - ballSize),
+    x: clamp(position.x, target.position.x, target.position.x + target.size.width - windowSize),
+    y: clamp(position.y, target.position.y, target.position.y + target.size.height - windowSize),
   };
 }
 

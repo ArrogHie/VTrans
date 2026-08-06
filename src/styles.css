@@ -6,6 +6,8 @@
   :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #0f172a; font-synthesis: none; text-rendering: optimizeLegibility; }
   * { box-sizing: border-box; }
   body { margin: 0; min-width: 320px; min-height: 100vh; background: #f8fafc; }
+  /* 悬浮球窗口：透明边距（容纳 ring/shadow）与球径都是 CSS 变量。 */
+  html[data-window="floater"] { --floater-padding: 16px; }
   /* 悬浮球/迷你条是固定尺寸的透明窗格：重置全局 body 的 320px 下限并隐藏
      文档溢出，避免展开菜单或内容撑出横向/纵向滚动条；main 窗口下限不变。 */
   html[data-window="floater"] body,
@@ -17,13 +19,17 @@
   /* 选区窗口必须透出桌面：根元素与 body 都不能有不透明背景。 */
   html[data-window="selector"],
   html[data-window="selector"] body,
+  html[data-window="selector"] #root,
   html[data-window="overlay"],
   html[data-window="overlay"] body,
+  html[data-window="overlay"] #root,
   /* 迷你条弹窗：背景 alpha 由 --result-opacity 控制，桌面可透出。 */
   html[data-window="result"],
   html[data-window="result"] body,
+  html[data-window="result"] #root,
   html[data-window="floater"],
-  html[data-window="floater"] body { background: transparent; }
+  html[data-window="floater"] body,
+  html[data-window="floater"] #root { background: transparent; }
   button, select { font: inherit; }
 }
 
@@ -38,10 +44,18 @@
   .result-text { font-size: var(--result-font-size, 14px); }
   /* 悬浮球：背景 alpha（0.3–1.0）与直径由 CSS 变量控制（无窗口 opacity API）。 */
   .floater-ball {
+    position: absolute;
+    left: var(--floater-padding, 16px);
+    top: var(--floater-padding, 16px);
     background: rgba(79, 70, 229, var(--floater-opacity, 1));
     width: var(--floater-size, 48px);
     height: var(--floater-size, 48px);
   }
-  .floater-menu-panel { top: var(--floater-size, 48px); }
+  .floater-menu-panel {
+    position: absolute;
+    left: var(--floater-padding, 16px);
+    top: calc(var(--floater-padding, 16px) + var(--floater-size, 48px));
+    width: calc(100% - 2 * var(--floater-padding, 16px));
+  }
   .floater-menu-item { @apply flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-slate-600 transition hover:bg-indigo-50 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40; }
 }

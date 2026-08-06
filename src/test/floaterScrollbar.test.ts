@@ -23,6 +23,17 @@ describe("floater/result window scrollbar guards", () => {
     expect(declarations).toMatch(/overflow:\s*hidden;/);
   });
 
+  it("keeps html/body/#root transparent for both windows", () => {
+    expect(styles).toContain('html[data-window="floater"] #root');
+    expect(styles).toContain('html[data-window="result"] #root');
+    expect(styles).toContain('html[data-window="floater"] body');
+    expect(styles).toContain('html[data-window="result"] body');
+  });
+
+  it("defines the transparent padding variable on the floater root", () => {
+    expect(styles).toContain('html[data-window="floater"] { --floater-padding: 16px; }');
+  });
+
   it("keeps the main window 320px minimum untouched", () => {
     expect(styles).toMatch(/body\s*\{\s*margin:\s*0;\s*min-width:\s*320px;/);
   });
