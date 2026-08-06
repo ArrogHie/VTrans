@@ -49,6 +49,20 @@
         "focusable": false,
         "shadow": false,
         "resizable": false
+      },
+      {
+        "label": "floater",
+        "title": "VTrans Floater",
+        "width": 48,
+        "height": 48,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "focus": false,
+        "visible": false
       }
     ],
     "security": {

@@ -102,14 +102,44 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
   启动水合只在 `mode == "live"` 时恢复常驻方框，单次模式的选择区域不会
   在重启后显示方框。
 
+### 窗口清单（悬浮球窗口）
+
+VTrans 共声明 5 个窗口（`src-tauri/tauri.conf.json`，由模块 10 维护）：
+
+| label | 角色 | 关键配置 |
+|-------|------|---------|
+| main | 主窗口 | 420×600，可缩放，应用入口 |
+| result | 结果窗口 | 400×300，默认隐藏、置顶；透明度由前端按配置 CSS 应用 |
+| selector | 选区窗口 | 全屏、透明、无边框，默认隐藏 |
+| overlay | 选区方框 | 全屏、透明、无边框、置顶、可点穿，默认隐藏 |
+| floater | 悬浮球 | 48×48、透明、无边框、置顶、跳过任务栏、`focus: false`、默认隐藏 |
+
+floater（悬浮球）：
+
+- 由前端按 `floating_ball.enabled`（vtrans-config，默认 false）显示；拖动
+  复用既有窗口 API（show/hide/start-dragging/set-position/
+  set-always-on-top），**不新增 IPC Command**；
+- **不点穿**：与 overlay 不同，不做 `setIgnoreCursorEvents`；
+- 关闭请求被全局 hide-on-close（prevent_close + hide）覆盖，隐藏而非销毁；
+- 默认 `visible: false`，启动不产生可见窗口。
+
 ### capability 归属
 
-`src-tauri/capabilities/default.json` 由模块 10 统一维护，清单按前端实际
-调用的窗口 API 复核：`allow-available-monitors`、`allow-set-position`、
+`src-tauri/capabilities/default.json` 由模块 10 统一维护，`windows` 覆盖
+main/result/selector/overlay/floater 五个窗口。清单按前端实际调用的窗口
+API 复核：`allow-available-monitors`、`allow-set-position`、
 `allow-set-size`、`allow-set-ignore-cursor-events` 由 `regionOverlay` 服务
-使用（常驻方框的显示器枚举/定位/点穿），其余 `allow-show`/`allow-hide`/
+使用（常驻方框的显示器枚举/定位/点穿）；`allow-show`/`allow-hide`/
 `allow-set-focus`/`allow-set-always-on-top`/`allow-start-dragging` 由结果
-窗口与选区窗口使用；无多余权限。
+窗口、选区窗口与悬浮球共用；无多余权限。
+
+**透明度能力验证结论（feat/10-floating-ball-window）**：锁定的 Tauri
+2.11.5（tauri-runtime-wry 2.11.4、@tauri-apps/api 2.11.1）不提供窗口
+opacity 能力——Rust `WebviewWindow` 无 `set_opacity`、JS 无
+`setOpacity()`、ACL 无 `core:window:allow-set-opacity`（tauri-build 实测
+`Permission ... not found`，源码 grep 零命中）。因此 capability 不含
+opacity 权限；结果窗口透明度由前端 CSS 兜底，若要透出桌面需 result 窗口
+`transparent: true`，随模块 11 适配协调合入。
 
 **待架构确认（不阻塞 MVP）**：常驻方框目前为纯 CSS 边框，不显示区域真实
 缩略图；若产品要求屏幕缩略预览，需由 vtrans-app 提供小尺寸位图事件/命令
@@ -259,6 +289,25 @@ crates/vtrans-app/
       `"live"`）；contracts.rs 与前端类型/测试已同步
 - [x] 启动水合：前端仅在 `snapshot.mode === "live"` 时恢复常驻方框；
       单次模式的选择区域重启后不显示方框
+
+### 悬浮球窗口与透明度能力验收（feat/10-floating-ball-window）
+
+- [x] `tauri.conf.json` 声明 floater 窗口：48×48、`resizable: false`、
+      `decorations: false`、`transparent: true`、`alwaysOnTop: true`、
+      `skipTaskbar: true`、`shadow: false`、`focus: false`、
+      `visible: false`（默认隐藏，前端按配置显示）
+- [x] capability `windows` 纳入 `"floater"`；悬浮球复用既有窗口权限
+      （show/hide/start-dragging/set-position/set-always-on-top/
+      available-monitors），无新增权限
+- [x] 透明度能力验证结论已记录：Tauri 2.11.5 无窗口 opacity（Rust/JS/ACL
+      均无，`core:window:allow-set-opacity` 构建期报 not found）；建议前端
+      CSS 兜底；result 窗口需 `transparent: true` 才能透出桌面，随模块 11
+      协调合入（本分支不改 result 窗口）
+- [x] 行为变更最小：floater 默认隐藏、全局 hide-on-close 覆盖；未新增
+      IPC Command；未修改其他 crate 与 vtrans-core
+- [x] 回归：`cargo fmt --all -- --check`、`cargo clippy -p vtrans-app
+      --all-targets`、`cargo test -p vtrans-app`、`cargo check --workspace`
+      全绿
 
 ## 开发注意事项
 
