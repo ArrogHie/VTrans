@@ -42,6 +42,15 @@ impl PaddleOcrProvider {
 -> OcrResult
 ```
 
+长行处理：检测框宽度按与高度的比例 warp 到 32px 固定高度，不压缩宽度；超宽行在识别阶段按
+每片 ≤320px、相邻片 16px 重叠分片识别，按顺序拼接文本（置信度取分片均值）。因此 60+ 字符
+长句可完整识别，不再因整行压缩导致字符过小而失败。
+
+语言路由：`Language::Auto` 仅在 manifest 配置 `rec_multi` 多语言模型时可用；未配置时
+`recognize` 返回 `OcrError::Inference`（提示语：`auto language detection requires a
+multi-language recognition model; please select a language manually`），不静默回退
+`rec_ja`。显式 `ja` / `en` / `zh-CN` 行为不变（`zh-CN` 同样依赖 `rec_multi`）。
+
 ## 错误类型
 
 > **定义位置**：`OcrError` 定义在 `vtrans-core` 中（因为 `OcrProvider` trait 需要引用它）。本模块从 `vtrans-core` 导入，不重新定义。
@@ -96,6 +105,9 @@ crates/vtrans-ocr/
 | CTC 解码 | 单元 | 合并重复字符、去 blank |
 | 置信度过滤 | 单元 | 低于阈值的行被丢弃 |
 | 文本合并 | 单元 | 多行合并为段落，保留换行 |
+| 语言选择路由 | 单元 | `auto` 无 multi → `OcrError::Inference`；`auto` 有 multi → multi；`en`/`ja`/`zh-CN` 显式路由正确 |
+| 长行分片 | 单元 | 超宽图像按 ≤320px 分片、重叠量与拼接去重正确 |
+| 长行识别回归 | 集成（需模型） | `tests/long_line_regression.rs`（默认 ignore）对 `test1_lines.png` 断言长句完整、`auto` 报错语义 |
 | 验证 CLI | 手动 | examples/ocr_verify 对测试图片输出正确文本 |
 
 ## 验收标准

@@ -118,6 +118,8 @@ serde 表示：`OcrResult`、`OcrLine`、`OcrOptions` 等来自 `vtrans-core`，
 ## 5. 行为契约
 
 - 错误语义：`from_manifest_dir` / `from_manager` 失败表示模型文件缺失、SHA-256 不匹配或 ONNX 无法加载，修复文件前重试无意义；`recognize` 失败可能是输入或模型输出格式问题，修正后可重试；`OcrError::Cancelled` 表示调用方主动取消，重试需重新发起请求。错误类型统一为 `vtrans_core::OcrError`。
+- 语言路由：`Language::Auto` 仅在 manifest 配置了 `rec_multi` 多语言识别模型时可用；未配置时 `recognize` 返回 `OcrError::Inference`（提示语：`auto language detection requires a multi-language recognition model; please select a language manually`），**不会**静默回退到日文模型。显式 `ja` / `en` / `zh-CN` 行为不变（`zh-CN` 与 `auto` 一样依赖 `rec_multi`，未配置时同样报错）。该错误经 `vtrans-pipeline` 的 `PipelineError` → `vtrans-app` 的 `pipeline_error` 事件展示到前端，无需前端改动。
+- 长行识别：宽度超过 `REC_MAX_WIDTH`（320）的文本行在保持 32px 字符高度不变的前提下按宽度分片（每片 ≤320px、相邻片 16px 重叠）分别识别后按顺序拼接，不再把整行压缩到 320 宽导致字符过小。分片边界可能出现个别字符误识别，但长句内容完整可读；每行的识别置信度取各分片均值。
 - 并发模型：`PaddleOcrProvider` 是 `Send + Sync`；内部 `Detector` / `Recognizer` 用 `Mutex<Session>` 串行推理，多线程并发调用安全但会排队。
 - 取消语义：`recognize` 在预处理、检测前后、每行识别前检查令牌；正在执行的 ONNX run 通过 `RunOptions::terminate()` 中止，返回 `OcrError::Cancelled`。已取消的令牌复用会立即返回 `Cancelled`。
 - 资源生命周期：ONNX 会话由 provider 持有，drop 时由 `ort` 释放；模型文件由 `vtrans-models` 管理，本模块不下载、不删除；`ModelManager` 在 `from_manager` 之后可以 drop。
@@ -145,6 +147,8 @@ serde 表示：`OcrResult`、`OcrLine`、`OcrOptions` 等来自 `vtrans-core`，
 | 竖排文本旋转 90° 后识别 | 不引入方向分类器，MVP 可运行 | PP-OCR direction classifier（额外模型与依赖） |
 | 混合横竖排按方向分组排序 | 横排 / 竖排各自保持阅读顺序，组间按版面位置决定先后 | 多数派统一方向（混排场景顺序错误） |
 | `min_box_area` 提取为 `DEFAULT_MIN_BOX_AREA` 常量 | manifest schema 冻结时无该字段，先代码常量并注明来源 | 直接改 schema（需变更评审） |
+| 超宽行分片识别（每片 ≤320px、16px 重叠、按序拼接） | 整行压缩到 320 宽会把字符压到 10-20px 高，长句全部识别失败；分片保持 32px 字符高度，长句完整可读 | 放宽 `REC_MAX_WIDTH`（超出模型约定输入宽度，质量不可控）；改 manifest schema 加 rec 参数（需变更评审） |
+| `auto` 无 `rec_multi` 时报错而非回退 `rec_ja` | 静默回退会用日文模型识别英文，产出乱码且调用方无从知晓；报错让用户显式选择语言 | 保持旧回退行为（错误输出无法定位） |
 
 ## 8. 已知限制
 
@@ -155,6 +159,8 @@ serde 表示：`OcrResult`、`OcrLine`、`OcrOptions` 等来自 `vtrans-core`，
 | 未实现方向分类器（PP-OCR 完整流程含 cls） | 竖排质量依赖 90° 旋转，倾斜文本可能误判 | 后续按规格增加 cls 模型或优化旋转判定 |
 | 使用 greedy CTC，未实现 beam search | 长文本识别正确率上限较低 | 后续 Phase 按需实现 beam search |
 | 识别预处理参数（32 高 / 320 宽 / mean 0.5 / std 0.5）硬编码 | 更换 rec 模型版本时参数可能不匹配 | 走 manifest schema 变更评审，加入 rec 参数 |
+| 分片拼接的接缝处可能出现 1-2 个字符误识别（CTC 解码 + 16px 重叠去重不完美） | 长句整体可读，但个别单词可能多/错一个字符 | 后续引入基于语言模型的纠错，或提高分片重叠并改进去重 |
+| `Language::Auto` 依赖 `rec_multi` 模型 | 当前仓库 manifest `rec_multi: null`，默认配置 `auto` 会直接报错，英文用户需显式选择 `en` | 下载并配置多语言识别模型（`rec_multi` + 对应字典）后 `auto` 自动可用 |
 
 设计使然：
 

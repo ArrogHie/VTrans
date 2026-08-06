@@ -30,7 +30,7 @@ use crate::geometry::{rotate_90_cw, warp_perspective};
 use crate::postprocess::{
     boxes_from_map, merge_lines, sort_boxes, DetectionParams, DEFAULT_MIN_BOX_AREA,
 };
-use crate::preprocess::{det_preprocess, rgb_region, REC_HEIGHT, REC_MAX_WIDTH};
+use crate::preprocess::{det_preprocess, rgb_region, REC_HEIGHT};
 use crate::recognize::Recognizer;
 
 /// PaddleOCR-style ONNX recognition provider.
@@ -233,33 +233,67 @@ impl PaddleOcrProvider {
         })
     }
 
-    /// Pick the recognizer for a language and the language to report when
-    /// auto-detection selected a single-language model.
+    /// Pick the recognizer for a language and the language to report.
     fn select_recognizer(
         &self,
         language: Language,
     ) -> Result<(Arc<Recognizer>, Option<Language>), OcrError> {
-        match language {
-            Language::Japanese => Ok((Arc::clone(&self.rec_ja), Some(Language::Japanese))),
-            Language::English => Ok((Arc::clone(&self.rec_en), Some(Language::English))),
-            Language::ChineseSimplified => self
-                .rec_multi
-                .as_ref()
-                .map(|recognizer| (Arc::clone(recognizer), Some(Language::ChineseSimplified)))
-                .ok_or_else(|| {
+        let choice = choose_recognizer(language, self.rec_multi.is_some())?;
+        match choice {
+            RecognizerChoice::Japanese => Ok((Arc::clone(&self.rec_ja), Some(Language::Japanese))),
+            RecognizerChoice::English => Ok((Arc::clone(&self.rec_en), Some(Language::English))),
+            RecognizerChoice::Multi => {
+                let multi = self.rec_multi.as_ref().ok_or_else(|| {
                     OcrError::Inference(format!(
                         "no recognition model configured for language {}",
                         language.code()
                     ))
-                }),
-            Language::Auto => {
-                if let Some(multi) = &self.rec_multi {
-                    Ok((Arc::clone(multi), None))
-                } else {
-                    Ok((Arc::clone(&self.rec_ja), Some(Language::Japanese)))
-                }
+                })?;
+                let detected = match language {
+                    Language::Auto => None,
+                    Language::ChineseSimplified => Some(Language::ChineseSimplified),
+                    Language::Japanese | Language::English => {
+                        unreachable!("single-language choices never map to the multi model")
+                    }
+                };
+                Ok((Arc::clone(multi), detected))
             }
         }
+    }
+}
+
+/// Which recognition model slot to use for a requested language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecognizerChoice {
+    /// Japanese single-language model.
+    Japanese,
+    /// English single-language model.
+    English,
+    /// Multi-language model (also serves `zh-CN` and `auto`).
+    Multi,
+}
+
+/// Pick the recognizer slot for a language.
+///
+/// `auto` requires the multi-language model: silently falling back to a
+/// single-language model would recognize the wrong script (e.g. the Japanese
+/// model on English text) without the caller knowing. When no multi-language
+/// model is configured, `auto` returns [`OcrError::Inference`] with an
+/// actionable message instead.
+fn choose_recognizer(language: Language, has_multi: bool) -> Result<RecognizerChoice, OcrError> {
+    match language {
+        Language::Japanese => Ok(RecognizerChoice::Japanese),
+        Language::English => Ok(RecognizerChoice::English),
+        Language::ChineseSimplified | Language::Auto if has_multi => Ok(RecognizerChoice::Multi),
+        Language::ChineseSimplified => Err(OcrError::Inference(format!(
+            "no recognition model configured for language {}",
+            language.code()
+        ))),
+        Language::Auto => Err(OcrError::Inference(
+            "auto language detection requires a multi-language recognition model; \
+             please select a language manually"
+                .to_string(),
+        )),
     }
 }
 
@@ -292,7 +326,17 @@ impl OcrProvider for PaddleOcrProvider {
         if cancel.is_cancelled() {
             return Err(OcrError::Cancelled);
         }
-        let (recognizer, detected_language) = self.select_recognizer(options.language)?;
+        let (recognizer, detected_language) = match self.select_recognizer(options.language) {
+            Ok(selected) => selected,
+            Err(error) => {
+                tracing::warn!(
+                    language = %options.language.code(),
+                    error = %error,
+                    "recognizer selection failed"
+                );
+                return Err(error);
+            }
+        };
         let run_options = Arc::new(
             RunOptions::new()
                 .map_err(|e| OcrError::OrtRuntime(format!("create ONNX run options: {e}")))?,
@@ -399,9 +443,14 @@ fn run_ocr_pipeline(
         let vertical = options.detect_vertical && box_.height > box_.width * 1.5;
         let line_width = if vertical { box_.height } else { box_.width };
         let line_height = if vertical { box_.width } else { box_.height };
+        // Warp to the line's proportional width at the fixed recognition
+        // height. Wide lines are split into chunks by `Recognizer::run`
+        // instead of being compressed, so characters keep a readable size.
+        // The crop width is bounded by the input image dimensions because
+        // detected boxes are clipped to the image bounds.
         let target_width = ((line_width / line_height.max(1.0)) * REC_HEIGHT as f32)
             .round()
-            .clamp(REC_HEIGHT as f32, REC_MAX_WIDTH as f32) as u32;
+            .max(REC_HEIGHT as f32) as u32;
         let crop = warp_perspective(&rgb, box_.polygon, target_width, REC_HEIGHT);
         let crop = if vertical { rotate_90_cw(&crop) } else { crop };
         let line = recognizer.run(&crop, &run_options)?;
@@ -409,15 +458,27 @@ fn run_ocr_pipeline(
             reading_order,
             confidence = line.confidence,
             text_len = line.text.chars().count(),
+            box_width = box_.width,
+            box_height = box_.height,
+            crop_width = crop.width(),
+            crop_height = crop.height(),
             "line recognized"
         );
         recognized_lines.push((box_.clone(), line));
     }
 
+    let total_lines = recognized_lines.len();
     let recognized_lines = recognized_lines
         .into_iter()
         .filter(|(_, line)| line.confidence >= options.min_confidence)
         .collect::<Vec<_>>();
+    tracing::debug!(
+        total = total_lines,
+        kept = recognized_lines.len(),
+        dropped = total_lines - recognized_lines.len(),
+        min_confidence = options.min_confidence,
+        "confidence filter applied"
+    );
     let lines: Vec<OcrLine> = recognized_lines
         .iter()
         .enumerate()
@@ -704,5 +765,57 @@ mod tests {
             load_dict(&path),
             Err(OcrError::InvalidManifest(_))
         ));
+    }
+
+    #[test]
+    fn auto_without_multi_returns_inference_error() {
+        let error = choose_recognizer(Language::Auto, false).unwrap_err();
+        assert!(matches!(error, OcrError::Inference(_)));
+        assert!(error.to_string().contains("multi-language"));
+        assert!(error.to_string().contains("select a language manually"));
+    }
+
+    #[test]
+    fn auto_with_multi_uses_multi_model() {
+        assert_eq!(
+            choose_recognizer(Language::Auto, true).unwrap(),
+            RecognizerChoice::Multi
+        );
+    }
+
+    #[test]
+    fn explicit_languages_route_to_their_models() {
+        assert_eq!(
+            choose_recognizer(Language::Japanese, false).unwrap(),
+            RecognizerChoice::Japanese
+        );
+        assert_eq!(
+            choose_recognizer(Language::English, false).unwrap(),
+            RecognizerChoice::English
+        );
+        assert_eq!(
+            choose_recognizer(Language::ChineseSimplified, true).unwrap(),
+            RecognizerChoice::Multi
+        );
+    }
+
+    #[test]
+    fn explicit_languages_ignore_multi_presence() {
+        // Explicit single-language choices never consult the multi model.
+        assert_eq!(
+            choose_recognizer(Language::Japanese, true).unwrap(),
+            RecognizerChoice::Japanese
+        );
+        assert_eq!(
+            choose_recognizer(Language::English, true).unwrap(),
+            RecognizerChoice::English
+        );
+    }
+
+    #[test]
+    fn chinese_simplified_without_multi_returns_error() {
+        let error = choose_recognizer(Language::ChineseSimplified, false).unwrap_err();
+        assert!(matches!(error, OcrError::Inference(_)));
+        assert!(error.to_string().contains("zh-CN"));
     }
 }
