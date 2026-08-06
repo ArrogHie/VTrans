@@ -70,9 +70,16 @@ export function stopLiveTranslation(): Promise<void> {
   return call<void>("stop_live_translation");
 }
 
-/** Updates the active region or completes a pending region selection. */
-export function updateLiveRegion(region: ScreenRegion): Promise<void> {
-  return call<void>("update_live_region", { region });
+/**
+ * Updates the active region or completes a pending region selection.
+ *
+ * `mode` tells the backend whether the confirmation belongs to a single
+ * capture (the persistent marker stays hidden) or a live session (the
+ * marker is shown). The backend maps the Rust parameter `mode` to the same
+ * camelCase key under Tauri 2's default argument naming.
+ */
+export function updateLiveRegion(region: ScreenRegion, mode: "single" | "live"): Promise<void> {
+  return call<void>("update_live_region", { region, mode });
 }
 
 /** Persists the selected OCR language. */

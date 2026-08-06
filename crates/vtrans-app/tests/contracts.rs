@@ -4,7 +4,7 @@ use vtrans_app::events::{
 };
 use vtrans_app::{AppError, AppStatus, LiveTranslationConfig};
 use vtrans_config::AppConfig;
-use vtrans_core::{Language, PipelineStatus, ScreenRegion};
+use vtrans_core::{Language, PipelineMode, PipelineStatus, ScreenRegion};
 use vtrans_pipeline::PipelineError;
 
 // IPC argument-name contract:
@@ -19,6 +19,7 @@ use vtrans_pipeline::PipelineError;
 //   set_target_language       -> { language }
 //   set_ocr_language          -> { language }
 //   start_live_translation    -> { config }
+//   update_live_region        -> { region, mode }
 //
 // Do not add `rename_all = "snake_case"` to a command without updating
 // `src/services/tauri.ts` and `src/test/ipc.test.ts` on the frontend branch
@@ -38,6 +39,7 @@ fn public_ipc_contracts_round_trip_through_json() {
     assert!((decoded.difference_threshold - 0.05).abs() < f32::EPSILON);
 
     let status = AppStatus {
+        mode: PipelineMode::SingleCapture,
         pipeline_status: PipelineStatus::Idle,
         ocr_provider: "pp-ocr".to_string(),
         translation_provider: "api".to_string(),
@@ -46,7 +48,9 @@ fn public_ipc_contracts_round_trip_through_json() {
         model_progress: None,
         debug_mode: false,
     };
-    assert!(serde_json::to_string(&status).unwrap().contains("pp-ocr"));
+    let json = serde_json::to_string(&status).unwrap();
+    assert!(json.contains("pp-ocr"));
+    assert!(json.contains(r#""mode":"single""#));
 }
 
 #[test]

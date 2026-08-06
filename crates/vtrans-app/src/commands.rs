@@ -13,7 +13,10 @@ use vtrans_pipeline::{PipelineError, PipelineEvent};
 use crate::debug_frame::{spawn_debug_frame_forwarder, RegionSource};
 use crate::error::AppError;
 use crate::events::{emit_model_loading_progress, emit_pipeline_event};
-use crate::overlay::{hide_region_overlay, show_region_overlay};
+use crate::overlay::{
+    apply_overlay, hide_region_overlay, overlay_intent, overlay_intent_for_stop, OverlayEvent,
+    OverlayIntent, StopKind,
+};
 use crate::state::AppStatus;
 use crate::state::{store_api_key, AppState};
 
@@ -123,21 +126,36 @@ pub async fn capture_once(
     state: State<'_, AppState>,
 ) -> Result<OcrResult, AppError> {
     let app = state.app_handle()?;
+    // A single capture never shows the persistent marker: hide it on entry
+    // (defensive against a stale selector or hotkey path) and record the
+    // single mode for hydration. The final hide below also covers failures.
+    apply_overlay(&app, OverlayIntent::Hide, None);
+    state.set_current_mode(PipelineMode::SingleCapture);
     let frame_sink = state
         .debug_mode()
         .then(|| spawn_debug_frame_forwarder(app.clone(), RegionSource::Fixed(region.clone())));
     // The interval and threshold are ignored for single captures; the
     // pipeline builder uses the single-mode defaults for them.
-    let pipeline =
-        state.build_pipeline(PipelineMode::SingleCapture, region, 0, 0.03, frame_sink)?;
-    let (event_tx, event_rx) = mpsc::channel(16);
-    let ocr_result = run_capture_pipeline(
-        |event| emit_pipeline_event(&app, event),
-        pipeline.run(event_tx),
-        event_rx,
-    )
-    .await?;
-    ocr_result.ok_or(AppError::NotInitialized)
+    let result = async {
+        let pipeline =
+            state.build_pipeline(PipelineMode::SingleCapture, region, 0, 0.03, frame_sink)?;
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let ocr_result = run_capture_pipeline(
+            |event| emit_pipeline_event(&app, event),
+            pipeline.run(event_tx),
+            event_rx,
+        )
+        .await?;
+        ocr_result.ok_or(AppError::NotInitialized)
+    }
+    .await;
+    // The marker must never outlive a single capture, success or failure.
+    apply_overlay(
+        &app,
+        overlay_intent(OverlayEvent::SingleCaptureCompleted),
+        None,
+    );
+    result
 }
 
 /// Drives a single-capture pipeline run while forwarding stage events.
@@ -230,7 +248,12 @@ pub(crate) async fn start_live_task(
     // is visible even when the session was started from a hotkey with every
     // webview hidden. The frontend re-positions the same values afterwards,
     // so the calls converge on an identical window placement.
-    show_region_overlay(&app, &config.region);
+    state.set_current_mode(PipelineMode::LiveRegion);
+    apply_overlay(
+        &app,
+        overlay_intent(OverlayEvent::LiveStarted),
+        Some(&config.region),
+    );
     let frame_sink = state.debug_mode().then(|| {
         spawn_debug_frame_forwarder(
             app.clone(),
@@ -290,11 +313,21 @@ async fn run_live_task(
 #[tauri::command]
 #[tracing::instrument(skip(state))]
 pub async fn stop_live_translation(state: State<'_, AppState>) -> Result<(), AppError> {
-    stop_live_task(state.inner()).await
+    let app = state.app_handle()?;
+    stop_live_task(&app, state.inner(), StopKind::Pause).await
 }
 
 /// Shared live task stopper used by commands and global shortcuts.
-pub(crate) async fn stop_live_task(state: &AppState) -> Result<(), AppError> {
+///
+/// The overlay decision is applied through [`overlay_intent_for_stop`]: a
+/// pause (UI pause command) keeps the marker, a real stop (stop hotkey)
+/// hides it. The UI stop button hides the marker itself before calling the
+/// pause command, so both stop paths converge on a hidden marker.
+pub(crate) async fn stop_live_task(
+    app: &AppHandle,
+    state: &AppState,
+    stop: StopKind,
+) -> Result<(), AppError> {
     let _lifecycle = state.live_lifecycle.lock().await;
     let pipeline = state.pipeline().ok_or(PipelineError::NotRunning)?;
     {
@@ -315,23 +348,32 @@ pub(crate) async fn stop_live_task(state: &AppState) -> Result<(), AppError> {
             .map_err(|error| AppError::Tauri(format!("live task join failed: {error}")))?;
     }
     state.clear_pipeline();
+    apply_overlay(app, overlay_intent_for_stop(stop), None);
     tracing::info!("live translation stopped");
     Ok(())
 }
 
-/// Updates the active live capture region or completes a pending selection.
+/// Updates the active capture region or completes a pending selection.
+///
+/// `mode` tells the backend whether the confirmation belongs to a single
+/// capture or a live session: live confirms show the persistent marker,
+/// single confirms keep it hidden (the single capture hides it again when
+/// it finishes, see [`capture_once`]). The frontend selector passes the
+/// current session mode under the Tauri camelCase `mode` argument.
 ///
 /// # Errors
 ///
 /// Returns an application error when the region is invalid or the active
 /// pipeline rejects the update.
 #[tauri::command]
-#[tracing::instrument(skip(state, region))]
+#[tracing::instrument(skip(state, region), fields(mode = ?mode))]
 pub async fn update_live_region(
     region: ScreenRegion,
+    mode: PipelineMode,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     state.set_selected_region(region.clone()).await?;
+    state.set_current_mode(mode);
     if let Some(pipeline) = state.pipeline() {
         pipeline
             .update_region(region.clone())
@@ -339,7 +381,11 @@ pub async fn update_live_region(
             .map_err(AppError::from)?;
     }
     let app = state.app_handle()?;
-    show_region_overlay(&app, &region);
+    apply_overlay(
+        &app,
+        overlay_intent(OverlayEvent::RegionConfirmed(mode)),
+        Some(&region),
+    );
     Ok(())
 }
 

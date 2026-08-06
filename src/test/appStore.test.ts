@@ -56,6 +56,7 @@ describe("appStore", () => {
   });
   it("hydrates the selected translation provider from backend status", () => {
     useAppStore.getState().applyStatus({
+      mode: "single",
       pipeline_status: "idle",
       ocr_provider: "pp-ocr",
       translation_provider: "local-onnx",
@@ -69,6 +70,7 @@ describe("appStore", () => {
 
   it("maps unknown provider ids back to the api default", () => {
     useAppStore.getState().applyStatus({
+      mode: "single",
       pipeline_status: "idle",
       ocr_provider: "pp-ocr",
       translation_provider: "unexpected-provider",
@@ -82,6 +84,7 @@ describe("appStore", () => {
 
   it("constructs a live config fallback for hotkey-started sessions", () => {
     useAppStore.getState().applyStatus({
+      mode: "live",
       pipeline_status: "capturing",
       ocr_provider: "pp-ocr",
       translation_provider: "api",
@@ -102,6 +105,7 @@ describe("appStore", () => {
 
   it("keeps live config null when a running session has no selected region", () => {
     useAppStore.getState().applyStatus({
+      mode: "live",
       pipeline_status: "capturing",
       ocr_provider: "pp-ocr",
       translation_provider: "api",
@@ -121,6 +125,7 @@ describe("appStore", () => {
     };
     useAppStore.getState().setLiveConfig(existing);
     useAppStore.getState().applyStatus({
+      mode: "live",
       pipeline_status: "capturing",
       ocr_provider: "pp-ocr",
       translation_provider: "api",
@@ -141,6 +146,7 @@ describe("appStore", () => {
     useAppStore.getState().setLiveConfig(existing);
     useAppStore.getState().setLivePaused(true);
     useAppStore.getState().applyStatus({
+      mode: "live",
       pipeline_status: "capturing",
       ocr_provider: "pp-ocr",
       translation_provider: "api",
@@ -162,6 +168,7 @@ describe("appStore", () => {
     useAppStore.getState().setLiveConfig(existing);
     useAppStore.getState().setLivePaused(true);
     useAppStore.getState().applyStatus({
+      mode: "live",
       pipeline_status: "idle",
       ocr_provider: "pp-ocr",
       translation_provider: "api",
@@ -172,5 +179,33 @@ describe("appStore", () => {
     });
     expect(useAppStore.getState().liveConfig).toEqual(existing);
     expect(useAppStore.getState().livePaused).toBe(true);
+  });
+
+  it("hydrates the session mode from the backend snapshot", () => {
+    useAppStore.getState().applyStatus({
+      mode: "single",
+      pipeline_status: "idle",
+      ocr_provider: "pp-ocr",
+      translation_provider: "api",
+      selected_region: null,
+      live_running: false,
+      model_progress: null,
+      debug_mode: false,
+    });
+    expect(useAppStore.getState().mode).toBe("single");
+  });
+
+  it("keeps live mode for a paused backend session", () => {
+    useAppStore.getState().applyStatus({
+      mode: "live",
+      pipeline_status: "idle",
+      ocr_provider: "pp-ocr",
+      translation_provider: "api",
+      selected_region: region,
+      live_running: false,
+      model_progress: null,
+      debug_mode: false,
+    });
+    expect(useAppStore.getState().mode).toBe("live");
   });
 });

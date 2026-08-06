@@ -1,7 +1,7 @@
 import { getCurrentWindow, currentMonitor } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useState } from "react";
 import { Check, RotateCcw, X } from "lucide-react";
-import { hideRegionOverlay, showRegionOverlay } from "../services/regionOverlay";
+import { hideRegionOverlay } from "../services/regionOverlay";
 import { cancelRegionSelection, toPhysicalRegion, updateLiveRegion } from "../services/tauri";
 import { useAppStore } from "../stores/appStore";
 
@@ -13,6 +13,9 @@ export function RegionSelector() {
   const [phase, setPhase] = useState<Phase>("selecting");
   const [monitorId, setMonitorId] = useState<string | null>(null);
   const setSelectedRegion = useAppStore((state) => state.setSelectedRegion);
+  // 选区窗口与主窗口共享会话模式（经跨窗口事件同步）；后端按此模式
+  // 决定常驻方框的显隐，单次模式确认不会显示方框。
+  const mode = useAppStore((state) => state.mode);
   const [message, setMessage] = useState("拖动鼠标框选要翻译的区域，松开后确认");
 
   const resetSelection = useCallback(() => {
@@ -48,14 +51,13 @@ export function RegionSelector() {
       return;
     }
     try {
-      await updateLiveRegion(region);
+      await updateLiveRegion(region, mode);
       setSelectedRegion(region);
-      await showRegionOverlay(region);
       await getCurrentWindow().hide();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "选区提交失败");
     }
-  }, [end, monitorId, setSelectedRegion, start]);
+  }, [end, mode, monitorId, setSelectedRegion, start]);
 
   useEffect(() => {
     let active = true;

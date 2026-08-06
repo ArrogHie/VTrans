@@ -22,6 +22,14 @@ use crate::error::AppError;
 /// A serializable snapshot returned by the `get_app_status` command.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppStatus {
+    /// Session mode the backend last ran in (`"single"` or `"live"`).
+    ///
+    /// This mirrors the last session started by a command or hotkey: single
+    /// captures and their region confirmations report `single`, a live
+    /// session (running **or paused**) reports `live`. The frontend uses it
+    /// during hydration to decide whether a selected region should restore
+    /// the persistent overlay marker.
+    pub mode: PipelineMode,
     /// Current pipeline status.
     pub pipeline_status: PipelineStatus,
     /// Stable identifier of the configured OCR provider.
@@ -68,6 +76,7 @@ pub struct AppState {
     app_handle: std::sync::RwLock<Option<AppHandle>>,
     model_progress: std::sync::RwLock<Option<f32>>,
     debug_mode: bool,
+    current_mode: std::sync::RwLock<PipelineMode>,
 }
 
 impl AppState {
@@ -131,6 +140,7 @@ impl AppState {
             app_handle: std::sync::RwLock::new(None),
             model_progress: std::sync::RwLock::new(None),
             debug_mode,
+            current_mode: std::sync::RwLock::new(PipelineMode::SingleCapture),
         })
     }
 
@@ -138,6 +148,22 @@ impl AppState {
     #[must_use]
     pub(crate) fn debug_mode(&self) -> bool {
         self.debug_mode
+    }
+
+    /// Records the session mode of the most recent command or hotkey.
+    ///
+    /// The mode is a per-run mirror used by [`AppStatus::mode`]; it is never
+    /// persisted. A stop keeps the last mode so a paused live session still
+    /// reports `live`; only the next region confirmation or single capture
+    /// switches it back.
+    pub(crate) fn set_current_mode(&self, mode: PipelineMode) {
+        *self.current_mode.write().unwrap_or_else(poison_inner) = mode;
+    }
+
+    /// Returns the session mode of the most recent command or hotkey.
+    #[must_use]
+    pub(crate) fn current_mode(&self) -> PipelineMode {
+        *self.current_mode.read().unwrap_or_else(poison_inner)
     }
 
     pub(crate) fn attach_handle(&self, app: AppHandle) {
@@ -319,6 +345,7 @@ impl AppState {
     }
 
     pub(crate) fn status_snapshot(&self, live_running: bool) -> AppStatus {
+        let mode = self.current_mode();
         let pipeline_status = self
             .pipeline()
             .map_or(PipelineStatus::Idle, |pipeline| pipeline.status());
@@ -336,6 +363,7 @@ impl AppState {
             .to_string();
         let model_progress = *self.model_progress.read().unwrap_or_else(poison_inner);
         AppStatus {
+            mode,
             pipeline_status,
             ocr_provider,
             translation_provider,
@@ -528,6 +556,7 @@ mod tests {
     #[test]
     fn status_snapshot_contract_is_serializable() {
         let status = AppStatus {
+            mode: PipelineMode::SingleCapture,
             pipeline_status: PipelineStatus::Idle,
             ocr_provider: "mock-ocr".to_string(),
             translation_provider: "mock-translation".to_string(),
@@ -537,6 +566,7 @@ mod tests {
             debug_mode: false,
         };
         let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains(r#""mode":"single""#));
         assert!(json.contains("pipeline_status"));
         assert!(json.contains("mock-ocr"));
         assert!(json.contains(r#""debug_mode":false"#));

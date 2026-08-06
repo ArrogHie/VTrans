@@ -46,6 +46,8 @@ export interface PipelineConfig {
 }
 
 export interface AppStatus {
+  /** Backend session mode (`"single"` or `"live"`); drives hydration. */
+  mode: Mode;
   pipeline_status: PipelineStatus;
   ocr_provider: string;
   translation_provider: string;

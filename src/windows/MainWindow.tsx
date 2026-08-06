@@ -73,8 +73,11 @@ export function MainWindow() {
         setDebugMode(snapshot.debug_mode);
         if (snapshot.selected_region) {
           setSelectedRegion(snapshot.selected_region);
-          // 重启后恢复常驻选区方框，与后端已选区域保持一致。
-          void showRegionOverlay(snapshot.selected_region);
+          // 仅在后端确认处于实时会话模式时恢复常驻选区方框；
+          // 单次模式的选择区域不显示常驻方框。
+          if (snapshot.mode === "live") {
+            void showRegionOverlay(snapshot.selected_region);
+          }
         }
       } catch {
         // 水合失败时保留默认配置与初始状态，用户仍可手动操作。

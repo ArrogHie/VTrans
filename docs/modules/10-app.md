@@ -23,7 +23,7 @@ t::generate_handler![
     capture_once,
     start_live_translation,
     stop_live_translation,
-    update_live_region,
+    update_live_region, // (region, mode: "single" | "live")
     set_ocr_language,
     set_source_language,
     set_target_language,
@@ -80,16 +80,27 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
 
 ### 选区 overlay
 
-- 选区确认（`update_live_region`）→ overlay 窗口覆盖区域所在显示器（窗口
-  原点 = 显示器原点），前端 `regionOverlay` 服务定位/显示/点穿，后端同步
-  显示兜底；CSS 边框 + 尺寸标签绘制在区域相对偏移处（事件
-  `overlay_region_updated`）；
-- 重新选区 / 取消 / 真正停止（UI 按钮或热键）→ 隐藏（事件
-  `overlay_hidden`）；暂停实时会话保留方框（暂停走 `stop_live_translation`，
-  后端不在停止路径隐藏，避免与前端暂停语义冲突）；
+- 选区确认（`update_live_region(region, mode)`）→ overlay 窗口覆盖区域
+  所在显示器（窗口原点 = 显示器原点），前端 `regionOverlay` 服务定位/
+  显示/点穿，后端同步显示兜底；CSS 边框 + 尺寸标签绘制在区域相对偏移处
+  （事件 `overlay_region_updated`）；
+- **显隐规则按模式区分**（决策集中在 `overlay.rs` 的可测纯函数
+  `overlay_intent` / `overlay_intent_for_stop`）：
+  - 单次模式：选区确认（`mode: "single"`）**不显示**常驻方框；
+    `capture_once` 完成（成功或失败）后确保隐藏，方框不残留；
+  - 实时模式：`start_live_translation` 启动即显示；`update_live_region`
+    （`mode: "live"`）更新区域时显示新位置；**暂停保留**方框（暂停走
+    `stop_live_translation`，后端按 `Pause` 决策不隐藏）；**真正停止**
+    隐藏（UI 停止按钮先隐藏再 stop、热键 Alt+Shift+S 走 `Stop` 决策由
+    后端隐藏）；
+- 重新选区 / 取消 → 隐藏（事件 `overlay_hidden`）；
 - overlay 无边框、透明、置顶、可点穿（`focusable: false` +
   `set_ignore_cursor_events(true)`），只传输 `ScreenRegion` 坐标，不跨 IPC
   传图像。
+- `AppStatus.mode`（`"single"` / `"live"`）是后端最近会话模式的权威记录
+  （单次捕获与确认报告 `single`，实时会话运行或暂停均报告 `live`）；前端
+  启动水合只在 `mode == "live"` 时恢复常驻方框，单次模式的选择区域不会
+  在重启后显示方框。
 
 ### capability 归属
 
@@ -179,7 +190,7 @@ crates/vtrans-app/
 | get_app_config | 手工验证 + 单元 | 前端水合手工验证（README 第 8 条）；AppConfig 序列化字段契约见 contracts.rs |
 | 快捷键注册 | 手工验证 | 依赖真实全局快捷键注册环境（README 第 5 条）；动作分派枚举有单测 |
 | 托盘与窗口生命周期 | 手工验证 | 依赖系统托盘与真实窗口环境（README 第 9 条）；菜单 id 与事件名有单测 |
-| 选区 overlay | 手工验证 + 单元 | 依赖真实显示器（README 第 10 条）；overlay 坐标换算由前端单测覆盖 |
+| 选区 overlay | 手工验证 + 单元 | 依赖真实显示器（README 第 10 条）；显隐决策纯函数（单次确认不显示/实时启动显示/实时停止隐藏/暂停保留）与坐标换算有单测 |
 | 单实例保护 | 手工验证 | 依赖进程级行为（README 第 11 条） |
 | Debug 模式开关 | 单元 | `parse_debug_env_value` 值域解析（setup.rs tests）✅ |
 | 缩略图编码 | 单元 | 尺寸缩放/JPEG 有效/格式与缓冲校验（debug_frame.rs tests）✅ |
@@ -233,6 +244,21 @@ crates/vtrans-app/
 - [x] 日志纪律：Debug 帧不进日志，开关状态只记一行 `info!`
 - [x] 隐私：只显示不保存（不落盘、不进日志、不进 store/结果窗口）；面板
       显示依赖真实桌面环境，登记 README 手工验证项 12
+
+### overlay 生命周期验收（Bug-003）
+
+- [x] 单次模式：选区确认（`mode: "single"`）不显示常驻方框；`capture_once`
+      完成（成功或失败）后隐藏方框
+- [x] 实时模式：启动显示、`update_live_region`（`mode: "live"`）更新显示、
+      暂停保留（`stop_live_translation` 按 `Pause` 决策不隐藏）、真正停止
+      隐藏（UI 按钮先隐藏再 stop、热键按 `Stop` 决策后端隐藏）
+- [x] 决策逻辑集中为纯函数：`overlay_intent` / `overlay_intent_for_stop`
+      （overlay.rs tests 覆盖四个场景）
+- [x] IPC 契约已定稿：`update_live_region(region, mode)`（Tauri 2 默认
+      camelCase，前端传 `{ region, mode }`）；`AppStatus.mode`（`"single"`/
+      `"live"`）；contracts.rs 与前端类型/测试已同步
+- [x] 启动水合：前端仅在 `snapshot.mode === "live"` 时恢复常驻方框；
+      单次模式的选择区域重启后不显示方框
 
 ## 开发注意事项
 

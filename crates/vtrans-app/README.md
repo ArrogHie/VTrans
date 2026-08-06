@@ -56,6 +56,7 @@ impl AppState {
 }
 
 pub struct AppStatus {
+    pub mode: PipelineMode,
     pub pipeline_status: PipelineStatus,
     pub ocr_provider: String,
     pub translation_provider: String,
@@ -79,7 +80,7 @@ cancel_region_selection() -> Result<(), AppError>
 capture_once(region: ScreenRegion) -> Result<OcrResult, AppError>
 start_live_translation(config: LiveTranslationConfig) -> Result<(), AppError>
 stop_live_translation() -> Result<(), AppError>
-update_live_region(region: ScreenRegion) -> Result<(), AppError>
+update_live_region(region: ScreenRegion, mode: PipelineMode) -> Result<(), AppError>
 set_ocr_language(language: Language) -> Result<(), AppError>
 set_source_language(language: Language) -> Result<(), AppError>
 set_target_language(language: Language) -> Result<(), AppError>
@@ -171,14 +172,29 @@ Debug 模式是**默认关闭、显式开启**的运行期开关，用于排查�
 
 ### 选区 overlay
 
-选区确认后，一个无边框、透明、置顶、可点穿的全屏 overlay 窗口覆盖在区域
-所在显示器上（窗口原点 = 显示器原点，尺寸 = 显示器尺寸），用纯 CSS 边框
-在区域相对偏移处持续标出捕获区域（含尺寸标签）。显示/定位由前端
-`regionOverlay` 服务驱动（`availableMonitors` + `setPosition`/`setSize` +
-`setIgnoreCursorEvents`），后端在 `update_live_region` 与 `start_live_task`
-中同步显示、在重新选区/取消时隐藏作为兜底。暂停实时会话保留方框；真正
-停止（UI 按钮或热键）时隐藏。overlay 窗口不接收鼠标事件，也不传输任何
-图像数据（只传 `ScreenRegion` 坐标）。
+一个无边框、透明、置顶、可点穿的全屏 overlay 窗口覆盖在区域所在显示器上
+（窗口原点 = 显示器原点，尺寸 = 显示器尺寸），用纯 CSS 边框在区域相对
+偏移处持续标出捕获区域（含尺寸标签）。显示/定位由前端 `regionOverlay`
+服务驱动（`availableMonitors` + `setPosition`/`setSize` +
+`setIgnoreCursorEvents`），后端同步显示兜底。
+
+**显隐规则按模式区分**（决策集中在 `overlay.rs` 的纯函数
+`overlay_intent` / `overlay_intent_for_stop`，均有单元测试）：
+
+- **单次模式**：选区确认（`update_live_region` 传 `mode: "single"`）不显示
+  常驻方框；`capture_once` 完成（成功或失败）后确保隐藏，方框不残留。
+- **实时模式**：`start_live_translation` 启动即显示；`update_live_region`
+  （`mode: "live"`）更新区域时显示新位置；**暂停保留**方框（暂停走
+  `stop_live_translation`，后端按 `Pause` 决策不隐藏，恢复后无需重新
+  定位）；**真正停止**隐藏（UI 停止按钮先隐藏再 stop，热键 Alt+Shift+S
+  走 `Stop` 决策由后端隐藏）。
+- 重新选区 / 取消 → 隐藏（事件 `overlay_hidden`）。
+
+`AppStatus.mode`（`"single"` / `"live"`）是后端最近会话模式的权威记录：
+单次捕获与确认报告 `single`，实时会话运行或暂停均报告 `live`。前端启动
+水合只在 `mode == "live"` 时恢复常驻方框，单次模式的选择区域不会在重启
+后显示方框。overlay 窗口不接收鼠标事件，也不传输任何图像数据（只传
+`ScreenRegion` 坐标）。
 
 ### capability 归属
 
@@ -269,9 +285,11 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 9. **托盘与窗口生命周期**：点击主窗口关闭按钮，确认主窗口隐藏、进程仍在、
    托盘出现图标；左键单击托盘恢复主窗口；托盘菜单「退出」后进程结束且
    全局快捷键不再占用（再次按下 Alt+Shift+A/R/S 不触发本应用）。
-10. **选区 overlay**：框选确认后，屏幕上出现与选区对齐的常驻边框（含尺寸
-    标签）；实时会话运行中更新区域，边框同步移动/缩放；停止实时或重新
-    选区时边框消失；框选区域内的鼠标操作（点击、拖动）不受 overlay 影响。
+10. **选区 overlay**：单次模式框选确认后**不出现**常驻边框，翻译完成
+    （成功或失败）后仍无残留；切到实时模式启动后出现与选区对齐的常驻
+    边框（含尺寸标签），实时运行中更新区域边框同步移动/缩放；暂停保留
+    边框，停止实时或重新选区时边框消失；框选区域内的鼠标操作（点击、
+    拖动）不受 overlay 影响。
 11. **单实例**：应用运行中再次启动 vtrans.exe，确认不会出现第二个进程，
     已有实例的主窗口被恢复显示。
 12. **Debug 模式**：以 `VTRANS_DEBUG=1` 启动应用，主窗口出现「调试：捕获
@@ -292,7 +310,9 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 ## 已知限制
 
 - AppState::new 需要可用的 Windows Graphics Capture 环境、模型 manifest 和对应模型文件；模型未部署时启动会返回 AppError::Model/AppError::Capture。
-- 选区窗口的最终坐标由前端通过 update_live_region 确认；start_region_selection 会等待确认结果，Escape/关闭操作应调用 cancel_region_selection。
+- 选区窗口的最终坐标由前端通过 update_live_region（携带当前模式
+  `"single"` / `"live"`）确认；start_region_selection 会等待确认结果，
+  Escape/关闭操作应调用 cancel_region_selection。
 - 模型完整性校验通过 blocking pool 执行，避免大文件 SHA-256 计算阻塞 Tokio worker。
 - 切换翻译 Provider（`set_translation_provider` / `save_settings`）会在 blocking
   pool 中重新加载本地 ONNX 模型（tokenizer + session），期间持有生命周期锁，

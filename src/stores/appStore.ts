@@ -106,7 +106,9 @@ export const useAppStore = create<AppState>((set) => ({
           : state.liveConfig;
       return {
         status: status.pipeline_status,
-        mode: status.live_running ? "live" : state.mode,
+        // 后端模式是最近一次会话的权威记录：运行中的会话必然是 live，
+        // 否则采用后端报告的 single/live（暂停中的 live 会话保持 live）。
+        mode: status.live_running ? "live" : status.mode,
         selectedRegion: status.selected_region,
         modelProgress: status.model_progress,
         config: {

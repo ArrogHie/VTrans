@@ -12,6 +12,7 @@ const {
   setSourceLanguage,
   setTargetLanguage,
   startLiveTranslation,
+  updateLiveRegion,
 } = await import("../services/tauri");
 
 describe("tauri IPC service", () => {
@@ -33,6 +34,18 @@ describe("tauri IPC service", () => {
     const config = { region: { monitor_id: "display-1", x: 1, y: 2, width: 3, height: 4 }, capture_interval_ms: 500, difference_threshold: 0.03 };
     await startLiveTranslation(config);
     expect(invoke).toHaveBeenCalledWith("start_live_translation", { config });
+  });
+
+  it("passes the confirmation mode alongside the region", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    const region = { monitor_id: "display-1", x: 0, y: 10, width: 80, height: 40 };
+    await updateLiveRegion(region, "single");
+    // 后端参数为 `region` / `mode`，Tauri 2 默认映射为同名 camelCase。
+    expect(invoke).toHaveBeenCalledWith("update_live_region", { region, mode: "single" });
+
+    invoke.mockResolvedValueOnce(undefined);
+    await updateLiveRegion(region, "live");
+    expect(invoke).toHaveBeenCalledWith("update_live_region", { region, mode: "live" });
   });
 
   it("passes the source language under the command argument name", async () => {
