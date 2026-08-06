@@ -22,11 +22,12 @@
       {
         "label": "result",
         "title": "VTrans Result",
-        "width": 400,
-        "height": 300,
+        "width": 360,
+        "height": 140,
         "resizable": true,
         "visible": false,
-        "alwaysOnTop": true
+        "alwaysOnTop": true,
+        "transparent": true
       },
       {
         "label": "selector",
@@ -49,6 +50,20 @@
         "focusable": false,
         "shadow": false,
         "resizable": false
+      },
+      {
+        "label": "floater",
+        "title": "VTrans Floater",
+        "width": 48,
+        "height": 48,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "shadow": false,
+        "focus": false,
+        "visible": false
       }
     ],
     "security": {
