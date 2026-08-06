@@ -5,6 +5,7 @@ import { hideRegionOverlay } from "../services/regionOverlay";
 import {
   cancelRegionSelection,
   getAppStatus,
+  getIpcErrorMessage,
   toPhysicalRegion,
   updateLiveRegion,
 } from "../services/tauri";
@@ -33,7 +34,11 @@ export function RegionSelector() {
       .then((snapshot) => {
         if (active) useAppStore.getState().applyStatus(snapshot);
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        // 同步失败非致命：保持 store 现状，默认 single 是安全降级
+        // （不显示方框）；只记录脱敏信息便于排查。
+        console.warn(`[vtrans] selector mode sync failed: ${getIpcErrorMessage(error)}`);
+      });
     return () => {
       active = false;
     };
