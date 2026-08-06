@@ -27,8 +27,9 @@ describe("FloatingBall", () => {
     const html = renderToStaticMarkup(<FloatingBall />);
     expect(html).toContain('aria-label="悬浮球"');
     expect(html).toContain('data-testid="floating-ball"');
-    // deep 让点击球体任意位置（含图标）都能拖动窗口。
-    expect(html).toContain('data-tauri-drag-region="deep"');
+    // Bug 2：不再依赖 data-tauri-drag-region（deep 会吞掉点击），
+    // 拖动与点击由手动判别（mousedown/mousemove 阈值）完成。
+    expect(html).not.toContain("data-tauri-drag-region");
     expect(html).not.toContain("框选翻译");
     expect(html).not.toContain('data-testid="floating-ball-menu"');
   });

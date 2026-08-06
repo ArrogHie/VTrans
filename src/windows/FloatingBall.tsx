@@ -28,6 +28,7 @@ import {
   FLOATER_SIZE_MAX,
   FLOATER_SIZE_MIN,
 } from "../types";
+import { createFloaterDragHandlers } from "../utils/floaterDrag";
 import { clampFloaterPosition, loadFloaterPosition, saveFloaterPosition } from "../utils/floaterPosition";
 import { applyFloaterVisibility } from "../utils/floaterVisibility";
 
@@ -118,6 +119,12 @@ export function FloatingBallAppearanceControls({
  * diameter and background alpha come from `floating_ball.size_px` /
  * `floating_ball.opacity` and are applied as CSS custom properties; the
  * collapsed window size and the expanded menu size follow the diameter.
+ *
+ * Dragging and clicking share the button: a press is classified as a drag
+ * once the pointer moves past the 4 px threshold (`FLOATER_DRAG_THRESHOLD_PX`,
+ * native `startDragging`), and as a click otherwise (menu toggle). Tauri's
+ * `data-tauri-drag-region` attribute is deliberately not used here because
+ * it would swallow clicks.
  *
  * `initialOpen` is a test seam only; production always starts collapsed.
  */
@@ -277,6 +284,17 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
     await collapseMenu();
   };
 
+  const dragHandlers = createFloaterDragHandlers({
+    // 位移超过阈值才启动原生窗口拖动；失败静默（拖动是便利功能）。
+    startDragging: () => {
+      const tauriWindow = getFloaterWindow();
+      if (!tauriWindow) return;
+      void tauriWindow.startDragging().catch(() => undefined);
+    },
+    // 仅未拖动（点击）时展开/收起菜单。
+    onToggle: () => void (open ? collapseMenu() : expandMenu()),
+  });
+
   return (
     <main
       ref={rootRef}
@@ -285,8 +303,10 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
     >
       <button
         type="button"
-        data-tauri-drag-region="deep"
-        onClick={() => void (open ? collapseMenu() : expandMenu())}
+        onClick={dragHandlers.onClick}
+        onMouseDown={dragHandlers.onMouseDown}
+        onMouseMove={dragHandlers.onMouseMove}
+        onMouseUp={dragHandlers.onMouseUp}
         className="floater-ball absolute left-0 top-0 flex items-center justify-center rounded-full text-white shadow-lg ring-2 ring-white/70 transition hover:brightness-110"
         title="VTrans 悬浮球"
         aria-expanded={open}
