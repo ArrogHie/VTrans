@@ -11,6 +11,7 @@ import {
 import { getIpcErrorMessage, showResultWindow } from "./services/tauri";
 import { hideRegionOverlay } from "./services/regionOverlay";
 import { useAppStore } from "./stores/appStore";
+import { FloatingBall } from "./windows/FloatingBall";
 import { MainWindow } from "./windows/MainWindow";
 import { OverlayWindow } from "./windows/OverlayWindow";
 import { RegionSelector } from "./windows/RegionSelector";
@@ -26,6 +27,7 @@ export function App() {
   if (label === "selector") return <RegionSelector />;
   if (label === "result") return <ResultWindow />;
   if (label === "overlay") return <OverlayWindow />;
+  if (label === "floater") return <FloatingBall />;
   return <MainWindow />;
 }
 

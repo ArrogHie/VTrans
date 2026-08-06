@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Save } from "lucide-react";
+import { publishFrontendFloaterEnabled } from "../services/events";
 import { getIpcErrorMessage, saveSettings, setApiKey } from "../services/tauri";
 import type {
   AppConfig,
@@ -7,6 +8,12 @@ import type {
   HotkeyConfig,
   ResultWindowConfig,
   TranslationConfig,
+} from "../types";
+import {
+  RESULT_FONT_SIZE_MAX,
+  RESULT_FONT_SIZE_MIN,
+  RESULT_OPACITY_MAX,
+  RESULT_OPACITY_MIN,
 } from "../types";
 
 interface SettingsPanelProps {
@@ -41,6 +48,14 @@ export function validateSettings(config: AppConfig): string | null {
   }
   for (const value of Object.values(config.hotkeys)) {
     if (value.trim() === "") return "快捷键不能为空";
+  }
+  const opacity = config.result_window.opacity;
+  if (!Number.isFinite(opacity) || opacity < RESULT_OPACITY_MIN || opacity > RESULT_OPACITY_MAX) {
+    return `背景透明度必须在 ${RESULT_OPACITY_MIN} 到 ${RESULT_OPACITY_MAX} 之间`;
+  }
+  const fontSize = config.result_window.font_size_px;
+  if (!Number.isInteger(fontSize) || fontSize < RESULT_FONT_SIZE_MIN || fontSize > RESULT_FONT_SIZE_MAX) {
+    return `字体大小必须是 ${RESULT_FONT_SIZE_MIN} 到 ${RESULT_FONT_SIZE_MAX} 的整数（像素）`;
   }
   return null;
 }
@@ -77,12 +92,21 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
     markDirty();
     setDraft((current) => ({ ...current, hotkeys: { ...current.hotkeys, [key]: value } }));
   };
-  const setResultWindow = (key: keyof ResultWindowConfig, value: boolean) => {
+  const setResultWindow = (key: keyof ResultWindowConfig, value: boolean | number) => {
     markDirty();
     setDraft((current) => ({
       ...current,
       result_window: { ...current.result_window, [key]: value },
     }));
+  };
+  const toggleFloatingBall = (enabled: boolean) => {
+    markDirty();
+    setDraft((current) => ({
+      ...current,
+      floating_ball: { ...current.floating_ball, enabled },
+    }));
+    // 切换即时生效，不等待保存；这是纯前端事件，不经过 Rust。
+    void publishFrontendFloaterEnabled(enabled);
   };
 
   const save = async () => {
@@ -279,6 +303,45 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
           />
           结果窗口默认置顶
         </label>
+
+        <label className="flex items-center gap-2 text-sm text-slate-600">
+          <input
+            type="checkbox"
+            checked={draft.floating_ball.enabled}
+            onChange={(event) => toggleFloatingBall(event.target.checked)}
+            className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+          />
+          显示悬浮球（即时生效）
+        </label>
+
+        <div className="grid grid-cols-2 gap-3 rounded-lg border border-slate-100 p-3">
+          <label className="flex flex-col gap-1">
+            <span className={labelClass}>弹窗背景透明度</span>
+            <input
+              type="range"
+              min={RESULT_OPACITY_MIN}
+              max={RESULT_OPACITY_MAX}
+              step={0.05}
+              value={draft.result_window.opacity}
+              onChange={(event) => setResultWindow("opacity", Number(event.target.value))}
+              className="accent-indigo-600"
+            />
+            <span className="text-[11px] text-slate-400">{draft.result_window.opacity.toFixed(2)}</span>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={labelClass}>弹窗字体大小</span>
+            <input
+              type="range"
+              min={RESULT_FONT_SIZE_MIN}
+              max={RESULT_FONT_SIZE_MAX}
+              step={1}
+              value={draft.result_window.font_size_px}
+              onChange={(event) => setResultWindow("font_size_px", Number(event.target.value))}
+              className="accent-indigo-600"
+            />
+            <span className="text-[11px] text-slate-400">{draft.result_window.font_size_px}px</span>
+          </label>
+        </div>
 
         {saveError && (
           <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700" role="alert">

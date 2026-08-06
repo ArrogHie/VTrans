@@ -1,13 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 
 const listen = vi.fn();
-vi.mock("@tauri-apps/api/event", () => ({ listen }));
+const emit = vi.fn();
+vi.mock("@tauri-apps/api/event", () => ({ emit, listen }));
 
 const {
+  FRONTEND_FLOATER_ENABLED,
   listenToEvent,
+  listenToFrontendFloaterEnabled,
   onOcrCompleted,
   onPipelineError,
   onTranslationCompleted,
+  publishFrontendFloaterEnabled,
 } = await import("../services/events");
 
 describe("event service", () => {
@@ -66,5 +70,23 @@ describe("event service", () => {
     });
     await onPipelineError(callback);
     expect(callback).toHaveBeenCalledWith("识别超时");
+  });
+
+  it("publishes floating ball visibility as a frontend-only event", async () => {
+    await publishFrontendFloaterEnabled(true);
+    expect(emit).toHaveBeenCalledWith(FRONTEND_FLOATER_ENABLED, { enabled: true });
+    expect(FRONTEND_FLOATER_ENABLED).toBe("frontend_floater_enabled");
+  });
+
+  it("listens to floating ball visibility changes", async () => {
+    const callback = vi.fn();
+    listen.mockImplementationOnce(
+      async (_name: string, handler: (event: { payload: unknown }) => void) => {
+        handler({ payload: { enabled: false } });
+        return vi.fn();
+      },
+    );
+    await listenToFrontendFloaterEnabled(callback);
+    expect(callback).toHaveBeenCalledWith({ enabled: false });
   });
 });

@@ -8,27 +8,24 @@ import { ResultCard } from "../components/ResultCard";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { StatusBar } from "../components/StatusBar";
 import { useDebugFrame } from "../hooks/useDebugFrame";
-import { hideRegionOverlay, showRegionOverlay } from "../services/regionOverlay";
+import { showRegionOverlay } from "../services/regionOverlay";
 import {
-  captureOnce,
   getAppConfig,
   getAppStatus,
   getIpcErrorMessage,
-  isRegionSelectionCancelled,
   loadLocalModels,
-  publishFrontendLiveConfig,
-  publishFrontendLivePaused,
-  publishFrontendLiveStopped,
-  publishFrontendOcrResult,
   setOcrLanguage,
   setSourceLanguage,
   setTargetLanguage,
   setTranslationProvider,
-  showResultWindow,
-  startLiveTranslation,
-  startRegionSelection,
-  stopLiveTranslation,
 } from "../services/tauri";
+import {
+  selectAndTranslateOnce,
+  selectRegionForLive,
+  startLive,
+  stopLive as stopLiveSession,
+  toggleLivePause,
+} from "../services/translateActions";
 import { useAppStore } from "../stores/appStore";
 import { regionPreviewBox } from "../utils/regionPreview";
 import { shouldRestoreOverlay } from "../utils/overlayVisibility";
@@ -51,7 +48,7 @@ const TARGET_LANGUAGES = [
 export function MainWindow() {
   const {
     mode, status, error, selectedRegion, config, modelProgress, liveConfig, livePaused,
-    setMode, setStatus, setSelectedRegion, setOcrResult, setProvider, setLiveConfig, setLivePaused, setConfig, updateLanguage,
+    setMode, setStatus, setSelectedRegion, setProvider, setConfig, updateLanguage,
   } = useAppStore();
   const ocrResult = useAppStore((state) => state.ocrResult);
   const translationResult = useAppStore((state) => state.translationResult);
@@ -95,85 +92,19 @@ export function MainWindow() {
 
   const selectRegion = async () => {
     setBusy(true);
-    // 重新选区期间不保留旧方框。
-    void hideRegionOverlay();
-    // 选区期间暂停实时任务，避免旧区域在框选过程中持续触发识别。
-    const liveWasRunning = mode === "live" && !livePaused && Boolean(liveConfig);
-    if (liveWasRunning) {
-      setLivePaused(true);
-      try {
-        await stopLiveTranslation();
-        void publishFrontendLivePaused();
-      } catch (ipcError) {
-        setLivePaused(false);
-        setStatus({ error: getIpcErrorMessage(ipcError) });
-        setBusy(false);
-        return;
-      }
-    }
-    setStatus(liveWasRunning ? "idle" : "capturing");
     try {
-      const region = await startRegionSelection();
-      setSelectedRegion(region);
-      if (mode === "single") {
-        const result = await captureOnce(region);
-        setOcrResult(result);
-        void publishFrontendOcrResult(result);
-        setStatus("completed");
-        // 单次翻译完成后常驻选区方框必须隐藏。后端在单次捕获结束也会
-        // 隐藏，这里显式执行一次，保证任何路径下都不残留。
-        void hideRegionOverlay();
-        void showResultWindow();
-      } else {
-        if (!liveConfig) {
-          setStatus("idle");
-          return;
-        }
-        const updatedLiveConfig = { ...liveConfig, region };
-        setLiveConfig(updatedLiveConfig);
-        if (liveWasRunning) {
-          await startLiveTranslation(updatedLiveConfig);
-          setLivePaused(false);
-          setStatus("capturing");
-        } else {
-          setLivePaused(false);
-          setStatus("idle");
-        }
-        void publishFrontendLiveConfig(updatedLiveConfig);
-      }
-    } catch (ipcError) {
-      if (isRegionSelectionCancelled(ipcError)) {
-        // Esc 取消选区是正常操作；实时会话保持暂停，等待用户恢复。
-        setStatus("idle");
-      } else {
-        setStatus({ error: getIpcErrorMessage(ipcError) });
-      }
+      // 单次模式：框选并翻译；实时模式：框选后启动/重启实时会话。
+      // 状态机与错误处理统一由 translateActions 服务承担，与悬浮球共用。
+      await (mode === "single" ? selectAndTranslateOnce() : selectRegionForLive());
     } finally {
       setBusy(false);
     }
   };
 
   const runLive = async () => {
-    if (!selectedRegion) {
-      setStatus({ error: "请先选择翻译区域" });
-      return;
-    }
-    if (liveConfig && !livePaused) return;
     setBusy(true);
     try {
-      const liveConfig = {
-        region: selectedRegion,
-        capture_interval_ms: config.capture.interval_ms,
-        difference_threshold: config.capture.difference_threshold,
-      };
-      await startLiveTranslation(liveConfig);
-      setLiveConfig(liveConfig);
-      setLivePaused(false);
-      void publishFrontendLiveConfig(liveConfig);
-      setMode("live");
-      setStatus("capturing");
-    } catch (ipcError) {
-      setStatus({ error: getIpcErrorMessage(ipcError) });
+      await startLive();
     } finally {
       setBusy(false);
     }
@@ -182,22 +113,7 @@ export function MainWindow() {
   const togglePause = async () => {
     setBusy(true);
     try {
-      if (livePaused) {
-        if (!liveConfig) return;
-        await startLiveTranslation(liveConfig);
-        setLivePaused(false);
-        setStatus("capturing");
-        void publishFrontendLiveConfig(liveConfig);
-      } else {
-        setLivePaused(true);
-        await stopLiveTranslation();
-        setStatus("idle");
-        void publishFrontendLivePaused();
-      }
-    } catch (ipcError) {
-      // 无论暂停还是恢复失败，都回滚到操作前的暂停状态。
-      setLivePaused(livePaused);
-      setStatus({ error: getIpcErrorMessage(ipcError) });
+      await toggleLivePause();
     } finally {
       setBusy(false);
     }
@@ -206,17 +122,7 @@ export function MainWindow() {
   const stopLive = async () => {
     setBusy(true);
     try {
-      void hideRegionOverlay();
-      if (liveConfig && !livePaused) {
-        await stopLiveTranslation();
-      }
-      void publishFrontendLiveStopped();
-      setLiveConfig(null);
-      setLivePaused(false);
-      setStatus("idle");
-      setMode("single");
-    } catch (ipcError) {
-      setStatus({ error: getIpcErrorMessage(ipcError) });
+      await stopLiveSession();
     } finally {
       setBusy(false);
     }
