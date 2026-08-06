@@ -9,7 +9,8 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
 - 翻译结果迷你条：译文为主、原文可折叠，支持置顶/暂停/重新翻译/外观/关闭；外观
   （背景透明度 0.3–1.0、字号 12–24px）即时生效并持久化；每个 WebView 独立
   水合 `get_app_config`，重启后保持用户保存值，不依赖主窗口。
-- 悬浮球（默认关闭）：可拖动、位置记忆，点击展开框选翻译/实时翻译/暂停继续/打开主窗口菜单。
+- 悬浮球（默认关闭）：可拖动、位置记忆，点击展开框选翻译/实时翻译/暂停继续/打开主窗口
+  菜单；支持透明度（0.3–1.0）与直径（32–72px）外观调节，即时生效并持久化。
 - 通过拖动框选生成物理像素坐标的 `ScreenRegion`。
 - 监听后端 pipeline/model 事件，并在多个 Tauri WebView 间同步结果和实时会话状态。
 - 展示 OCR 原文和翻译结果，支持重新翻译、暂停/继续、置顶和窗口拖动。
@@ -45,10 +46,14 @@ export function captureOnce(region: ScreenRegion): Promise<OcrResult>;
 export function startLiveTranslation(config: PipelineConfig): Promise<void>;
 export function stopLiveTranslation(): Promise<void>;
 export function saveSettings(settings: AppConfig): Promise<void>;
+export function updateResultWindowAppearance(opacity: number, fontSizePx: number): Promise<void>;
+export function updateFloatingBallAppearance(opacity: number, sizePx: number): Promise<void>;
 export function getAppStatus(): Promise<AppStatus>;
 ```
 
 其余命令封装包括 `cancelRegionSelection`、`updateLiveRegion`、`setOcrLanguage`、`setTranslationProvider` 和 `loadLocalModels`。
+两个外观命令只持久化对应字段，不获取实时会话锁、不重建翻译 provider，
+实时运行中也可以保存（替代整包 `save_settings` 路径）。
 
 ### Event service
 
@@ -102,14 +107,21 @@ export function applyResultAppearance(
   fontSizePx: number,
 ): void;
 export function persistResultAppearance(
-  config: AppConfig,
   opacity: number,
   fontSizePx: number,
-): Promise<AppConfig>;
+): Promise<void>;
 export function applyHydratedAppearance(
   config: Pick<AppConfig, "result_window">,
   root?: { style: { setProperty(name: string, value: string): void } } | null,
 ): { opacity: number; fontSizePx: number };
+export function clampFloaterOpacity(value: number): number;
+export function clampFloaterSizePx(value: number): number;
+export function applyFloaterAppearance(
+  root: { style: { setProperty(name: string, value: string): void } },
+  opacity: number,
+  sizePx: number,
+): void;
+export function persistFloaterAppearance(opacity: number, sizePx: number): Promise<void>;
 export function clampFloaterPosition(
   position: FloaterPosition,
   monitors: readonly FloaterMonitor[],
@@ -173,9 +185,15 @@ pnpm tauri dev
 - DebugPanel 渲染：「Debug 模式 · 仅显示不保存」文案、缩略图 data URL、坐标/尺寸/帧号/
   时间戳叠加、可选 OCR 对照行的展示与截断。
 - 结果窗口外观：透明度/字号 clamp、CSS 变量即时应用（不涉及任何窗口 opacity API）、
-  `save_settings` 持久化。
+  经 `update_result_window_appearance` 持久化（不走整包 `save_settings`）。
+- 迷你条字体变量：译文/原文不再携带 `text-sm`/`text-xs` 覆盖类，字号统一由
+  `--result-font-size` 控制（SSR 渲染断言）。
+- 无边框迷你条：顶栏整体拖动区域、独立关闭按钮样式、圆角壳。
+- 悬浮球外观：透明度/直径 clamp、CSS 变量即时应用（无窗口 opacity API）、
+  经 `update_floating_ball_appearance` 持久化。
+- 悬浮球滚动条：容器 `overflow-hidden`，展开菜单与窗口高度按直径动态适配。
 - 悬浮球：位置 clamp 与 localStorage 记忆、显隐事件（`frontend_floater_enabled`）链路、
-  菜单动作（框选翻译/实时启停/暂停继续）经 mock IPC 覆盖。
+  菜单动作（框选翻译/实时启停/暂停继续/外观滑杆）经 mock IPC 覆盖。
 - 浮球路由与折叠态渲染、窗口路由（`floater` label → FloatingBall）。
 - 设置面板范围校验：背景透明度 0.3–1.0、字号 12–24 整数，拒绝越界与非整数。
 - 后端 provider id（`"api"` / `"local-onnx"`）到前端配置标识符的映射与未知值回退。
@@ -200,10 +218,13 @@ pnpm tauri dev
 | 窗口控制 | 拖动/缩放主窗口与结果窗口，切换结果窗口置顶 | 窗口可拖动、可缩放；置顶开关即时生效 |
 | 迷你条外观 | 拖动「外观」里的透明度/字号滑块 | 弹窗背景立即变半透明（桌面透出）、译文字号即时变化；保存后重启仍生效 |
 | 迷你条外观水合 | 保存 0.8/18 后重启应用并打开结果窗口 | 结果窗口启动即显示 0.8/18（滑块值与背景/字号一致），无需打开主窗口 |
+| 无边框迷你条拖动 | 按住迷你条顶栏（VTRANS 标识与周围区域）拖动 | 整个顶栏都可拖动窗口；置顶/暂停/重新翻译/外观/关闭按钮仍可点击 |
+| 迷你条关闭按钮 | 悬停顶栏最右侧关闭按钮 | 按钮背景变红、图标变白；点击隐藏窗口 |
 | 迷你条原文折叠 | 点击迷你条「原文」行 | 原文默认收起，点击展开/再点收起；译文始终为主体 |
 | 浮球显隐 | 主窗口设置面板切换「显示悬浮球」 | 切换后浮球立即出现/消失（不重启），重启后按保存的配置显示 |
 | 浮球拖动与位置 | 拖动悬浮球到屏幕边缘，关闭菜单后重启应用 | 浮球停留在上次位置；显示器变化后自动夹回可见区域 |
 | 浮球菜单 | 点击浮球，分别执行框选翻译/实时翻译/暂停继续/打开主窗口 | 四项动作分别触发对应主流程；实时状态文案随会话变化 |
+| 浮球外观 | 展开浮球菜单调节透明度/大小，或在主窗口设置面板拖动同款滑块 | 球背景立即变半透明、直径即时变化，展开/收起均无滚动条；保存后重启仍生效 |
 | Debug 帧显示 | 以 `--debug` 或 `VTRANS_DEBUG=1` 启动，开启实时翻译或单次翻译 | 主窗口出现「Debug 模式 · 仅显示不保存」面板，缩略图随捕获帧实时更新；正常启动时主窗口无该区块 |
 | Debug 退出清理 | Debug 模式下停止翻译并退出应用 | 面板帧数据随窗口销毁释放，不落盘、不写入日志、不进入结果窗口 |
 
@@ -225,13 +246,18 @@ pnpm tauri dev
    由于后端无法区分「暂停」与「停止」，停止后 `get_app_status` 仍可能报告 `live`；
    前端在打开选区窗口时会主动拉取一次状态以同步真实模式，拉取失败时按 `single`
    安全降级（不显示方框），下一次选区确认或单次捕获会立即纠正。
-10. 结果窗口透明度完全由 CSS 背景 alpha 实现（`--result-opacity`，0.3–1.0）：Tauri 2.11.5
-    无窗口级 opacity 能力（Rust/JS/ACL 均无），前端不调用任何 `setOpacity` 类 API；
-    文字不参与淡出，仅背景半透明。外观保存走整包 `save_settings`，滑块改动防抖 350ms。
+10. 结果窗口与悬浮球透明度完全由 CSS 背景 alpha 实现（`--result-opacity` /
+    `--floater-opacity`）：Tauri 2.11.5 无窗口级 opacity 能力（Rust/JS/ACL 均无），
+    前端不调用任何 `setOpacity` 类 API；文字不参与淡出，仅背景半透明。外观保存走
+    `update_result_window_appearance` / `update_floating_ball_appearance` 专用命令
+    （不再整包 `save_settings`），滑块改动防抖 350ms，实时会话运行期间也可保存。
     每个 WebView 的 Zustand store 相互隔离：result/floater 均在挂载时自行
-    `get_app_config` 水合（ResultWindow 应用外观、FloatingBall 控制显隐），
-    不依赖主窗口；`DEFAULT_CONFIG.version` 与后端 `CURRENT_CONFIG_VERSION`（2）
+    `get_app_config` 水合（ResultWindow 应用外观、FloatingBall 控制显隐与外观），
+    不依赖主窗口；`DEFAULT_CONFIG.version` 与后端 `CURRENT_CONFIG_VERSION`（3）
     保持一致，避免未水合即保存被后端校验拒绝。
-11. 悬浮球默认关闭（`floating_ball.enabled`）；位置记忆存于 localStorage
-    （`vtrans.floater.position`），显示器拓扑变化时按首个可用显示器兜底。浮球窗口
-    `focus: false`，展开菜单通过编程式放大窗口实现，菜单为紧凑四项。
+11. 悬浮球默认关闭（`floating_ball.enabled`），直径与透明度（`size_px` 32–72、
+    `opacity` 0.3–1.0）由 CSS 变量 `--floater-size` / `--floater-opacity` 驱动，
+    折叠窗口尺寸、位置 clamp 与展开菜单高度随直径动态适配；展开/收起容器
+    `overflow-hidden`，无滚动条。位置记忆存于 localStorage（`vtrans.floater.position`），
+    显示器拓扑变化时按首个可用显示器兜底。浮球窗口 `focus: false`，展开菜单通过
+    编程式放大窗口实现，菜单为四项动作 + 外观小控制。

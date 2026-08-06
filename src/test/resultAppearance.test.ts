@@ -1,6 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_CONFIG } from "../types";
-
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
@@ -61,19 +59,23 @@ describe("applyResultAppearance", () => {
 });
 
 describe("persistResultAppearance", () => {
-  it("persists clamped appearance through save_settings", async () => {
+  it("persists clamped appearance through the dedicated backend command", async () => {
     invoke.mockResolvedValueOnce(undefined);
-    const config = structuredClone(DEFAULT_CONFIG);
-    const next = await persistResultAppearance(config, 0.55, 20);
-    expect(next.result_window.opacity).toBe(0.55);
-    expect(next.result_window.font_size_px).toBe(20);
+    await persistResultAppearance(0.55, 20);
+    // 不再走整包 save_settings：只携带 opacity / fontSizePx 两个参数，
+    // 实时会话运行期间也可以保存。
     expect(invoke).toHaveBeenCalledWith(
-      "save_settings",
-      expect.objectContaining({
-        settings: expect.objectContaining({
-          result_window: expect.objectContaining({ opacity: 0.55, font_size_px: 20 }),
-        }),
-      }),
+      "update_result_window_appearance",
+      { opacity: 0.55, fontSizePx: 20 },
+    );
+  });
+
+  it("clamps out-of-range values before invoking the command", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await persistResultAppearance(0.05, 40);
+    expect(invoke).toHaveBeenCalledWith(
+      "update_result_window_appearance",
+      { opacity: 0.3, fontSizePx: 24 },
     );
   });
 });

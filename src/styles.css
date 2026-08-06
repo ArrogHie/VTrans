@@ -23,8 +23,17 @@
   .primary-button { @apply inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50; }
   .secondary-button { @apply inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50; }
   .icon-button { @apply inline-flex items-center justify-center rounded-lg p-2 text-slate-400 transition hover:bg-slate-100 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-40; }
+  /* 无边框迷你条：关闭按钮在顶栏右侧，悬停给出明确的危险色反馈。 */
+  .result-close-button { @apply inline-flex items-center justify-center rounded-lg p-2 text-slate-400 transition hover:bg-red-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-40; }
   /* 迷你条弹窗：背景 alpha（0.3–1.0）由 CSS 变量控制，文字不淡出。 */
   .result-mini-bar { background: rgba(248, 250, 252, var(--result-opacity, 0.95)); }
   .result-text { font-size: var(--result-font-size, 14px); }
+  /* 悬浮球：背景 alpha（0.3–1.0）与直径由 CSS 变量控制（无窗口 opacity API）。 */
+  .floater-ball {
+    background: rgba(79, 70, 229, var(--floater-opacity, 1));
+    width: var(--floater-size, 48px);
+    height: var(--floater-size, 48px);
+  }
+  .floater-menu-panel { top: var(--floater-size, 48px); }
   .floater-menu-item { @apply flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-slate-600 transition hover:bg-indigo-50 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40; }
 }

@@ -12,7 +12,9 @@ const {
   setSourceLanguage,
   setTargetLanguage,
   startLiveTranslation,
+  updateFloatingBallAppearance,
   updateLiveRegion,
+  updateResultWindowAppearance,
 } = await import("../services/tauri");
 
 describe("tauri IPC service", () => {
@@ -78,5 +80,27 @@ describe("tauri IPC service", () => {
     invoke.mockResolvedValueOnce({});
     await getAppConfig();
     expect(invoke).toHaveBeenCalledWith("get_app_config", undefined);
+  });
+
+  it("passes the mini-bar appearance under Tauri camelCase argument names", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await updateResultWindowAppearance(0.8, 18);
+    // 后端参数为 `opacity` / `font_size_px`，Tauri 2 默认映射为
+    // camelCase `opacity` / `fontSizePx`。
+    expect(invoke).toHaveBeenCalledWith("update_result_window_appearance", {
+      opacity: 0.8,
+      fontSizePx: 18,
+    });
+  });
+
+  it("passes the floating ball appearance under Tauri camelCase argument names", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await updateFloatingBallAppearance(0.75, 56);
+    // 后端参数为 `opacity` / `size_px`，Tauri 2 默认映射为
+    // camelCase `opacity` / `sizePx`。
+    expect(invoke).toHaveBeenCalledWith("update_floating_ball_appearance", {
+      opacity: 0.75,
+      sizePx: 56,
+    });
   });
 });

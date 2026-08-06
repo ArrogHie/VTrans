@@ -19,14 +19,19 @@ describe("frontend contracts", () => {
     expect(DEFAULT_CONFIG.result_window.always_on_top).toBe(true);
     expect(DEFAULT_CONFIG.result_window.opacity).toBe(0.95);
     expect(DEFAULT_CONFIG.result_window.font_size_px).toBe(14);
+  });
+
+  it("uses the backend-compatible floating ball defaults", () => {
     expect(DEFAULT_CONFIG.floating_ball.enabled).toBe(false);
+    expect(DEFAULT_CONFIG.floating_ball.opacity).toBe(1);
+    expect(DEFAULT_CONFIG.floating_ball.size_px).toBe(48);
   });
 
   it("matches the backend config schema version", () => {
-    // 与 vtrans-config 的 CURRENT_CONFIG_VERSION（2）保持一致：任何
+    // 与 vtrans-config 的 CURRENT_CONFIG_VERSION（3）保持一致：任何
     // “未水合即保存”路径都必须携带后端接受的版本，否则 save_settings
     // 会被校验拒绝。
-    expect(DEFAULT_CONFIG.version).toBe(2);
+    expect(DEFAULT_CONFIG.version).toBe(3);
   });
 
   it("matches the model verification report shape", () => {

@@ -2,14 +2,24 @@ import { useState } from "react";
 import { Save } from "lucide-react";
 import { publishFrontendFloaterEnabled } from "../services/events";
 import { getIpcErrorMessage, saveSettings, setApiKey } from "../services/tauri";
+import {
+  clampFloaterOpacity,
+  clampFloaterSizePx,
+  persistFloaterAppearance,
+} from "../services/floaterAppearance";
 import type {
   AppConfig,
   CaptureConfig,
+  FloatingBallConfig,
   HotkeyConfig,
   ResultWindowConfig,
   TranslationConfig,
 } from "../types";
 import {
+  FLOATER_OPACITY_MAX,
+  FLOATER_OPACITY_MIN,
+  FLOATER_SIZE_MAX,
+  FLOATER_SIZE_MIN,
   RESULT_FONT_SIZE_MAX,
   RESULT_FONT_SIZE_MIN,
   RESULT_OPACITY_MAX,
@@ -57,6 +67,14 @@ export function validateSettings(config: AppConfig): string | null {
   if (!Number.isInteger(fontSize) || fontSize < RESULT_FONT_SIZE_MIN || fontSize > RESULT_FONT_SIZE_MAX) {
     return `字体大小必须是 ${RESULT_FONT_SIZE_MIN} 到 ${RESULT_FONT_SIZE_MAX} 的整数（像素）`;
   }
+  const floaterOpacity = config.floating_ball.opacity;
+  if (!Number.isFinite(floaterOpacity) || floaterOpacity < FLOATER_OPACITY_MIN || floaterOpacity > FLOATER_OPACITY_MAX) {
+    return `悬浮球透明度必须在 ${FLOATER_OPACITY_MIN} 到 ${FLOATER_OPACITY_MAX} 之间`;
+  }
+  const floaterSize = config.floating_ball.size_px;
+  if (!Number.isInteger(floaterSize) || floaterSize < FLOATER_SIZE_MIN || floaterSize > FLOATER_SIZE_MAX) {
+    return `悬浮球大小必须是 ${FLOATER_SIZE_MIN} 到 ${FLOATER_SIZE_MAX} 的整数（像素）`;
+  }
   return null;
 }
 
@@ -99,6 +117,13 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
       result_window: { ...current.result_window, [key]: value },
     }));
   };
+  const setFloatingBall = (key: keyof FloatingBallConfig, value: boolean | number) => {
+    markDirty();
+    setDraft((current) => ({
+      ...current,
+      floating_ball: { ...current.floating_ball, [key]: value },
+    }));
+  };
   const toggleFloatingBall = (enabled: boolean) => {
     markDirty();
     setDraft((current) => ({
@@ -107,6 +132,21 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
     }));
     // 切换即时生效，不等待保存；这是纯前端事件，不经过 Rust。
     void publishFrontendFloaterEnabled(enabled);
+  };
+  const changeFloaterOpacity = (value: number) => {
+    const next = clampFloaterOpacity(value);
+    setFloatingBall("opacity", next);
+    // 外观即时持久化，不走整包 save_settings，实时会话期间也可保存。
+    void persistFloaterAppearance(next, draft.floating_ball.size_px).catch((error) =>
+      console.warn(`[vtrans] floating ball appearance persist failed: ${getIpcErrorMessage(error)}`),
+    );
+  };
+  const changeFloaterSize = (value: number) => {
+    const next = clampFloaterSizePx(value);
+    setFloatingBall("size_px", next);
+    void persistFloaterAppearance(draft.floating_ball.opacity, next).catch((error) =>
+      console.warn(`[vtrans] floating ball appearance persist failed: ${getIpcErrorMessage(error)}`),
+    );
   };
 
   const save = async () => {
@@ -313,6 +353,35 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
           />
           显示悬浮球（即时生效）
         </label>
+
+        <div className="grid grid-cols-2 gap-3 rounded-lg border border-slate-100 p-3">
+          <label className="flex flex-col gap-1">
+            <span className={labelClass}>悬浮球透明度</span>
+            <input
+              type="range"
+              min={FLOATER_OPACITY_MIN}
+              max={FLOATER_OPACITY_MAX}
+              step={0.05}
+              value={draft.floating_ball.opacity}
+              onChange={(event) => changeFloaterOpacity(Number(event.target.value))}
+              className="accent-indigo-600"
+            />
+            <span className="text-[11px] text-slate-400">{draft.floating_ball.opacity.toFixed(2)}</span>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className={labelClass}>悬浮球大小</span>
+            <input
+              type="range"
+              min={FLOATER_SIZE_MIN}
+              max={FLOATER_SIZE_MAX}
+              step={1}
+              value={draft.floating_ball.size_px}
+              onChange={(event) => changeFloaterSize(Number(event.target.value))}
+              className="accent-indigo-600"
+            />
+            <span className="text-[11px] text-slate-400">{draft.floating_ball.size_px}px</span>
+          </label>
+        </div>
 
         <div className="grid grid-cols-2 gap-3 rounded-lg border border-slate-100 p-3">
           <label className="flex flex-col gap-1">

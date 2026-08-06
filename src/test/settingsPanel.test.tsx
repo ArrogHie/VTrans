@@ -64,6 +64,27 @@ describe("validateSettings", () => {
     config.result_window.font_size_px = 14.5;
     expect(validateSettings(config)).toContain("字体大小");
   });
+
+  it("rejects a floating ball opacity outside 0.3..1.0", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.floating_ball.opacity = 0.2;
+    expect(validateSettings(config)).toContain("悬浮球透明度");
+
+    config.floating_ball.opacity = 1.1;
+    expect(validateSettings(config)).toContain("悬浮球透明度");
+  });
+
+  it("rejects a floating ball size outside 32..72 or non-integer", () => {
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.floating_ball.size_px = 24;
+    expect(validateSettings(config)).toContain("悬浮球大小");
+
+    config.floating_ball.size_px = 80;
+    expect(validateSettings(config)).toContain("悬浮球大小");
+
+    config.floating_ball.size_px = 48.5;
+    expect(validateSettings(config)).toContain("悬浮球大小");
+  });
 });
 
 describe("SettingsPanel", () => {
@@ -80,6 +101,8 @@ describe("SettingsPanel", () => {
     expect(html).toContain("保存 Key");
     expect(html).toContain("保存设置");
     expect(html).toContain("显示悬浮球");
+    expect(html).toContain("悬浮球透明度");
+    expect(html).toContain("悬浮球大小");
     expect(html).toContain("弹窗背景透明度");
     expect(html).toContain("弹窗字体大小");
   });

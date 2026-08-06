@@ -5,7 +5,7 @@ import {
   RESULT_OPACITY_MAX,
   RESULT_OPACITY_MIN,
 } from "../types";
-import { saveSettings } from "./tauri";
+import { updateResultWindowAppearance } from "./tauri";
 
 /** CSS custom property carrying the mini-bar background alpha. */
 export const RESULT_OPACITY_VARIABLE = "--result-opacity";
@@ -65,25 +65,17 @@ export function applyHydratedAppearance(
 }
 
 /**
- * Persists the mini-bar appearance by saving the whole configuration.
+ * Persists the mini-bar appearance through the dedicated backend command.
  *
  * The appearance controls apply changes immediately through
  * {@link applyResultAppearance}; this function persists the same values so
- * they survive restarts.
+ * they survive restarts. Unlike a whole-configuration `save_settings`, the
+ * command does not rebuild the translation provider and works while a live
+ * session is running.
  */
-export async function persistResultAppearance(
-  config: AppConfig,
-  opacity: number,
-  fontSizePx: number,
-): Promise<AppConfig> {
-  const next: AppConfig = {
-    ...config,
-    result_window: {
-      ...config.result_window,
-      opacity: clampResultOpacity(opacity),
-      font_size_px: clampResultFontSize(fontSizePx),
-    },
-  };
-  await saveSettings(next);
-  return next;
+export async function persistResultAppearance(opacity: number, fontSizePx: number): Promise<void> {
+  await updateResultWindowAppearance(
+    clampResultOpacity(opacity),
+    clampResultFontSize(fontSizePx),
+  );
 }
