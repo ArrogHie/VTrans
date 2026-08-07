@@ -23,20 +23,18 @@ use crate::geometry::{dilation_distance, min_area_rect, offset_polygon, polygon_
 pub struct DetectionParams {
     /// Binarization threshold for the probability map.
     pub threshold: f32,
-    /// Unclip ratio used to expand detected boxes.
+    /// Confidence threshold for filtering detected boxes (PP-OCRv6 `box_thresh`,
+    /// guide §6.1).
+    pub box_threshold: f32,
+    /// Maximum number of candidate boxes considered (PP-OCRv6 `max_candidates`,
+    /// guide §6.1).
+    pub max_candidates: usize,
+    /// Minimum box side length in detector-input pixels (guide §6.5 / §10.1).
+    pub min_box_size: f32,
+    /// Unclip ratio used to expand detected boxes (PP-OCRv6 `unclip_ratio`,
+    /// guide §6.1).
     pub unclip_ratio: f32,
-    /// Minimum component area in resized-image pixels.
-    pub min_box_area: f32,
 }
-
-/// Default minimum connected-component area used by the `PaddleOCR` det
-/// post-processor (`min_box_area = 3.0`).
-///
-/// The frozen `PreprocessParams` manifest schema has no field for this value,
-/// so it stays a code constant for now. If it needs to be tunable, add it to
-/// the manifest schema through a change review and wire it through
-/// [`DetectionParams`].
-pub const DEFAULT_MIN_BOX_AREA: f32 = 3.0;
 
 /// A detected text box in original image coordinates.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,9 +61,10 @@ pub struct RecognizedLine {
 /// Convert a detection probability map into text boxes.
 ///
 /// The map is thresholded, connected components are labeled, each component
-/// is replaced by its minimum-area rectangle, the rectangle is expanded with
-/// the PP-OCR unclip step, and coordinates are scaled back to the original
-/// image space.
+/// is replaced by its minimum-area rectangle, the mean probability inside the
+/// rectangle is compared against `box_threshold`, the rectangle is expanded
+/// with the PP-OCR unclip step, and coordinates are scaled back to the
+/// original image space (guide §6.5).
 ///
 /// # Example
 ///
@@ -81,8 +80,10 @@ pub struct RecognizedLine {
 /// }
 /// let params = DetectionParams {
 ///     threshold: 0.5,
+///     box_threshold: 0.45,
+///     max_candidates: 3000,
+///     min_box_size: 3.0,
 ///     unclip_ratio: 0.0,
-///     min_box_area: 3.0,
 /// };
 /// let boxes = boxes_from_map(&probability, params, 1.0, 1.0, 8, 8);
 /// assert_eq!(boxes.len(), 1);
@@ -105,6 +106,7 @@ pub fn boxes_from_map(
     let mut visited = vec![false; width * height];
     let mut stack = Vec::new();
     let mut boxes = Vec::new();
+    let mut candidate_count = 0_usize;
 
     for start_y in 0..height {
         for start_x in 0..width {
@@ -114,12 +116,10 @@ pub fn boxes_from_map(
             }
 
             let mut points = Vec::new();
-            let mut score_sum = 0.0_f32;
             stack.push((start_x, start_y));
             visited[start] = true;
             while let Some((x, y)) = stack.pop() {
                 points.push([x as f32 + 0.5, y as f32 + 0.5]);
-                score_sum += probability[[y, x]];
                 for dy in -1_i32..=1 {
                     for dx in -1_i32..=1 {
                         if dx == 0 && dy == 0 {
@@ -141,11 +141,19 @@ pub fn boxes_from_map(
                 }
             }
 
-            if (points.len() as f32) < params.min_box_area {
+            let mut polygon = min_area_rect(&points);
+            let (rect_width, rect_height) = rect_dimensions(&polygon);
+            if rect_width.min(rect_height) < params.min_box_size {
                 continue;
             }
-            let score = score_sum / points.len() as f32;
-            let mut polygon = min_area_rect(&points);
+            let score = mean_probability_in_polygon(probability, &polygon);
+            if score < params.box_threshold {
+                continue;
+            }
+            candidate_count += 1;
+            if candidate_count > params.max_candidates {
+                break;
+            }
             let distance = dilation_distance(&polygon, params.unclip_ratio);
             if distance > 0.0 {
                 polygon = offset_polygon(polygon, distance);
@@ -166,6 +174,83 @@ pub fn boxes_from_map(
         }
     }
     boxes
+}
+
+/// Mean probability inside a convex polygon (Python baseline `box_score`).
+///
+/// The polygon's bounding box is scanned pixel by pixel; each pixel whose
+/// center lies inside the polygon contributes its probability value.
+fn mean_probability_in_polygon(probability: &Array2<f32>, polygon: &[Point; 4]) -> f32 {
+    let (height, width) = probability.dim();
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+    let min_x = polygon
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0);
+    let max_x = polygon
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(width as f32 - 1.0);
+    let min_y = polygon
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0);
+    let max_y = polygon
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(height as f32 - 1.0);
+
+    let mut sum = 0.0_f32;
+    let mut count = 0_u64;
+    for y in min_y as usize..=max_y as usize {
+        for x in min_x as usize..=max_x as usize {
+            if point_in_polygon([x as f32 + 0.5, y as f32 + 0.5], polygon) {
+                sum += probability[[y, x]];
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        sum / count as f32
+    }
+}
+
+/// Ray-casting point-in-polygon test for a convex polygon.
+fn point_in_polygon(point: Point, polygon: &[Point; 4]) -> bool {
+    let mut inside = false;
+    let mut previous = polygon[3];
+    for &current in polygon {
+        let crosses = (current[1] > point[1]) != (previous[1] > point[1]);
+        if crosses {
+            let t = (point[1] - previous[1]) / (current[1] - previous[1]);
+            let x_at_y = previous[0] + t * (current[0] - previous[0]);
+            if point[0] < x_at_y {
+                inside = !inside;
+            }
+        }
+        previous = current;
+    }
+    inside
+}
+
+/// Width and height of an ordered (top-left-first) polygon.
+fn rect_dimensions(polygon: &[Point; 4]) -> (f32, f32) {
+    (
+        distance(polygon[0], polygon[1]),
+        distance(polygon[0], polygon[3]),
+    )
 }
 
 /// Sort detected boxes into reading order.
@@ -551,8 +636,10 @@ mod tests {
         }
         let params = DetectionParams {
             threshold: 0.5,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
             unclip_ratio: 0.0,
-            min_box_area: 3.0,
         };
         let boxes = boxes_from_map(&probability, params, 1.0, 1.0, 8, 8);
         assert_eq!(boxes.len(), 1);
@@ -563,15 +650,20 @@ mod tests {
 
     #[test]
     fn boxes_from_map_scales_coordinates() {
-        let mut probability = Array2::<f32>::zeros((4, 4));
-        probability[[1, 1]] = 0.9;
-        probability[[1, 2]] = 0.9;
-        probability[[2, 1]] = 0.9;
-        probability[[2, 2]] = 0.9;
+        // A 4x4 component keeps the box above `min_box_size` (3.0) in map
+        // space and above 1.0 px after the 0.5 scaling step.
+        let mut probability = Array2::<f32>::zeros((8, 8));
+        for y in 2..6 {
+            for x in 2..6 {
+                probability[[y, x]] = 0.9;
+            }
+        }
         let params = DetectionParams {
             threshold: 0.5,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
             unclip_ratio: 0.0,
-            min_box_area: 3.0,
         };
         let boxes = boxes_from_map(&probability, params, 0.5, 0.5, 8, 8);
         assert_eq!(boxes.len(), 1);
@@ -585,8 +677,10 @@ mod tests {
         probability[[1, 1]] = 0.9;
         let params = DetectionParams {
             threshold: 0.5,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
             unclip_ratio: 0.0,
-            min_box_area: 3.0,
         };
         assert!(boxes_from_map(&probability, params, 1.0, 1.0, 4, 4).is_empty());
     }
@@ -599,10 +693,86 @@ mod tests {
         probability[[1, 3]] = 0.9;
         let params = DetectionParams {
             threshold: 0.5,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
             unclip_ratio: 1.5,
-            min_box_area: 3.0,
         };
         assert!(boxes_from_map(&probability, params, 1.0, 1.0, 4, 4).is_empty());
+    }
+
+    #[test]
+    fn boxes_from_map_filters_by_box_threshold() {
+        let mut probability = Array2::<f32>::zeros((8, 8));
+        for y in 2..6 {
+            for x in 2..6 {
+                probability[[y, x]] = 0.3; // below box_threshold 0.45
+            }
+        }
+        let params = DetectionParams {
+            threshold: 0.2,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
+            unclip_ratio: 0.0,
+        };
+        assert!(boxes_from_map(&probability, params, 1.0, 1.0, 8, 8).is_empty());
+    }
+
+    #[test]
+    fn boxes_from_map_enforces_max_candidates() {
+        let mut probability = Array2::<f32>::zeros((32, 32));
+        // 16 disjoint 2x2 components.
+        for row in 0..4 {
+            for col in 0..4 {
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        probability[[row * 8 + dy, col * 8 + dx]] = 0.9;
+                    }
+                }
+            }
+        }
+        let params = DetectionParams {
+            threshold: 0.5,
+            box_threshold: 0.45,
+            max_candidates: 2,
+            min_box_size: 1.5,
+            unclip_ratio: 0.0,
+        };
+        let boxes = boxes_from_map(&probability, params, 1.0, 1.0, 32, 32);
+        assert!(boxes.len() <= 2);
+    }
+
+    #[test]
+    fn boxes_from_map_filters_by_min_box_size() {
+        let mut probability = Array2::<f32>::zeros((8, 8));
+        // 3x2 component: min side 2 < min_box_size 3.
+        for y in 1..3 {
+            for x in 1..4 {
+                probability[[y, x]] = 0.9;
+            }
+        }
+        let params = DetectionParams {
+            threshold: 0.5,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
+            unclip_ratio: 0.0,
+        };
+        assert!(boxes_from_map(&probability, params, 1.0, 1.0, 8, 8).is_empty());
+    }
+
+    #[test]
+    fn mean_probability_uses_polygon_interior() {
+        let mut probability = Array2::<f32>::zeros((6, 6));
+        for y in 1..5 {
+            for x in 1..5 {
+                probability[[y, x]] = 0.8;
+            }
+        }
+        let square = [[1.0, 1.0], [5.0, 1.0], [5.0, 5.0], [1.0, 5.0]];
+        let mean = mean_probability_in_polygon(&probability, &square);
+        assert!((mean - 0.8).abs() < 1e-6);
     }
 
     #[test]

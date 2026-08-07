@@ -23,15 +23,8 @@ use vtrans_core::error::OcrError;
 
 use crate::postprocess::{ctc_greedy_decode, RecognizedLine};
 use crate::preprocess::{
-    normalize_rgb_to_tensor, resize_rec_image, REC_HEIGHT, REC_MAX_WIDTH, REC_MEAN, REC_STD,
+    normalize_bgr_to_tensor, pad_to_width, resize_rec_image, REC_MEAN, REC_STD,
 };
-
-/// Maximum width of a single recognition chunk in pixels.
-///
-/// Long text lines are recognized in chunks no wider than this value so the
-/// input stays within the model's conventional dynamic-width limit while the
-/// character height stays at [`REC_HEIGHT`].
-const REC_CHUNK_WIDTH: u32 = REC_MAX_WIDTH;
 
 /// Pixel overlap between adjacent recognition chunks.
 ///
@@ -39,6 +32,18 @@ const REC_CHUNK_WIDTH: u32 = REC_MAX_WIDTH;
 /// the next chunk; the overlapping decoded text is removed again by
 /// [`trim_overlap_text`].
 const REC_CHUNK_OVERLAP: u32 = 16;
+
+/// Maximum width of a single-pass recognition input in pixels.
+///
+/// The PP-OCRv6 rec ONNX input is dynamic width `[N, 3, 48, W]`. Feeding the
+/// crop at its natural width is both faster and more accurate than chunking:
+/// characters cut by a chunk boundary get decoded twice, and the overlap
+/// trim cannot always remove the duplicated letter. Measurements on the
+/// fixed English test set stay fully accurate through W = 3200 (time steps
+/// `T = W / 8`, output tensor ≈ 30 MB); beyond that the crop falls back to
+/// overlapping chunks to bound memory and inference time for pathological
+/// ultra-wide lines (e.g. full-width lines on 4K screenshots).
+const MAX_SINGLE_PASS_WIDTH: u32 = 3200;
 
 /// PP-OCR text recognition model.
 ///
@@ -50,6 +55,8 @@ pub struct Recognizer {
     input_name: String,
     output_name: String,
     dict: Vec<String>,
+    rec_input_height: u32,
+    rec_input_width: u32,
 }
 
 impl Recognizer {
@@ -71,14 +78,24 @@ impl Recognizer {
     /// use vtrans_ocr::recognize::Recognizer;
     ///
     /// let session = Session::builder()?.commit_from_file("rec.onnx")?;
-    /// let recognizer = Recognizer::new(session, vec![String::new(), "a".to_string()])?;
+    /// let recognizer = Recognizer::new(session, vec![String::new(), "a".to_string()], 48, 320)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn new(session: Session, dict: Vec<String>) -> Result<Self, OcrError> {
+    pub fn new(
+        session: Session,
+        dict: Vec<String>,
+        rec_input_height: u32,
+        rec_input_width: u32,
+    ) -> Result<Self, OcrError> {
         if dict.is_empty() {
             return Err(OcrError::InvalidManifest(
                 "recognition dictionary is empty".to_string(),
             ));
+        }
+        if rec_input_height == 0 || rec_input_width == 0 {
+            return Err(OcrError::InvalidManifest(format!(
+                "invalid recognition input size: {rec_input_height}x{rec_input_width}"
+            )));
         }
         let input_name = session
             .inputs()
@@ -105,6 +122,8 @@ impl Recognizer {
             input_name,
             output_name,
             dict,
+            rec_input_height,
+            rec_input_width,
         })
     }
 
@@ -124,7 +143,7 @@ impl Recognizer {
     /// use vtrans_ocr::recognize::Recognizer;
     ///
     /// let session = Session::builder()?.commit_from_file("rec.onnx")?;
-    /// let recognizer = Recognizer::new(session, vec![String::new(), "a".to_string()])?;
+    /// let recognizer = Recognizer::new(session, vec![String::new(), "a".to_string()], 48, 320)?;
     /// let crop = RgbImage::from_pixel(32, 32, image::Rgb([0, 0, 0]));
     /// let run_options = RunOptions::new()?;
     /// let line = recognizer.run(&crop, &run_options)?;
@@ -136,12 +155,23 @@ impl Recognizer {
         rgb: &RgbImage,
         run_options: &RunOptions,
     ) -> Result<RecognizedLine, OcrError> {
-        let resized = resize_rec_image(rgb, REC_HEIGHT, u32::MAX);
-        if resized.width() <= REC_CHUNK_WIDTH {
-            let tensor = normalize_rgb_to_tensor(&resized, &REC_MEAN, &REC_STD);
+        let height = self.rec_input_height;
+        let width = self.rec_input_width;
+        let resized = resize_rec_image(rgb, height, u32::MAX);
+        // Short crops keep the fixed-width padded path so the tensor shape
+        // stays regular and matches the Python baseline rec inputs.
+        if resized.width() <= width {
+            let padded = pad_to_width(&resized, width);
+            let tensor = normalize_bgr_to_tensor(&padded, &REC_MEAN, &REC_STD);
             return self.run_tensor(&tensor, run_options);
         }
-        self.run_split(&resized, run_options)
+        // The v6 rec model accepts dynamic widths; single-pass recognition
+        // at the natural width avoids chunk-seam artifacts entirely.
+        if resized.width() <= MAX_SINGLE_PASS_WIDTH {
+            let tensor = normalize_bgr_to_tensor(&resized, &REC_MEAN, &REC_STD);
+            return self.run_tensor(&tensor, run_options);
+        }
+        self.run_split(&resized, width, run_options)
     }
 
     /// Run a single inference pass over a normalized tensor.
@@ -179,9 +209,10 @@ impl Recognizer {
     fn run_split(
         &self,
         resized: &RgbImage,
+        chunk_width: u32,
         run_options: &RunOptions,
     ) -> Result<RecognizedLine, OcrError> {
-        let chunks = split_rec_chunks(resized, REC_CHUNK_WIDTH, REC_CHUNK_OVERLAP);
+        let chunks = split_rec_chunks(resized, chunk_width, REC_CHUNK_OVERLAP);
         tracing::debug!(
             image_width = resized.width(),
             chunks = chunks.len(),
@@ -190,7 +221,8 @@ impl Recognizer {
         let mut text = String::new();
         let mut confidence_sum = 0.0_f32;
         for chunk in &chunks {
-            let tensor = normalize_rgb_to_tensor(chunk, &REC_MEAN, &REC_STD);
+            let padded = pad_to_width(chunk, self.rec_input_width);
+            let tensor = normalize_bgr_to_tensor(&padded, &REC_MEAN, &REC_STD);
             let line = self.run_tensor(&tensor, run_options)?;
             text = trim_overlap_text(&text, &line.text);
             confidence_sum += line.confidence;
@@ -320,7 +352,10 @@ pub fn decode_logits(logits: &ArrayViewD<f32>, dict: &[String]) -> Result<(Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preprocess::REC_MAX_WIDTH;
     use ndarray::ArrayD;
+
+    const REC_CHUNK_WIDTH: u32 = REC_MAX_WIDTH;
 
     #[test]
     fn decode_two_dimensional_logits() {
