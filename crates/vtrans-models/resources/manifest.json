@@ -9,19 +9,19 @@
     },
     "rec_ja": {
       "id": "ppocr-rec-v6",
-      "path": "ocr/rec_ja.onnx",
+      "path": "ocr/rec.onnx",
       "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
       "size_bytes": 21159378
     },
     "rec_en": {
       "id": "ppocr-rec-v6-en",
-      "path": "ocr/rec_en.onnx",
+      "path": "ocr/rec.onnx",
       "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
       "size_bytes": 21159378
     },
     "rec_multi": {
       "id": "ppocr-rec-v6-multi",
-      "path": "ocr/rec_multi.onnx",
+      "path": "ocr/rec.onnx",
       "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
       "size_bytes": 21159378
     },

@@ -3,7 +3,7 @@
 # 完整流程：下载 → (转换 ONNX) → 检查 → Python 基准 → manifest 回填
 # 产物：
 #   - src-tauri/resources/models/ocr/det.onnx
-#   - src-tauri/resources/models/ocr/rec_ja.onnx / rec_en.onnx / rec_multi.onnx（同一 v6 rec）
+#   - src-tauri/resources/models/ocr/rec.onnx（rec_ja / rec_en / rec_multi 三槽位共享同一文件）
 #   - src-tauri/resources/models/ocr/ppocrv6_dict.txt
 #   - 检查/基准报告（默认写入 scripts/ppocrv6/work/）
 #

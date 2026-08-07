@@ -158,12 +158,13 @@ crates/vtrans-models/
 | 槽位 | id | 文件 | SHA-256 | size_bytes |
 |------|----|------|---------|------------|
 | det | `ppocr-det-v6` | `ocr/det.onnx` | `d73e0058...c9410e` | 9880512 |
-| rec_ja | `ppocr-rec-v6` | `ocr/rec_ja.onnx` | `5435fd74...a24634` | 21159378 |
-| rec_en | `ppocr-rec-v6-en` | `ocr/rec_en.onnx` | 同上（同一 v6 rec） | 21159378 |
-| rec_multi | `ppocr-rec-v6-multi` | `ocr/rec_multi.onnx` | 同上（同一 v6 rec） | 21159378 |
+| rec_ja | `ppocr-rec-v6` | `ocr/rec.onnx` | `5435fd74...a24634` | 21159378 |
+| rec_en | `ppocr-rec-v6-en` | `ocr/rec.onnx` | 同上（同一 v6 rec） | 21159378 |
+| rec_multi | `ppocr-rec-v6-multi` | `ocr/rec.onnx` | 同上（同一 v6 rec） | 21159378 |
 
-rec_ja / rec_en / rec_multi 指向同一 `PP-OCRv6_small_rec` ONNX，因此 `auto` /
-`zh-CN` OCR 语言可用。
+rec_ja / rec_en / rec_multi 三槽位共享同一份 `PP-OCRv6_small_rec` ONNX
+（磁盘仅 `ocr/rec.onnx` 一份，运行时只加载一个 rec session），因此
+`auto` / `zh-CN` OCR 语言可用。
 
 ### 字典
 

@@ -58,16 +58,16 @@ fn write_model(dir: &Path, rel: &str, data: &[u8]) -> String {
 fn main() -> Result<(), ModelError> {
     let dir = std::env::temp_dir().join("vtrans-models-demo");
     let det_sha = write_model(&dir, "ocr/det.onnx", b"det-model");
-    let rec_ja_sha = write_model(&dir, "ocr/rec_ja.onnx", b"rec-ja-model");
-    let rec_en_sha = write_model(&dir, "ocr/rec_en.onnx", b"rec-en-model");
+    // rec_ja / rec_en / rec_multi 三槽位共享同一文件（单份 rec 模型）。
+    let rec_sha = write_model(&dir, "ocr/rec.onnx", b"rec-model");
     let manifest = format!(
         r#"{{
   "version": 1,
   "ocr": {{
     "det": {{ "id": "det", "path": "ocr/det.onnx", "sha256": "{det_sha}", "size_bytes": 9 }},
-    "rec_ja": {{ "id": "rec-ja", "path": "ocr/rec_ja.onnx", "sha256": "{rec_ja_sha}", "size_bytes": 12 }},
-    "rec_en": {{ "id": "rec-en", "path": "ocr/rec_en.onnx", "sha256": "{rec_en_sha}", "size_bytes": 12 }},
-    "rec_multi": null,
+    "rec_ja": {{ "id": "ppocr-rec-v6", "path": "ocr/rec.onnx", "sha256": "{rec_sha}", "size_bytes": 9 }},
+    "rec_en": {{ "id": "ppocr-rec-v6-en", "path": "ocr/rec.onnx", "sha256": "{rec_sha}", "size_bytes": 9 }},
+    "rec_multi": {{ "id": "ppocr-rec-v6-multi", "path": "ocr/rec.onnx", "sha256": "{rec_sha}", "size_bytes": 9 }},
     "dicts": {{}},
     "preprocess_params": {{ "image_size": [640, 640], "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "det_threshold": 0.2, "unclip_ratio": 1.4 }}
   }},
