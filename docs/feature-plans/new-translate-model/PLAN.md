@@ -6,7 +6,7 @@
 - 功能目标：本地翻译模型从「opus-mt-en-zh-int8 ONNX（约 403 MB，仅 en→zh）」升级为「Bergamot en→zh + CTranslate2 INT8 ja→zh（翻译模型总预算硬门槛 ≤200 MB）」；同时将 OCR 语言与翻译源语言拆为两个独立设置项并强制统一（改动任一自动同步另一项）
 - 使用场景：单次框选翻译与实时区域翻译的本地翻译路径；主窗口「语言与引擎」设置区；安装包模型体积与 CI 体积门禁
 - 优先级 / 版本目标：P1 / 建议 v0.3.0
-- 状态：待拆解（本计划 + 任务单已产出，待用户确认假设后启动开发）
+- 状态：开发中（02 已整合；A1–A4 待用户确认，不影响 02 结果）
 
 ## 验收标准（用户可验证）
 
@@ -38,7 +38,7 @@
 
 | 序号 | 模块 | 任务类型 | 依赖 | 建议分支 | 状态 |
 |------|------|----------|------|----------|------|
-| 1 | 02 vtrans-config | 修改（schema v4 + 联动校验 + 迁移） | — | `feat/02-new-translate-model` | 待分配 |
+| 1 | 02 vtrans-config | 修改（schema v4 + 联动校验 + 迁移） | — | `feat/02-new-translate-model` | 已整合 |
 | 2 | 08 vtrans-models | 修改（manifest v2 + 下载/转换/审计脚本 + 文档） | — | `feat/08-new-translate-model` | 待分配 |
 | 3 | 07 vtrans-translation | 主责重构（native C++ bridge + FFI + Native Provider + 验证 CLI + 许可证） | 依赖 1（quality 字段）、2（manifest v2） | `feat/07-new-translate-model` | 待分配 |
 | 4 | 09 vtrans-pipeline | 修改（auto 源路由 + 标点感知分块） | 依赖 core 契约（可并行，端到端验证依赖 3） | `feat/09-new-translate-model` | 待分配 |
