@@ -54,6 +54,13 @@ pub struct PreprocessParams {
     pub std: [f32; 3],
     pub det_threshold: f32,
     pub unclip_ratio: f32,
+    pub box_threshold: f32,        // 可选，缺省 0.45
+    pub max_candidates: usize,     // 可选，缺省 3000
+    pub min_box_size: f32,         // 可选，缺省 3.0
+    pub rec_input_height: u32,     // 可选，缺省 48
+    pub rec_input_width: u32,      // 可选，缺省 320
+    pub rec_append_space: bool,    // 可选，缺省 true
+    pub rec_blank_index: usize,    // 可选，缺省 0
 }
 
 pub struct InferenceParams {
@@ -141,3 +148,52 @@ crates/vtrans-models/
 - 模型路径在 manifest 中用相对路径，运行时解析为绝对路径
 - 提供下载脚本 scripts/download_models.ps1
 - .gitignore 排除 *.onnx 和 *.bin 模型文件
+
+## PP-OCRv6 Small 模型清单（v0.2.0）
+
+自 v0.2.0 起 OCR 检测/识别模型升级为 PP-OCRv6 Small，彻底弃用 PP-OCRv4。
+
+### 模型条目
+
+| 槽位 | id | 文件 | SHA-256 | size_bytes |
+|------|----|------|---------|------------|
+| det | `ppocr-det-v6` | `ocr/det.onnx` | `d73e0058...c9410e` | 9880512 |
+| rec_ja | `ppocr-rec-v6` | `ocr/rec_ja.onnx` | `5435fd74...a24634` | 21159378 |
+| rec_en | `ppocr-rec-v6-en` | `ocr/rec_en.onnx` | 同上（同一 v6 rec） | 21159378 |
+| rec_multi | `ppocr-rec-v6-multi` | `ocr/rec_multi.onnx` | 同上（同一 v6 rec） | 21159378 |
+
+rec_ja / rec_en / rec_multi 指向同一 `PP-OCRv6_small_rec` ONNX，因此 `auto` /
+`zh-CN` OCR 语言可用。
+
+### 字典
+
+`ocr/ppocrv6_dict.txt`（官方 `ppocrv6_dict.txt`，18708 行，SHA-256
+`b5f2bfe2...e401c5d`）。三个语言槽位（`ja` / `en` / `auto`）指向同一文件。
+识别输出类别数 = 字典行数 + blank + space = 18710，转换后已通过类数一致性检查。
+
+### preprocess_params（v6 默认值）
+
+| 字段 | 值 | 说明 |
+|------|-----|------|
+| `image_size` | `[960, 960]` | 检测输入上限 |
+| `mean` / `std` | ImageNet 均值/方差 | BGR 通道顺序（以 Python 基准为准） |
+| `det_threshold` | 0.2 | DB 二值化阈值（原 v4 0.3） |
+| `unclip_ratio` | 1.4 | 外扩系数（原 v4 2.0） |
+| `box_threshold` | 0.45 | 框置信度过滤 |
+| `max_candidates` | 3000 | 最大候选框数 |
+| `min_box_size` | 3.0 | 最短边过滤 |
+| `rec_input_height` | 48 | 识别输入高 |
+| `rec_input_width` | 320 | 识别输入宽（右补零） |
+| `rec_append_space` | true | 类别表追加空格 |
+| `rec_blank_index` | 0 | CTC blank 索引 |
+
+### 脚本（方案 B）
+
+`scripts/ppocrv6/setup_ppocrv6.ps1` 提供「下载 → 转换 → 检查 → 基准 →
+回填」全流程；`inspect_onnx.py` / `baseline_ocr.py` / `backfill_manifest.py`
+为分步工具。开发机要求见 `docs/DEVELOPMENT.md` §4 与接入指南 §4.1。
+
+### 向后兼容
+
+manifest schema version 仍为 1。v4 时代的 manifest（无 `box_threshold` 等
+新字段）仍可反序列化，缺省字段自动取上述 v6 默认值。

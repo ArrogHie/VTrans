@@ -5,8 +5,11 @@
 ## 1. 模块概述
 
 本模块管理模型文件的生命周期元数据：解析 `manifest.json`、校验模型文件存在且 SHA-256 匹配、把相对路径解析为运行时绝对路径，并保存加载进度状态。
-边界：本模块做清单 schema 解析与校验、批量完整性校验、路径解析、加载进度状态存取；不做 ONNX 推理（`vtrans-ocr` / `vtrans-translation`）、不做模型文件下载（`scripts/download_models.ps1`）、不管理模型安装布局（`src-tauri/resources/models/`）。
+边界：本模块做清单 schema 解析与校验、批量完整性校验、路径解析、加载进度状态存取；不做 ONNX 推理（`vtrans-ocr` / `vtrans-translation`）、不做模型文件下载（`scripts/ppocrv6/setup_ppocrv6.ps1`）、不管理模型安装布局（`src-tauri/resources/models/`）。
 本模块不持有文件句柄、不启动线程，是纯同步库模块；取消与后台执行由消费方编排。
+
+自 v0.2.0 起 OCR 模型为 PP-OCRv6 Small（det + rec），`PreprocessParams`
+新增 det/rec 可选字段，缺省取 v6 默认值，manifest schema version 保持 1。
 
 ## 2. 依赖关系
 
@@ -116,6 +119,22 @@ pub struct ModelManifest {
 /// 单个模型条目；path 相对于模型目录
 pub struct ModelEntry { pub id: String, pub path: PathBuf, pub sha256: String, pub size_bytes: u64 }
 
+/// 预处理参数（新增字段为 serde default，缺省取 v6 默认值）
+pub struct PreprocessParams {
+    pub image_size: (u32, u32),
+    pub mean: [f32; 3],
+    pub std: [f32; 3],
+    pub det_threshold: f32,          // v6 默认 0.2
+    pub unclip_ratio: f32,           // v6 默认 1.4
+    pub box_threshold: f32,          // 默认 0.45
+    pub max_candidates: usize,       // 默认 3000
+    pub min_box_size: f32,           // 默认 3.0
+    pub rec_input_height: u32,       // 默认 48
+    pub rec_input_width: u32,        // 默认 320
+    pub rec_append_space: bool,      // 默认 true
+    pub rec_blank_index: usize,      // 默认 0
+}
+
 impl ModelManager {
     pub fn from_manifest_dir(dir: &Path) -> Result<Self, ModelError>;  // 缺失/JSON 错误/版本不支持返回 Err
     pub fn manifest(&self) -> &ModelManifest;
@@ -139,6 +158,10 @@ pub enum ModelError {
 ```
 serde 表示：`ModelManifest` 及其子结构实现 `Serialize` / `Deserialize`；语言对序列化为 JSON 数组（如 `["en","zh-CN"]`），`dicts` 为对象，`image_size` 为 `[960, 960]`。`VerifyReport` 也可序列化，便于跨 IPC 传递校验结果。
 
+`PreprocessParams` 的 det/rec 新字段均为 `#[serde(default)]`：v4 时代旧
+manifest（无这些字段）反序列化后自动取 PP-OCRv6 默认值；缺省值常量
+（`DEFAULT_BOX_THRESHOLD` 等）在 crate 根导出。
+
 ## 5. 行为契约
 
 错误语义：`from_manifest_dir` / `from_json_str` 的 `ManifestNotFound` 不可重试（需先放好文件），`Parse`、`Io` 修复后可重试，`UnsupportedVersion` 需要升级或降级 manifest；`verify_integrity` 永远返回 `Ok(report)`，`FileNotFound`、`HashMismatch`、`Io` 都以字符串进入 `report.failed`，消费方应检查 `report.is_ok()`；`HashMismatch` 重下模型后可重试。
@@ -156,7 +179,7 @@ serde 表示：`ModelManifest` 及其子结构实现 `Serialize` / `Deserialize`
 | 坑 | 正确做法 |
 |----|----------|
 | `from_manifest_dir` 不会创建 manifest.json，首次运行必失败 | 先确保 `src-tauri/resources/models/manifest.json` 已随应用分发 |
-| 模型文件未下载时 `verify_integrity` 报告大量失败 | 先运行 `scripts/download_models.ps1`；把失败项当作下载检查清单 |
+| 模型文件未下载时 `verify_integrity` 报告大量失败 | 先运行 `scripts/ppocrv6/setup_ppocrv6.ps1`；把失败项当作下载检查清单 |
 | `verify_integrity` 同步阻塞，数百 MB 模型可能耗时数秒 | 在 `tokio::task::spawn_blocking` 或独立线程中调用，避免阻塞 UI |
 | 用 `model_path` 判断文件是否可用 | 先 `verify_integrity`，再使用 `model_path` 的结果 |
 | 字典 key 是语言代码字符串（`"ja"` / `"en"`） | 与 `vtrans_core::Language::code()` 对齐，不要硬编码中文名 |
@@ -184,6 +207,7 @@ serde 表示：`ModelManifest` 及其子结构实现 `Serialize` / `Deserialize`
 | `load_progress` 不驱动真实下载/加载 | 待后续 Phase | 由 `vtrans-app` 的加载流程写入进度 |
 | 无自动下载/修复机制 | 待后续 Phase | 使用 `scripts/download_models.ps1` 完成下载 |
 | 验证 CLI 依赖真实模型目录 | 设计使然 | `vtrans-verify-models` 读取 `--models` / `$VTRANS_MODEL_DIR`，缺文件时以非零码退出 |
+| v6 字典未入库时 `verify_integrity` 报 dict not found | 已通过 .gitignore 白名单提交 | 字典 `ppocrv6_dict.txt` 随 manifest 入库，模型 onnx 仍忽略 |
 
 ## 9. 构建与测试
 
@@ -192,6 +216,13 @@ cargo check -p vtrans-models
 cargo test -p vtrans-models
 cargo clippy -p vtrans-models --all-targets
 cargo fmt -p vtrans-models -- --check
+```
+
+模型准备（需要网络与 Python/Paddle 开发机，见 `docs/DEVELOPMENT.md` §4）：
+
+```powershell
+.\scripts\ppocrv6\setup_ppocrv6.ps1
+# 或使用已提供的 ONNX：.\scripts\ppocrv6\setup_ppocrv6.ps1 -SkipConversion
 ```
 
 测试覆盖：manifest 解析、缺失字段、SHA-256 匹配/不匹配、文件不存在、路径解析、批量校验报告（单元 + 集成 + 文档测试，共 52 个用例）。部署模型后可用独立验证 CLI 全量校验：
