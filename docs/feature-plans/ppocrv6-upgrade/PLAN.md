@@ -6,7 +6,7 @@
 - 功能目标：将 OCR 检测/识别模型从 PP-OCRv4（RapidOCR v3.9.2 ONNX）升级为 PP-OCRv6 Small（det + rec），提升识别精度；统一 rec 槽位解锁 `auto` / `zh-CN` OCR 语言；**彻底弃用 v4**，不保留回退路径
 - 使用场景：全部 OCR 路径（单次框选翻译、实时区域翻译）；无用户交互变化，模型在应用启动加载时生效
 - 优先级 / 版本目标：P1 / 建议 v0.2.0
-- 状态：开发中（08 已交付并审查，5 项打回修复中）
+- 状态：已验收（整合完成，见 INTEGRATION.md）
 
 ## 验收标准（用户可验证）
 
@@ -25,8 +25,8 @@
 |------|------|----------|------|----------|------|
 | 1 | 08 vtrans-models | 修改（schema + manifest + 脚本 + 文档） | — | `feat/08-ppocrv6-models` | 已整合 |
 | 2 | 05 vtrans-ocr | 修改（预处理/后处理/字典/测试/文档） | 依赖 1（schema 字段） | `feat/05-ppocrv6-ocr` | 已整合 |
-| 3 | 07 vtrans-translation | 修改（仅测试字面量兼容修复） | 依赖 1 | `fix/07-ppocrv6-params-test` | 待派单 |
-| 4 | 整合（协调者） | 合并 + workspace 验证 + 端到端 + 报告 | 依赖 1、2、3 | main 上整合 | 整合中 |
+| 3 | 07 vtrans-translation | 修改（仅测试字面量兼容修复） | 依赖 1 | `fix/07-ppocrv6-params-test` | 已整合 |
+| 4 | 整合（协调者） | 合并 + workspace 验证 + 端到端 + 报告 | 依赖 1、2、3 | main 上整合 | 已验收 |
 
 排除项（不拆任务）：
 

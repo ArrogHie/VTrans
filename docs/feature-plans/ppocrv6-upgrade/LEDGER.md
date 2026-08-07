@@ -11,8 +11,8 @@
 | 2026-08-07 | 功能：OCR v6 升级 | 开发中 | 决策 1/2/3 已确认；08 已交付并审查 |
 | 2026-08-07 | 08 vtrans-models | 已整合 | 已合并到 main（merge 08，no-ff） |
 | 2026-08-07 | 05 vtrans-ocr | 已整合 | 已合并到 main（merge 05，no-ff）；5 真实模型回归 5/5 |
-| 2026-08-07 | 07 vtrans-translation | 待派单 | 唯一阻塞项：workspace test 仅剩 local_onnx.rs:1094 字面量失败 |
-| 2026-08-07 | 整合 | 整合中 | 08+05 已合并；workspace lib/fmt 全绿；07 完成后复跑全量 |
+| 2026-08-07 | 07 vtrans-translation | 已整合 | 审查通过（47+9+10 全绿）；已合并到 main |
+| 2026-08-07 | 整合 | 已验收 | 全量门禁 + 端到端冒烟通过；整合报告已产出 |
 
 审查记录（2026-08-07）：
 
@@ -48,5 +48,14 @@
 - ✅ 协调文档更新提交（ledger/plan）
 - ✅ 整合验证：fmt ✅ / cargo check --workspace ✅ / cargo test --workspace：仅 07 local_onnx.rs:1094 失败（计划内）
 - ⏳ 待办：07 修复 → 全量测试/clippy 复跑 → 端到端冒烟 → 整合报告
+
+07 审查与最终整合记录（2026-08-07）：
+
+- ✅ 07 门禁：fmt / clippy / test 全绿（47 单测 + 9 集成 + 10 doctest）；改动仅 local_onnx.rs 1 处测试字面量（DEFAULT_* 常量）
+- ✅ merge --no-ff fix/07-ppocrv6-params-test → main
+- ✅ 最终全量：cargo test --workspace 全绿 / clippy workspace 零警告 / vitest 177 通过 / tsc 通过
+- ✅ 端到端冒烟：英文 18/18、中文 4/4、pipeline 单次链路完整
+- ✅ 整合报告：docs/feature-plans/ppocrv6-upgrade/INTEGRATION.md
+- ✅ 功能状态：已验收（遗留项均非阻塞，已登记已知限制）
 
 状态流转：待拆解 → 开发中 → 待审查 → 待整合 → 已整合 → 已验收 → 已关闭
