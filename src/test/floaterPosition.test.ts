@@ -19,6 +19,15 @@ describe("clampFloaterPosition", () => {
     });
   });
 
+  it("clamps using the full window size, not the ball diameter", () => {
+    // 窗口 = 球径 48 + 2×16px 透明边距 = 80：夹取必须保证整个窗口
+    // （含透明边距）都在显示器内，否则球虽在屏内、阴影可能被裁。
+    expect(clampFloaterPosition({ x: 1900, y: 1060 }, [MONITORS[0]], 80)).toEqual({
+      x: 1840,
+      y: 1000,
+    });
+  });
+
   it("falls back to the first monitor for stale positions", () => {
     expect(clampFloaterPosition({ x: 5000, y: 5000 }, MONITORS)).toEqual({
       x: 1872,

@@ -1,4 +1,3 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect } from "react";
 import {
   listenToFrontendLiveConfig,
@@ -11,6 +10,7 @@ import {
 import { getIpcErrorMessage, showResultWindow } from "./services/tauri";
 import { hideRegionOverlay } from "./services/regionOverlay";
 import { useAppStore } from "./stores/appStore";
+import { getWindowLabel } from "./utils/windowLabel";
 import { FloatingBall } from "./windows/FloatingBall";
 import { MainWindow } from "./windows/MainWindow";
 import { OverlayWindow } from "./windows/OverlayWindow";
@@ -19,24 +19,12 @@ import { ResultWindow } from "./windows/ResultWindow";
 
 export function App() {
   const label = getWindowLabel();
-  useEffect(() => {
-    // 让全局样式可以按窗口隔离（例如选区窗口需要透明背景）。
-    document.documentElement.dataset.window = label;
-  }, [label]);
   useBackendEvents();
   if (label === "selector") return <RegionSelector />;
   if (label === "result") return <ResultWindow />;
   if (label === "overlay") return <OverlayWindow />;
   if (label === "floater") return <FloatingBall />;
   return <MainWindow />;
-}
-
-function getWindowLabel(): string {
-  try {
-    return getCurrentWindow().label;
-  } catch {
-    return new URLSearchParams(window.location.search).get("window") ?? "main";
-  }
 }
 
 function useBackendEvents() {

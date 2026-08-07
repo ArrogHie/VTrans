@@ -27,8 +27,9 @@ describe("FloatingBall", () => {
     const html = renderToStaticMarkup(<FloatingBall />);
     expect(html).toContain('aria-label="悬浮球"');
     expect(html).toContain('data-testid="floating-ball"');
-    // deep 让点击球体任意位置（含图标）都能拖动窗口。
-    expect(html).toContain('data-tauri-drag-region="deep"');
+    // Bug 2：不再依赖 data-tauri-drag-region（deep 会吞掉点击），
+    // 拖动与点击由手动判别（mousedown/mousemove 阈值）完成。
+    expect(html).not.toContain("data-tauri-drag-region");
     expect(html).not.toContain("框选翻译");
     expect(html).not.toContain('data-testid="floating-ball-menu"');
   });
@@ -44,6 +45,15 @@ describe("FloatingBall", () => {
     // 直径/透明度由 CSS 变量驱动（.floater-ball），无窗口 opacity API。
     expect(html).toContain("floater-ball");
     expect(html).not.toContain("style=");
+  });
+
+  it("positions the ball and the menu through the shared CSS classes", () => {
+    const collapsed = renderToStaticMarkup(<FloatingBall />);
+    expect(collapsed).toContain("floater-ball");
+    const expanded = renderToStaticMarkup(<FloatingBall initialOpen />);
+    expect(expanded).toContain("floater-menu-panel");
+    // 定位交给 CSS（--floater-padding / --floater-size），组件不内联坐标。
+    expect(expanded).not.toContain('class="floater-menu-panel absolute');
   });
 
   it("renders the expanded menu with appearance controls", () => {
