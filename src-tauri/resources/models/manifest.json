@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "ocr": {
     "det": {
       "id": "ppocr-det-v6",
@@ -46,25 +46,97 @@
     }
   },
   "translation": {
-    "model": {
-      "id": "opus-mt-en-zh-int8",
-      "path": "translation/model.onnx",
-      "sha256": "6a9d4d0b42f5ad0de0a91b9f81a1283078b264ed9c96a3341f76d631caec79f9",
-      "size_bytes": 403368390
+    "target": "zh-Hans",
+    "engines": {
+      "en_zh": {
+        "engine": "bergamot",
+        "model": {
+          "id": "enzh-model",
+          "path": "translation/en-zh/model.enzh.intgemm.alphas.bin",
+          "sha256": "4e5accc141373565ddc8fa1565bceaa8d0c3482a82cab8131c719ebcc6c2157c",
+          "size_bytes": 43849787
+        },
+        "src_vocab": {
+          "id": "enzh-src-vocab",
+          "path": "translation/en-zh/srcvocab.enzh.spm",
+          "sha256": "bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5",
+          "size_bytes": 806952
+        },
+        "trg_vocab": {
+          "id": "enzh-trg-vocab",
+          "path": "translation/en-zh/trgvocab.enzh.spm",
+          "sha256": "aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d",
+          "size_bytes": 772004
+        },
+        "lexical_shortlist": {
+          "id": "enzh-lexical-shortlist",
+          "path": "translation/en-zh/lex.50.50.enzh.s2t.bin",
+          "sha256": "8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681",
+          "size_bytes": 4485184
+        },
+        "beam_size": 1,
+        "gemm_precision": "int8shiftAlphaAll"
+      },
+      "ja_zh": {
+        "engine": "ctranslate2",
+        "model": {
+          "id": "jazh-model",
+          "path": "translation/ja-zh/model.bin",
+          "sha256": "76cf39869236c69d8f6f6c41fb94025c4932a28a22bda567ebbeb709e239ea8e",
+          "size_bytes": 79567635
+        },
+        "config": {
+          "id": "jazh-config",
+          "path": "translation/ja-zh/config.json",
+          "sha256": "72901fbd8abd89fb5cf4a388f26fc681f5c4c58a1e1a88b30b879f107270e7ee",
+          "size_bytes": 233
+        },
+        "source_vocabulary": {
+          "id": "jazh-source-vocabulary",
+          "path": "translation/ja-zh/source_vocabulary.json",
+          "sha256": "32f4aa94ad7356ceaf3c46888dac725b358a379df5cccaf7aa1ecee571dc76b1",
+          "size_bytes": 1427305
+        },
+        "target_vocabulary": {
+          "id": "jazh-target-vocabulary",
+          "path": "translation/ja-zh/target_vocabulary.json",
+          "sha256": "32f4aa94ad7356ceaf3c46888dac725b358a379df5cccaf7aa1ecee571dc76b1",
+          "size_bytes": 1427305
+        },
+        "source_spm": {
+          "id": "jazh-source-spm",
+          "path": "translation/ja-zh/source.spm",
+          "sha256": "25103859c8bbbe317e69b07551c55c53dc7943eebf078c56fbf5bc7f96d63289",
+          "size_bytes": 1312134
+        },
+        "target_spm": {
+          "id": "jazh-target-spm",
+          "path": "translation/ja-zh/target.spm",
+          "sha256": "fe81460cde65383464718c26789ff8c5d818719c3f2c2c3cd36f42532579c56e",
+          "size_bytes": 1312134
+        },
+        "beam_size_fast": 1,
+        "beam_size_balanced": 4,
+        "max_input_tokens": 256
+      }
     },
-    "tokenizer": {
-      "id": "opus-mt-en-zh-tokenizer",
-      "path": "translation/tokenizer.json",
-      "sha256": "a16e74563c61b5a1602d3aba56cd54f0f066ba64de374c83855120a2cc31359a",
-      "size_bytes": 4259760
+    "budget_mb": {
+      "hard_mb": 200,
+      "target_mb": 175,
+      "en_zh_mb": 65,
+      "ja_zh_mb": 110
     },
-    "supported_pairs": [
-      ["en","zh-CN"]
-    ],
-    "max_length": 512,
-    "inference_params": {
-      "max_batch_size": 1,
-      "num_beams": 4
+    "metadata": {
+      "architecture": "base-memory",
+      "converted_with": "ctranslate2 4.8.1",
+      "ct2_model_revision": "0728b51b9be02330f7bce262a4d47f611fd3a2a4",
+      "model_revision": "llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g",
+      "model_source": "shun89/opus-mt-ja-zh",
+      "quantization": "int8",
+      "registry": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/db/models.json",
+      "registryGenerated": "2026-08-07T00:43:32Z",
+      "releaseStatus": "Release",
+      "revision": "llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g"
     }
   }
 }

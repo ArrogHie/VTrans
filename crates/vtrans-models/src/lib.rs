@@ -27,11 +27,12 @@ use std::path::PathBuf;
 
 pub use manager::ModelManager;
 pub use manifest::{
-    InferenceParams, ModelEntry, ModelManifest, OcrModelGroup, PreprocessParams,
-    TranslationModelGroup, DEFAULT_BOX_THRESHOLD, DEFAULT_MAX_CANDIDATES, DEFAULT_MIN_BOX_SIZE,
-    DEFAULT_REC_APPEND_SPACE, DEFAULT_REC_BLANK_INDEX, DEFAULT_REC_INPUT_HEIGHT,
-    DEFAULT_REC_INPUT_WIDTH,
+    BergamotModelGroup, CTranslate2ModelGroup, InferenceParams, ModelEntry, ModelManifest,
+    OcrModelGroup, PreprocessParams, TranslationBudget, TranslationEngines, TranslationModels,
+    DEFAULT_BOX_THRESHOLD, DEFAULT_MAX_CANDIDATES, DEFAULT_MIN_BOX_SIZE, DEFAULT_REC_APPEND_SPACE,
+    DEFAULT_REC_BLANK_INDEX, DEFAULT_REC_INPUT_HEIGHT, DEFAULT_REC_INPUT_WIDTH,
 };
+pub use path::{BergamotPaths, CTranslate2Paths};
 pub use verify::VerifyReport;
 
 /// Errors that can occur during model manifest loading and integrity verification.
