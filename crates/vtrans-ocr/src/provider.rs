@@ -27,10 +27,8 @@ use vtrans_models::{ModelEntry, ModelManager, ModelManifest, PreprocessParams};
 
 use crate::detect::Detector;
 use crate::geometry::{rotate_90_cw, warp_perspective};
-use crate::postprocess::{
-    boxes_from_map, merge_lines, sort_boxes, DetectionParams, DEFAULT_MIN_BOX_AREA,
-};
-use crate::preprocess::{det_preprocess, rgb_region, REC_HEIGHT};
+use crate::postprocess::{boxes_from_map, merge_lines, sort_boxes, DetectionParams};
+use crate::preprocess::{det_preprocess, rgb_region};
 use crate::recognize::Recognizer;
 
 /// PaddleOCR-style ONNX recognition provider.
@@ -38,7 +36,9 @@ use crate::recognize::Recognizer;
 /// The provider owns one detection session and one recognition session per
 /// supported language. Sessions are initialized once during construction and
 /// reused for every frame; ONNX Runtime runs are serialized internally with a
-/// mutex because `Session::run` requires exclusive access.
+/// mutex because `Session::run` requires exclusive access. When multiple
+/// recognition slots point at the same model file (PP-OCRv6 unifies
+/// `rec_ja` / `rec_en` / `rec_multi`), they share a single session.
 ///
 /// # Example
 ///
@@ -180,18 +180,34 @@ impl PaddleOcrProvider {
         )?;
         let det = Arc::new(Detector::new(det_session)?);
 
+        let preprocess = manifest.ocr.preprocess_params.clone();
+        let rec_ja_path = &manifest.ocr.rec_ja.path;
+        let rec_en_shared = manifest.ocr.rec_en.path == *rec_ja_path;
+        let rec_multi_shared = manifest
+            .ocr
+            .rec_multi
+            .as_ref()
+            .is_some_and(|entry| entry.path == *rec_ja_path);
+
         let rec_ja = load_recognizer(
             models_dir,
             &manifest.ocr.rec_ja,
             manifest.ocr.dicts.get("ja"),
+            &preprocess,
             "ja",
         )?;
-        let rec_en = load_recognizer(
-            models_dir,
-            &manifest.ocr.rec_en,
-            manifest.ocr.dicts.get("en"),
-            "en",
-        )?;
+        let rec_en = if rec_en_shared {
+            tracing::debug!("rec_en shares the unified PP-OCRv6 recognition model");
+            Arc::clone(&rec_ja)
+        } else {
+            load_recognizer(
+                models_dir,
+                &manifest.ocr.rec_en,
+                manifest.ocr.dicts.get("en"),
+                &preprocess,
+                "en",
+            )?
+        };
         let rec_multi = match &manifest.ocr.rec_multi {
             Some(entry) => {
                 let dict_key = dict_key_for_multi(&manifest.ocr.dicts).ok_or_else(|| {
@@ -200,12 +216,18 @@ impl PaddleOcrProvider {
                             .to_string(),
                     )
                 })?;
-                Some(load_recognizer(
-                    models_dir,
-                    entry,
-                    manifest.ocr.dicts.get(dict_key),
-                    "multi",
-                )?)
+                if rec_multi_shared {
+                    tracing::debug!("rec_multi shares the unified PP-OCRv6 recognition model");
+                    Some(Arc::clone(&rec_ja))
+                } else {
+                    Some(load_recognizer(
+                        models_dir,
+                        entry,
+                        manifest.ocr.dicts.get(dict_key),
+                        &preprocess,
+                        "multi",
+                    )?)
+                }
             }
             None => None,
         };
@@ -228,7 +250,7 @@ impl PaddleOcrProvider {
             rec_ja,
             rec_en,
             rec_multi,
-            preprocess: manifest.ocr.preprocess_params.clone(),
+            preprocess,
             supported_languages,
         })
     }
@@ -414,8 +436,10 @@ fn run_ocr_pipeline(
 
     let params = DetectionParams {
         threshold: preprocess.det_threshold,
+        box_threshold: preprocess.box_threshold,
+        max_candidates: preprocess.max_candidates,
+        min_box_size: preprocess.min_box_size,
         unclip_ratio: preprocess.unclip_ratio,
-        min_box_area: DEFAULT_MIN_BOX_AREA,
     };
     let boxes = boxes_from_map(
         &probability,
@@ -444,14 +468,16 @@ fn run_ocr_pipeline(
         let line_width = if vertical { box_.height } else { box_.width };
         let line_height = if vertical { box_.width } else { box_.height };
         // Warp to the line's proportional width at the fixed recognition
-        // height. Wide lines are split into chunks by `Recognizer::run`
-        // instead of being compressed, so characters keep a readable size.
-        // The crop width is bounded by the input image dimensions because
+        // height. `Recognizer::run` recognizes the crop at its natural width
+        // (PP-OCRv6 rec input has a dynamic width dimension) and only falls
+        // back to overlapping chunks for pathological ultra-wide crops. The
+        // crop width is bounded by the input image dimensions because
         // detected boxes are clipped to the image bounds.
-        let target_width = ((line_width / line_height.max(1.0)) * REC_HEIGHT as f32)
+        let rec_height = preprocess.rec_input_height;
+        let target_width = ((line_width / line_height.max(1.0)) * rec_height as f32)
             .round()
-            .max(REC_HEIGHT as f32) as u32;
-        let crop = warp_perspective(&rgb, box_.polygon, target_width, REC_HEIGHT);
+            .max(rec_height as f32) as u32;
+        let crop = warp_perspective(&rgb, box_.polygon, target_width, rec_height);
         let crop = if vertical { rotate_90_cw(&crop) } else { crop };
         let line = recognizer.run(&crop, &run_options)?;
         tracing::debug!(
@@ -553,44 +579,73 @@ fn load_session(path: &Path, id: &str) -> Result<Session, OcrError> {
 
 /// Load a recognition session plus its dictionary.
 ///
-/// The character table embedded in the ONNX metadata (`character` key) is the
-/// authoritative source for `RapidOCR` PP-OCR models; the manifest dictionary
-/// file is only used as a fallback when that metadata is missing.
+/// The character table embedded in the ONNX metadata (`character` key) takes
+/// priority when present; otherwise the manifest dictionary file is used.
+/// The final character table length is validated against the model output
+/// class count at load time (fail-fast, guide §9.4).
 fn load_recognizer(
     models_dir: &Path,
     entry: &ModelEntry,
     dict_relative: Option<&PathBuf>,
+    preprocess: &PreprocessParams,
     language: &str,
 ) -> Result<Arc<Recognizer>, OcrError> {
     let dict_path = dict_relative.ok_or_else(|| {
         OcrError::InvalidManifest(format!("missing dictionary for language {language}"))
     })?;
+    let dict_file = models_dir.join(dict_path);
     let session = load_session(&models_dir.join(&entry.path), &entry.id)?;
-    let dict = session
+    let raw_lines = session
         .metadata()
         .ok()
         .and_then(|metadata| metadata.custom("character"))
         .map(|raw| {
-            build_character_dict(
-                raw.lines()
-                    .map(|line| line.trim_end_matches('\r').to_string())
-                    .collect(),
-            )
+            raw.lines()
+                .map(|line| line.trim_end_matches('\r').to_string())
+                .collect::<Vec<String>>()
         })
-        .or_else(|| load_dict(&models_dir.join(dict_path)).ok())
+        // PP-OCRv6 ONNX models carry no character table; ort reports a
+        // missing custom attribute as an empty string, so an empty embedded
+        // table must not shadow the manifest dictionary file.
+        .filter(|lines| !lines.is_empty())
+        .or_else(|| load_dict_lines(&dict_file).ok())
         .ok_or_else(|| {
             OcrError::InvalidManifest(format!("no usable character table for language {language}"))
         })?;
-    Ok(Arc::new(Recognizer::new(session, dict)?))
+    let dict_file_lines = raw_lines.len();
+    let dict = build_character_dict(
+        raw_lines,
+        preprocess.rec_append_space,
+        preprocess.rec_blank_index,
+    );
+    let output_shape = session
+        .outputs()
+        .first()
+        .map(|output| {
+            output
+                .dtype()
+                .tensor_shape()
+                .map(|shape| shape.to_vec())
+                .unwrap_or_default()
+        })
+        .ok_or_else(|| OcrError::InvalidManifest("recognition model has no outputs".to_string()))?;
+    verify_rec_classes(
+        &output_shape,
+        &dict,
+        dict_file_lines,
+        preprocess,
+        &dict_file,
+    )?;
+    Ok(Arc::new(Recognizer::new(
+        session,
+        dict,
+        preprocess.rec_input_height,
+        preprocess.rec_input_width,
+    )?))
 }
 
-/// Load a dictionary file, ensuring the CTC blank occupies index 0.
-///
-/// Follows the `RapidOCR` character-table convention used by the bundled
-/// PP-OCRv4 ONNX models: `num_classes = splitlines(dict) + 2` (one trailing
-/// space plus the blank at index 0). The embedded PP-OCRv4 character tables
-/// contain 96 lines for English and 4400 lines for Japanese.
-fn load_dict(path: &Path) -> Result<Vec<String>, OcrError> {
+/// Read the raw lines of a dictionary file.
+fn load_dict_lines(path: &Path) -> Result<Vec<String>, OcrError> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         tracing::error!(path = %path.display(), error = %e, "dictionary load failed");
         OcrError::ModelLoad(e.to_string())
@@ -606,26 +661,66 @@ fn load_dict(path: &Path) -> Result<Vec<String>, OcrError> {
             path.display()
         )));
     }
-    let dict = build_character_dict(lines);
     tracing::info!(
-        chars = dict.len(),
+        chars = lines.len(),
         path = %path.display(),
         "dictionary loaded"
     );
-    Ok(dict)
+    Ok(lines)
 }
 
 /// Build the final CTC character table for a PP-OCR recognition model.
 ///
-/// Mirrors the `RapidOCR` `CTCLabelDecode` convention: append a trailing space
-/// (space is not in the character file for these models) and insert the blank
-/// token at index 0 when it is not already present.
-fn build_character_dict(mut lines: Vec<String>) -> Vec<String> {
-    lines.push(' '.to_string());
-    if lines.first().is_some_and(|first| !first.is_empty()) {
-        lines.insert(0, String::new());
+/// Follows the PP-OCR `CTCLabelDecode` convention: append a trailing space
+/// when `append_space` is set (space is not in the character file for these
+/// models) and insert the blank token at `blank_index` when the slot is not
+/// already blank. The defaults for PP-OCRv6 are `append_space = true` and
+/// `blank_index = 0`, yielding `1 + 18708 + 1 = 18710` classes.
+fn build_character_dict(
+    mut lines: Vec<String>,
+    append_space: bool,
+    blank_index: usize,
+) -> Vec<String> {
+    if append_space {
+        lines.push(' '.to_string());
+    }
+    if blank_index <= lines.len()
+        && lines
+            .get(blank_index)
+            .is_some_and(|entry| !entry.is_empty())
+    {
+        lines.insert(blank_index, String::new());
     }
     lines
+}
+
+/// Fail-fast class-count check for a recognition model (guide §9.4).
+///
+/// The model output's last dimension must equal the final character table
+/// length. When the output shape is fully dynamic the static check is
+/// skipped; the runtime decode check in [`Recognizer`] still applies.
+fn verify_rec_classes(
+    output_shape: &[i64],
+    dict: &[String],
+    dict_file_lines: usize,
+    preprocess: &PreprocessParams,
+    dict_path: &Path,
+) -> Result<(), OcrError> {
+    let Some(&classes) = output_shape.last() else {
+        return Ok(());
+    };
+    if classes <= 0 || classes as usize == dict.len() {
+        return Ok(());
+    }
+    Err(OcrError::InvalidManifest(format!(
+        "recognition class count mismatch: model output shape {output_shape:?} has {classes} classes, \
+         character table has {} entries (dictionary file lines: {dict_file_lines}, \
+         append_space: {}, blank_index: {}, dictionary: {})",
+        dict.len(),
+        preprocess.rec_append_space,
+        preprocess.rec_blank_index,
+        dict_path.display()
+    )))
 }
 
 /// Find the dictionary key used by the optional multi-language model.
@@ -718,53 +813,129 @@ mod tests {
     }
 
     #[test]
-    fn load_dict_adds_blank_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dict.txt");
-        std::fs::write(&path, "a\nb\n").unwrap();
-        let dict = load_dict(&path).unwrap();
-        assert_eq!(dict, vec!["", "a", "b", " "]);
-    }
-
-    #[test]
-    fn load_dict_keeps_explicit_blank() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dict.txt");
-        std::fs::write(&path, "\na\nb\n").unwrap();
-        let dict = load_dict(&path).unwrap();
-        assert_eq!(dict, vec!["", "a", "b", " "]);
-    }
-
-    #[test]
-    fn build_character_dict_matches_model_class_count() {
-        // The embedded en table has 95 splitlines entries (94 chars + space);
-        // RapidOCR appends another space and inserts blank at index 0, giving
-        // 97 entries matching the rec_en.onnx output classes.
-        let embedded: Vec<String> = (0..95).map(|index| index.to_string()).collect();
-        let dict = build_character_dict(embedded);
-        assert_eq!(dict.len(), 97);
+    fn build_character_dict_matches_ppocrv6_class_count() {
+        // 18708 dictionary lines + blank at index 0 + appended space = 18710
+        // classes, matching the v6 rec ONNX output (inspect_report.json).
+        let embedded: Vec<String> = (0..18_708).map(|index| index.to_string()).collect();
+        let dict = build_character_dict(embedded, true, 0);
+        assert_eq!(dict.len(), 18_710);
         assert_eq!(dict[0], "");
         assert_eq!(dict.last().map(String::as_str), Some(" "));
     }
 
     #[test]
-    fn load_dict_normalizes_blank_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("dict.txt");
-        std::fs::write(&path, "blank\na\n").unwrap();
-        let dict = load_dict(&path).unwrap();
-        assert_eq!(dict, vec!["", "blank", "a", " "]);
+    fn build_character_dict_respects_append_space_and_blank_index() {
+        let lines = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            build_character_dict(lines.clone(), false, 0),
+            vec!["", "a", "b"]
+        );
+        assert_eq!(
+            build_character_dict(lines.clone(), true, 0),
+            vec!["", "a", "b", " "]
+        );
+        // blank_index = 1 moves the blank into the middle of the table.
+        assert_eq!(
+            build_character_dict(lines, true, 1),
+            vec!["a", "", "b", " "]
+        );
     }
 
     #[test]
-    fn load_dict_rejects_empty_file() {
+    fn load_dict_lines_reads_raw_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dict.txt");
+        std::fs::write(&path, "a\nb\n").unwrap();
+        assert_eq!(load_dict_lines(&path).unwrap(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn load_dict_lines_rejects_empty_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dict.txt");
         std::fs::write(&path, "").unwrap();
         assert!(matches!(
-            load_dict(&path),
+            load_dict_lines(&path),
             Err(OcrError::InvalidManifest(_))
         ));
+    }
+
+    #[test]
+    fn verify_rec_classes_accepts_matching_count() {
+        let dict = build_character_dict(vec!["a".to_string(), "b".to_string()], true, 0);
+        let preprocess = PreprocessParams {
+            image_size: (640, 640),
+            mean: [0.485; 3],
+            std: [0.229; 3],
+            det_threshold: 0.2,
+            unclip_ratio: 1.4,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
+            rec_input_height: 48,
+            rec_input_width: 320,
+            rec_append_space: true,
+            rec_blank_index: 0,
+        };
+        assert!(verify_rec_classes(&[1, 40, 4], &dict, 2, &preprocess, Path::new("d.txt")).is_ok());
+    }
+
+    #[test]
+    fn verify_rec_classes_fails_fast_with_diagnostics() {
+        let dict = build_character_dict(vec!["a".to_string(), "b".to_string()], true, 0);
+        let preprocess = PreprocessParams {
+            image_size: (640, 640),
+            mean: [0.485; 3],
+            std: [0.229; 3],
+            det_threshold: 0.2,
+            unclip_ratio: 1.4,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
+            rec_input_height: 48,
+            rec_input_width: 320,
+            rec_append_space: true,
+            rec_blank_index: 0,
+        };
+        let error = verify_rec_classes(
+            &[1, 40, 5],
+            &dict,
+            2,
+            &preprocess,
+            Path::new("ocr/ppocrv6_dict.txt"),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("class count mismatch"));
+        assert!(message.contains("[1, 40, 5]"));
+        assert!(message.contains("5 classes"));
+        assert!(message.contains("dictionary file lines: 2"));
+        assert!(message.contains("append_space: true"));
+        assert!(message.contains("blank_index: 0"));
+        assert!(message.contains("ocr/ppocrv6_dict.txt"));
+    }
+
+    #[test]
+    fn verify_rec_classes_skips_dynamic_dimension() {
+        let dict = build_character_dict(vec!["a".to_string()], false, 0);
+        let preprocess = PreprocessParams {
+            image_size: (640, 640),
+            mean: [0.485; 3],
+            std: [0.229; 3],
+            det_threshold: 0.2,
+            unclip_ratio: 1.4,
+            box_threshold: 0.45,
+            max_candidates: 3000,
+            min_box_size: 3.0,
+            rec_input_height: 48,
+            rec_input_width: 320,
+            rec_append_space: false,
+            rec_blank_index: 0,
+        };
+        // A fully dynamic last dimension (<= 0) cannot be statically checked.
+        assert!(
+            verify_rec_classes(&[1, -1, -1], &dict, 1, &preprocess, Path::new("d.txt")).is_ok()
+        );
     }
 
     #[test]

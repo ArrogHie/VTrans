@@ -7,27 +7,34 @@
 - MODULE_SLUG: ocr
 - CRATE_PATH: crates/vtrans-ocr
 - SCOPE: ocr（含 `docs/modules/05-ocr.md`、`crates/vtrans-ocr/README.md`、`crates/vtrans-ocr/tests`、`crates/vtrans-ocr/examples/ocr_verify.rs`，按 GIT_WORKFLOW 定义）
-- BRANCH_NAME: `feat/05-ppocrv6-ocr`（依赖 08 合并到 main 后从 main 拉分支）
+- BRANCH_NAME: `feat/05-ppocrv6-ocr`（依赖 08 修复合并到 main 后从 main 拉分支）
 
 ### 功能上下文
 
 - 功能目标：OCR 模型升级 PP-OCRv4 → PP-OCRv6 Small；统一 rec 槽位；`auto` / `zh-CN` 解锁；彻底弃用 v4
 - 本模块承担：det/rec 预处理与后处理适配 v6、字典装载与类数校验、回归测试
-- 上游已提供：08 合并后的 `PreprocessParams` 扩展字段（box_threshold / max_candidates / min_box_size / rec_input_height / rec_input_width / rec_append_space / rec_blank_index）与新 manifest（rec_ja / rec_en / rec_multi 同一 v6 rec 模型，字典 ja / en / auto 同一文件）
+- 上游已提供：08 合并后的 `PreprocessParams` 扩展字段（**具体类型 + serde default**：box_threshold / max_candidates / min_box_size / rec_input_height / rec_input_width / rec_append_space / rec_blank_index，默认值常量在 vtrans_models 根导出）与新 manifest（rec_ja / rec_en / rec_multi 同一 v6 rec 模型，字典 ja / en / auto 同一文件，det image_size=[640,640]）
 - 已确认决策：不保留 v4 兼容路径；**不进行任何与 v4 的对比测试**（含英文）；日文/竖排质量不纳入验收；验收以 v6 固定测试集断言 + Python 基准对照为准
+
+### ONNX 实测事实（2026-08-07 协调者 inspect，08 修复后入库为准）
+
+- det.onnx：输入 `x` dtype float32 `[N,3,H,W]` **动态 H/W**、opset 14 → 走动态路径（det 输入上限以 manifest `image_size` [640,640] 为准、32 对齐），**勿按固定 640×640 实现**
+- rec.onnx：输入 `x` `[N,3,48,W]`（固定 48 高、动态宽）、输出 `fetch_name_0` `[N,T,18710]`、opset 11 → 高 48、宽 ≤320 右补零成立
+- 类数一致性：输出 C=18710 == 字典 18708 + blank + space ✓
 
 ### 任务要求
 
 - 范围：仅限本模块；禁止修改其他 crate；禁止修改 vtrans-core
 - 行为变更（约束性定义，实现细节由开发 Agent 定）：
-  1. 识别预处理：输入高度 32 → 48（manifest `rec_input_height`）；宽度上限 320（`rec_input_width`）；归一化 `(x/255-0.5)/0.5` 不变；若 ONNX 为固定宽度则右侧补 0 到 320（以 inspect 结果为准）
+  1. 识别预处理：输入高度 32 → 48（manifest `rec_input_height`）；宽度上限 320（`rec_input_width`）；归一化 `(x/255-0.5)/0.5` 不变；固定 48 高、动态宽，右侧补 0 到 320（已由实测确认）
   2. 长行分片：分片宽度/重叠逻辑保留，高度参数随 48 调整；分片回归测试保持通过
-  3. 检测预处理：若 ONNX 固定 `[1,3,640,640]` → 直接 resize 到 640×640，ratio_x / ratio_y 分开保存（指南 §6.2）；若动态宽高 → 复现 DetResizeForTest（目标边为 32 的倍数）；以 inspect 结果为准，不臆造
+  3. 检测预处理：实测为动态 H/W → 复现 DetResizeForTest（det 输入上限 = manifest `image_size` [640,640]，目标边为 32 的倍数，与 Python 基准 `limit_side=640` 一致）；ratio_x / ratio_y 分开保存
   4. DB 后处理：新增 box_threshold（0.45）分数过滤、max_candidates（3000）候选上限、min_box_size（最短边约 3px）过滤；unclip_ratio 随 manifest（1.4）；坐标还原两段映射（output map → det input → 原图）保持正确
   5. 通道顺序：以 Python 基准对照结果为准；指南默认 BGR，若基准证明模型接受 RGB 则保持现状并记录决策
   6. 字典：以实际 ONNX 元数据 / 模型包字符表为准，否则用 `ppocrv6_dict.txt`；类数一致性（`output C == dict.len()`）在**加载期**校验 fail-fast，解码期校验保留；错误信息含输出 shape、字典行数、是否追加空格、blank index（指南 §9.4）
   7. 输入/输出节点名继续从 session metadata 读取，不硬编码（现有实现已如此，保持）
   8. **弃用 v4**：移除 v4 专有分支与 v4 文档描述；manifest 不再引用 v4 文件；不实现 v4 回退；不建立 v4 对比基线
+  9. **测试字面量兼容**：`crates/vtrans-ocr/src/preprocess.rs` 单测（约 372 行）与 doctest（约 173 行）的 `PreprocessParams { .. }` 构造补齐新字段（或 `..Default::default()`，若实现提供 Default）
 - 约束：
   - `OcrProvider` trait / `OcrOptions` / `OcrResult` / `OcrError` 零改动
   - 不跨 IPC 传图；日志不记录完整文本（保留 truncate 语义）
@@ -37,6 +44,7 @@
   - 集成（默认 ignore，需模型）：`tests/long_line_regression.rs` 更新期望、`tests/provider_load.rs`、`examples/ocr_verify.rs` 手动验证（英文固定测试集 + 中文 auto/zh-CN）
   - 语言路由单测保持（auto / ja / en / zh-CN 均可用）
   - 与 Python 基准（08 提供）逐文件对照：det 输入/输出误差、CTC 文本一致（指南 §14）
+- 可选优化（不阻塞）：rec_ja / rec_en / rec_multi 指向同一 ONNX，可考虑单 session 共享以降低内存；保持 3 个独立 session 亦可
 - 文档要求：README 同步（识别高度 48、分片、字典来源、已知限制更新——移除「32 高硬编码」限制，新增「v6 日文/竖排质量未专项验收」与「已弃用 v4」）；`docs/modules/05-ocr.md` 同步
 - 提交规范：`feat(ocr): ...`，可多次提交，每次可编译
 

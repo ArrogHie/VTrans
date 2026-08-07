@@ -11,11 +11,18 @@ use vtrans_ocr::PaddleOcrProvider;
 
 const PREPROCESS_JSON: &str = r#"
     "preprocess_params": {
-      "image_size": [960, 960],
+      "image_size": [640, 640],
       "mean": [0.485, 0.456, 0.406],
       "std": [0.229, 0.224, 0.225],
-      "det_threshold": 0.3,
-      "unclip_ratio": 1.5
+      "det_threshold": 0.2,
+      "unclip_ratio": 1.4,
+      "box_threshold": 0.45,
+      "max_candidates": 3000,
+      "min_box_size": 3.0,
+      "rec_input_height": 48,
+      "rec_input_width": 320,
+      "rec_append_space": true,
+      "rec_blank_index": 0
     }
 "#;
 

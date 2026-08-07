@@ -8,9 +8,12 @@
 //!     --image path/to/image.png \
 //!     [--language ja|en|zh-CN|auto] \
 //!     [--min-confidence 0.55] \
-//!     [--no-vertical]
+//!     [--no-vertical] \
+//!     [--dump-det-input path.npy]
 //! ```
 
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use tokio_util::sync::CancellationToken;
@@ -18,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use vtrans_core::types::{CapturedImage, Language, OcrOptions, PixelFormat, ScreenRegion};
 use vtrans_core::OcrProvider;
 use vtrans_models::ModelManager;
+use vtrans_ocr::preprocess::{det_preprocess, rgb_region};
 use vtrans_ocr::PaddleOcrProvider;
 
 struct CliArgs {
@@ -26,6 +30,7 @@ struct CliArgs {
     language: Language,
     min_confidence: f32,
     detect_vertical: bool,
+    dump_det_input: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -37,6 +42,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = PaddleOcrProvider::from_manager(&manager)?;
 
     let region = ScreenRegion::new("cli", 0, 0, image.width, image.height);
+    if let Some(path) = &args.dump_det_input {
+        let rgb = rgb_region(&image, &region)?;
+        let input = det_preprocess(&rgb, &manager.manifest().ocr.preprocess_params)?;
+        write_npy(
+            path,
+            input.tensor.shape(),
+            input.tensor.as_slice().unwrap_or_default(),
+        )?;
+        println!("det input dumped to {}", path.display());
+        return Ok(());
+    }
     let options = OcrOptions {
         language: args.language,
         min_confidence: args.min_confidence,
@@ -78,6 +94,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut language = Language::Auto;
     let mut min_confidence = 0.55;
     let mut detect_vertical = true;
+    let mut dump_det_input = None;
 
     let mut index = 0;
     while index < args.len() {
@@ -101,9 +118,16 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
                     .map_err(|_| format!("invalid confidence: {value}"))?;
             }
             "--no-vertical" => detect_vertical = false,
+            "--dump-det-input" => {
+                dump_det_input = Some(PathBuf::from(next_value(
+                    args,
+                    &mut index,
+                    "--dump-det-input",
+                )?));
+            }
             "--help" | "-h" => {
                 println!(
-                    "usage: ocr_verify --models <dir> --image <path> [--language ja|en|zh-CN|auto] [--min-confidence 0.55] [--no-vertical]"
+                    "usage: ocr_verify --models <dir> --image <path> [--language ja|en|zh-CN|auto] [--min-confidence 0.55] [--no-vertical] [--dump-det-input path.npy]"
                 );
                 std::process::exit(0);
             }
@@ -118,7 +142,42 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
         language,
         min_confidence,
         detect_vertical,
+        dump_det_input,
     })
+}
+
+/// Write a float32 array in `NumPy` `.npy` format (C order).
+///
+/// Used by the verification CLI to export the normalized detection input
+/// tensor so it can be compared stage by stage against the Python baseline
+/// artifacts produced by `scripts/ppocrv6/baseline_ocr.py` (guide §14).
+///
+/// # Errors
+///
+/// Returns an I/O error if the file cannot be created or written.
+fn write_npy(path: &Path, shape: &[usize], data: &[f32]) -> std::io::Result<()> {
+    let header = format!(
+        "{{'descr': '<f4', 'fortran_order': False, 'shape': ({}), }}",
+        shape
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let mut bytes = Vec::with_capacity(header.len() + 1 + data.len() * 4);
+    bytes.extend_from_slice(b"\x93NUMPY");
+    bytes.push(1); // major version
+    bytes.push(0); // minor version
+    let header_len = u16::try_from(header.len() + 1)
+        .map_err(|_| std::io::Error::other("npy header too long"))?;
+    bytes.extend_from_slice(&header_len.to_le_bytes());
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.push(b'\n');
+    for value in data {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let mut file = File::create(path)?;
+    file.write_all(&bytes)
 }
 
 /// Read the value following a `--flag`.
