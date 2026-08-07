@@ -65,18 +65,30 @@ cargo fetch
 ## 4. 模型文件准备
 
 模型文件不提交 Git（字典 `ppocrv6_dict.txt` 例外，随 manifest 入库）。
-OCR 模型为 PP-OCRv6 Small（det + rec），翻译模型不变。首次开发前目标布局：
+OCR 模型为 PP-OCRv6 Small（det + rec）；自 v0.3.0 起翻译模型为
+**双引擎**（Bergamot en→zh + CTranslate2 INT8 ja→zh，manifest v2）。
+首次开发前目标布局：
 
 ```text
 src-tauri/resources/models/
-  manifest.json
+  manifest.json        # v2：OCR 段 + translation 双引擎段
   ocr/
     det.onnx
     rec.onnx          # rec_ja / rec_en / rec_multi 三槽位共享同一文件
     ppocrv6_dict.txt
   translation/
-    model.onnx
-    tokenizer.json
+    en-zh/
+      model.enzh.intgemm.alphas.bin
+      srcvocab.enzh.spm
+      trgvocab.enzh.spm
+      lex.50.50.enzh.s2t.bin
+    ja-zh/
+      model.bin
+      config.json
+      source_vocabulary.json
+      target_vocabulary.json
+      source.spm
+      target.spm
 ```
 
 ### 4.1 一键准备（推荐）
@@ -95,7 +107,25 @@ src-tauri/resources/models/
 .\scripts\ppocrv6\setup_ppocrv6.ps1 -SkipBaseline     # 跳过 Python 基准
 ```
 
-### 4.2 开发机要求（转换/检查/基准）
+### 4.2 翻译模型准备（v0.3.0+）
+
+`scripts/translation/setup_translation_models.ps1` 提供「下载 en-zh → 转换
+ja-zh → 体积审计（200 MB 门禁）→ manifest 回填」全流程：
+
+```powershell
+.\scripts\translation\setup_translation_models.ps1
+```
+
+分步脚本：
+
+```powershell
+python scripts\translation\fetch_firefox_enzh.py --download        # en-zh（Mozilla registry）
+.\scripts\translation\convert_ja_zh_ct2.ps1                         # ja-zh（CTranslate2 INT8）
+python scripts\translation\audit_model_sizes.py --self-test         # 门禁自测
+python scripts\translation\backfill_translation_manifest.py --update-template
+```
+
+### 4.3 开发机要求（转换/检查/基准）
 
 - Python 3.10 或 3.11（Windows 下 3.12 亦可）
 - PaddlePaddle 3.0+（脚本锁定 3.3.1）、`paddlex[ocr]`、paddle2onnx 2.0.2rc3 插件
@@ -103,7 +133,21 @@ src-tauri/resources/models/
 - Windows 转换若遇到 paddle2onnx DLL 问题，使用 WSL2 执行本脚本
 - 转换工具链版本漂移后需重跑固定回归集（见接入指南 §21）
 
-### 4.3 手动放置
+翻译模型（`scripts/translation/`）额外要求：
+
+- Python 3.10+（推荐 3.12）
+- 网络访问：Mozilla 模型 registry（Google Storage）、Hugging Face（`shun89/opus-mt-ja-zh` 约 314 MB）
+- 首次运行脚本会创建专用 venv（`scripts/translation/work/.venv`）并安装：
+  - `ctranslate2==4.8.1`（锁定版本，勿升级）
+  - `transformers>=4.50`、`torch`、`sentencepiece`、`huggingface_hub`
+- 模型 revision 与 SHA-256 由脚本冻结进 `manifest.json` 的 `translation.metadata`；registry / HF 版本漂移后必须重跑回填
+
+07 模块（native bridge）构建额外要求：
+
+- CMake 3.20+（Bergamot v0.4.5 / CTranslate2 4.8.1 的 C++ 构建）
+- Visual Studio 2022 Build Tools（含 "Desktop development with C++" 工作负载，即 §1.5 的 MSVC 工具链）
+
+### 4.4 手动放置
 
 也可手动放置模型文件后运行完整性校验：
 
@@ -113,19 +157,10 @@ cargo run --bin vtrans-verify-models
 
 校验 CLI 输出 `all model files are valid` 即通过。
 
-### 4.4 翻译模型来源（可选）
-
-本地翻译模型（`translation/model.onnx` + `tokenizer.json`）不属于 v6 OCR
-升级范围，旧版 `scripts/download_models.ps1` 已随 v4 一并移除。如需重新
-生成翻译模型，使用 `teradata-opus-translate`：
-
-```powershell
-python -m pip install teradata-opus-translate
-python -c "from teradata_opus_translate import convert_model, convert_tokenizer; convert_model('Helsinki-NLP/opus-mt-en-zh', output_path='src-tauri/resources/models/translation/model.onnx', precision='int8'); convert_tokenizer('Helsinki-NLP/opus-mt-en-zh', output_path='src-tauri/resources/models/translation/tokenizer.json')"
-```
-
-注意：`tokenizer.json` 是模型文件，不提交 Git；`.gitignore` 已忽略
-`src-tauri/resources/models/translation/` 整个目录。
+注意：旧版 403 MB ONNX 单模型路径（`translation/model.onnx` +
+`tokenizer.json`）已随 v0.3.0 移除（计划 A3）；`scripts/download_models.ps1`
+亦已随 v4 删除。`.gitignore` 忽略 `src-tauri/resources/models/translation/`
+整个目录，翻译模型二进制不入库。
 
 ## 5. 构建与运行
 
