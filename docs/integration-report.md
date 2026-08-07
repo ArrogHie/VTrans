@@ -142,7 +142,8 @@ NSIS 安装冒烟：`VTrans_0.1.0_x64-setup.exe /S` 退出码 0，安装到
 
 - 进程存活，主窗口标题 `VTrans`，响应正常；`config.json` 首次运行自动生成（默认值完整）。
 - 启动日志：`manifest loaded` → `WindowsCaptureSource initialized count=1` →
-  ONNX det/rec_ja/rec_en 三 session 加载（合计 ~280 ms）→ `application state initialized
+  ONNX det + rec 单 session 加载（rec_ja/rec_en/rec_multi 三槽位共享 `ocr/rec.onnx`，
+  仅加载一个 rec session）→ `application state initialized
   ocr_provider="pp-ocr" translation_provider="api"` → `global shortcuts registered count=3`。
 - 切换 `provider=local` 重启：`local translation provider initialized
   model_id=opus-mt-en-zh-int8 model_kind=Generation supported_pairs=1 max_length=512
