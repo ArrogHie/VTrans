@@ -243,3 +243,56 @@ fn legacy_v4_manifest_still_deserializes_with_v6_defaults() {
     let report = manager.verify_integrity().unwrap();
     assert!(report.is_ok());
 }
+
+#[test]
+fn shared_rec_path_verifies_with_single_file() {
+    // rec_ja / rec_en / rec_multi share one physical file (ocr/rec.onnx).
+    // Verification must pass, and the report must count each manifest
+    // entry (and each dict) rather than each unique file.
+    let dir = tempfile::tempdir().unwrap();
+    let det_sha = write_file(dir.path(), "ocr/det.onnx", b"det");
+    let rec_sha = write_file(dir.path(), "ocr/rec.onnx", b"shared rec model");
+    write_file(dir.path(), "ocr/ppocrv6_dict.txt", b"dict\n");
+    let trans_model_sha = write_file(dir.path(), "translation/model.onnx", b"translation model");
+    let tokenizer_sha = write_file(dir.path(), "translation/tokenizer.json", b"{}");
+
+    let manifest = format!(
+        r#"{{
+  "version": 1,
+  "ocr": {{
+    "det": {{ "id": "det", "path": "ocr/det.onnx", "sha256": "{det_sha}", "size_bytes": 3 }},
+    "rec_ja": {{ "id": "ppocr-rec-v6", "path": "ocr/rec.onnx", "sha256": "{rec_sha}", "size_bytes": 16 }},
+    "rec_en": {{ "id": "ppocr-rec-v6-en", "path": "ocr/rec.onnx", "sha256": "{rec_sha}", "size_bytes": 16 }},
+    "rec_multi": {{ "id": "ppocr-rec-v6-multi", "path": "ocr/rec.onnx", "sha256": "{rec_sha}", "size_bytes": 16 }},
+    "dicts": {{ "ja": "ocr/ppocrv6_dict.txt", "en": "ocr/ppocrv6_dict.txt", "auto": "ocr/ppocrv6_dict.txt" }},
+    "preprocess_params": {{
+      "image_size": [640, 640],
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "det_threshold": 0.2,
+      "unclip_ratio": 1.4
+    }}
+  }},
+  "translation": {{
+    "model": {{ "id": "tm", "path": "translation/model.onnx", "sha256": "{trans_model_sha}", "size_bytes": 17 }},
+    "tokenizer": {{ "id": "tk", "path": "translation/tokenizer.json", "sha256": "{tokenizer_sha}", "size_bytes": 2 }},
+    "supported_pairs": [["en", "zh-CN"]],
+    "max_length": 512,
+    "inference_params": {{ "max_batch_size": 1, "num_beams": 4 }}
+  }}
+}}"#
+    );
+    std::fs::write(dir.path().join("manifest.json"), manifest).unwrap();
+
+    let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+    let ocr = &manager.manifest().ocr;
+    assert_eq!(ocr.rec_ja.path, ocr.rec_en.path);
+    assert_eq!(ocr.rec_en.path, ocr.rec_multi.as_ref().unwrap().path);
+
+    let report = manager.verify_integrity().unwrap();
+    // 6 model entries (det + 3 rec + translation model + tokenizer) + 3 dicts.
+    assert_eq!(report.checked, 9);
+    assert_eq!(report.passed, 9);
+    assert!(report.failed.is_empty());
+    assert!(report.is_ok());
+}

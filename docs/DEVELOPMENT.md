@@ -72,9 +72,7 @@ src-tauri/resources/models/
   manifest.json
   ocr/
     det.onnx
-    rec_ja.onnx
-    rec_en.onnx
-    rec_multi.onnx
+    rec.onnx          # rec_ja / rec_en / rec_multi 三槽位共享同一文件
     ppocrv6_dict.txt
   translation/
     model.onnx

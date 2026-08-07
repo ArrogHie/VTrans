@@ -45,17 +45,30 @@ def main() -> int:
     det_size = args.det.stat().st_size
     rec_size = args.rec.stat().st_size
 
-    # Deploy artifacts into the models directory.
+    # Deploy artifacts into the models directory. Only one rec copy is
+    # deployed: rec_ja / rec_en / rec_multi all point at `rec.onnx`.
     args.deploy_dir.mkdir(parents=True, exist_ok=True)
     targets = {
         "det.onnx": args.det,
-        "rec_ja.onnx": args.rec,
-        "rec_en.onnx": args.rec,
-        "rec_multi.onnx": args.rec,
+        "rec.onnx": args.rec,
         args.dict_name: args.dict,
     }
     for name, src in targets.items():
-        shutil.copyfile(src, args.deploy_dir / name)
+        dest = args.deploy_dir / name
+        if dest.exists() and dest.samefile(src):
+            print(f"  skip   {name} (already in place)")
+            continue
+        shutil.copyfile(src, dest)
+        print(f"  deploy {name}")
+
+    # Idempotent convergence: remove stale multi-copy rec files left by the
+    # previous layout so repeated runs always end in a single-rec state.
+    stale_rec = ["rec_en.onnx", "rec_multi.onnx"]
+    for name in stale_rec:
+        stale = args.deploy_dir / name
+        if stale.exists():
+            stale.unlink()
+            print(f"  remove {name} (stale rec copy)")
 
     # Update the manifest JSON.
     manifest_path = args.manifest
@@ -73,6 +86,7 @@ def main() -> int:
                 "rec_en": "ppocr-rec-v6-en",
                 "rec_multi": "ppocr-rec-v6-multi",
             }[key],
+            path="ocr/rec.onnx",
             sha256=rec_sha,
             size_bytes=rec_size,
         )
