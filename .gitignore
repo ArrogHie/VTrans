@@ -7,6 +7,8 @@ src-tauri/resources/models/translation/*
 
 # PP-OCRv6 准备脚本的中间产物（下载包、转换、基准）
 scripts/ppocrv6/work/
+# 翻译模型准备脚本的中间产物（venv、下载副本、转换元数据）
+scripts/translation/work/
 # 用户提供的 v6 产物副本（onnx 与字典），正式模型文件由脚本部署到
 # src-tauri/resources/models/ocr/，字典以该目录版本为准
 docs/feature-plans/ppocrv6-upgrade/*.txt
