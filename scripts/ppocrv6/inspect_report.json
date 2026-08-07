@@ -1,0 +1,74 @@
+{
+  "det": {
+    "path": "docs/feature-plans/ppocrv6-upgrade/pp-ocrv6_small_det.onnx",
+    "size_bytes": 9880512,
+    "opset": 14,
+    "ir_version": 10,
+    "inputs": [
+      {
+        "name": "x",
+        "dtype": "FLOAT",
+        "shape": [
+          "DynamicDimension.0",
+          3,
+          "DynamicDimension.1",
+          "DynamicDimension.2"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "fetch_name_0",
+        "dtype": "FLOAT",
+        "shape": [
+          "ConvTranspose_459_o0__d0",
+          1,
+          "ConvTranspose_459_o0__d2",
+          "ConvTranspose_459_o0__d3"
+        ]
+      }
+    ],
+    "ort_session_ok": true
+  },
+  "rec": {
+    "path": "docs/feature-plans/ppocrv6-upgrade/pp-ocrv6_small_rec.onnx",
+    "size_bytes": 21159378,
+    "opset": 11,
+    "ir_version": 6,
+    "inputs": [
+      {
+        "name": "x",
+        "dtype": "FLOAT",
+        "shape": [
+          "DynamicDimension.0",
+          3,
+          48,
+          "DynamicDimension.1"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "fetch_name_0",
+        "dtype": "FLOAT",
+        "shape": [
+          "DynamicDimension.0",
+          "Reshape_471_o0__d2",
+          18710
+        ]
+      }
+    ],
+    "ort_session_ok": true
+  },
+  "dict": {
+    "path": "docs/feature-plans/ppocrv6-upgrade/ppocrv6_dict.txt",
+    "lines": 18708,
+    "expected_classes_with_blank_and_space": 18710
+  },
+  "class_consistency": {
+    "actual_classes": 18710,
+    "expected_classes": 18710,
+    "match": true
+  },
+  "channel_order_note": "BGR per PP-OCRv6 inference.yml DecodeImage.img_mode; the Python baseline is the authority."
+}

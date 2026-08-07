@@ -64,7 +64,8 @@ cargo fetch
 
 ## 4. 模型文件准备
 
-模型文件不提交 Git。首次开发前需手动放置：
+模型文件不提交 Git（字典 `ppocrv6_dict.txt` 例外，随 manifest 入库）。
+OCR 模型为 PP-OCRv6 Small（det + rec），翻译模型不变。首次开发前目标布局：
 
 ```text
 src-tauri/resources/models/
@@ -73,24 +74,60 @@ src-tauri/resources/models/
     det.onnx
     rec_ja.onnx
     rec_en.onnx
-    dict_ja.txt
-    dict_en.txt
+    rec_multi.onnx
+    ppocrv6_dict.txt
   translation/
     model.onnx
     tokenizer.json
 ```
 
-使用下载脚本自动获取（需要网络）：
+### 4.1 一键准备（推荐）
+
+`scripts/ppocrv6/setup_ppocrv6.ps1` 提供「下载 → 转换 ONNX → 检查 → Python
+基准 → manifest 回填」全流程：
 
 ```powershell
-.\scripts\download_models.ps1
+.\scripts\ppocrv6\setup_ppocrv6.ps1
 ```
 
-或手动放置后运行完整性校验：
+参数：
+
+```powershell
+.\scripts\ppocrv6\setup_ppocrv6.ps1 -SkipConversion   # 使用已提供的 ONNX（跳过 PaddleX 转换）
+.\scripts\ppocrv6\setup_ppocrv6.ps1 -SkipBaseline     # 跳过 Python 基准
+```
+
+### 4.2 开发机要求（转换/检查/基准）
+
+- Python 3.10 或 3.11（Windows 下 3.12 亦可）
+- PaddlePaddle 3.0+（脚本锁定 3.3.1）、`paddlex[ocr]`、paddle2onnx 2.0.2rc3 插件
+- `onnx`、`onnxruntime`、`opencv-python-headless`、`numpy`、`pyclipper`、`pyyaml`
+- Windows 转换若遇到 paddle2onnx DLL 问题，使用 WSL2 执行本脚本
+- 转换工具链版本漂移后需重跑固定回归集（见接入指南 §21）
+
+### 4.3 手动放置
+
+也可手动放置模型文件后运行完整性校验：
 
 ```powershell
 cargo run --bin vtrans-verify-models
 ```
+
+校验 CLI 输出 `all model files are valid` 即通过。
+
+### 4.4 翻译模型来源（可选）
+
+本地翻译模型（`translation/model.onnx` + `tokenizer.json`）不属于 v6 OCR
+升级范围，旧版 `scripts/download_models.ps1` 已随 v4 一并移除。如需重新
+生成翻译模型，使用 `teradata-opus-translate`：
+
+```powershell
+python -m pip install teradata-opus-translate
+python -c "from teradata_opus_translate import convert_model, convert_tokenizer; convert_model('Helsinki-NLP/opus-mt-en-zh', output_path='src-tauri/resources/models/translation/model.onnx', precision='int8'); convert_tokenizer('Helsinki-NLP/opus-mt-en-zh', output_path='src-tauri/resources/models/translation/tokenizer.json')"
+```
+
+注意：`tokenizer.json` 是模型文件，不提交 Git；`.gitignore` 已忽略
+`src-tauri/resources/models/translation/` 整个目录。
 
 ## 5. 构建与运行
 

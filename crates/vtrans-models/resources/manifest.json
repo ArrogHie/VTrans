@@ -2,34 +2,47 @@
   "version": 1,
   "ocr": {
     "det": {
-      "id": "ppocr-det-v4",
+      "id": "ppocr-det-v6",
       "path": "ocr/det.onnx",
-      "sha256": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
-      "size_bytes": 4745517
+      "sha256": "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e",
+      "size_bytes": 9880512
     },
     "rec_ja": {
-      "id": "ppocr-rec-ja",
+      "id": "ppocr-rec-v6",
       "path": "ocr/rec_ja.onnx",
-      "sha256": "e1075a67dba758ecfc7ebc78a10ae61c95ac8fb66a9c86fab5541e33f085cb7a",
-      "size_bytes": 9753335
+      "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
+      "size_bytes": 21159378
     },
     "rec_en": {
-      "id": "ppocr-rec-en",
+      "id": "ppocr-rec-v6-en",
       "path": "ocr/rec_en.onnx",
-      "sha256": "e8770c967605983d1570cdf5352041dfb68fa0c21664f49f47b155abd3e0e318",
-      "size_bytes": 7653044
+      "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
+      "size_bytes": 21159378
     },
-    "rec_multi": null,
+    "rec_multi": {
+      "id": "ppocr-rec-v6-multi",
+      "path": "ocr/rec_multi.onnx",
+      "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
+      "size_bytes": 21159378
+    },
     "dicts": {
-      "ja": "ocr/dict_ja.txt",
-      "en": "ocr/dict_en.txt"
+      "ja": "ocr/ppocrv6_dict.txt",
+      "en": "ocr/ppocrv6_dict.txt",
+      "auto": "ocr/ppocrv6_dict.txt"
     },
     "preprocess_params": {
-      "image_size": [960, 960],
-      "mean": [0.485, 0.456, 0.406],
-      "std": [0.229, 0.224, 0.225],
-      "det_threshold": 0.3,
-      "unclip_ratio": 2.0
+      "image_size": [640,640],
+      "mean": [0.485,0.456,0.406],
+      "std": [0.229,0.224,0.225],
+      "det_threshold": 0.2,
+      "unclip_ratio": 1.4,
+      "box_threshold": 0.45,
+      "max_candidates": 3000,
+      "min_box_size": 3.0,
+      "rec_input_height": 48,
+      "rec_input_width": 320,
+      "rec_append_space": true,
+      "rec_blank_index": 0
     }
   },
   "translation": {
@@ -46,7 +59,7 @@
       "size_bytes": 4259760
     },
     "supported_pairs": [
-      ["en", "zh-CN"]
+      ["en","zh-CN"]
     ],
     "max_length": 512,
     "inference_params": {

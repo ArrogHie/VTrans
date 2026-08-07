@@ -196,3 +196,50 @@ fn manifest_with_no_translation() {
     assert_eq!(report.passed, 3);
     assert!(report.is_ok());
 }
+
+#[test]
+fn legacy_v4_manifest_still_deserializes_with_v6_defaults() {
+    // The schema is backward compatible: a v4-era manifest (no det/rec
+    // extension fields) must still load, and the new PreprocessParams
+    // fields must fall back to the PP-OCRv6 defaults.
+    let dir = tempfile::tempdir().unwrap();
+    let det_sha = write_file(dir.path(), "ocr/det.onnx", b"det");
+    let rec_ja_sha = write_file(dir.path(), "ocr/rec_ja.onnx", b"rj");
+    let rec_en_sha = write_file(dir.path(), "ocr/rec_en.onnx", b"re");
+
+    let manifest = format!(
+        r#"{{"version": 1,
+  "ocr": {{
+    "det": {{ "id": "det", "path": "ocr/det.onnx", "sha256": "{det_sha}", "size_bytes": 3 }},
+    "rec_ja": {{ "id": "rj", "path": "ocr/rec_ja.onnx", "sha256": "{rec_ja_sha}", "size_bytes": 2 }},
+    "rec_en": {{ "id": "re", "path": "ocr/rec_en.onnx", "sha256": "{rec_en_sha}", "size_bytes": 2 }},
+    "rec_multi": null,
+    "dicts": {{}},
+    "preprocess_params": {{
+      "image_size": [960, 960],
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "det_threshold": 0.3,
+      "unclip_ratio": 2.0
+    }}
+  }},
+  "translation": null
+}}"#
+    );
+    std::fs::write(dir.path().join("manifest.json"), manifest).unwrap();
+
+    let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+    let pp = &manager.manifest().ocr.preprocess_params;
+    assert!((pp.det_threshold - 0.3).abs() < f32::EPSILON);
+    assert!((pp.unclip_ratio - 2.0).abs() < f32::EPSILON);
+    assert!((pp.box_threshold - 0.45).abs() < f32::EPSILON);
+    assert_eq!(pp.max_candidates, 3000);
+    assert!((pp.min_box_size - 3.0).abs() < f32::EPSILON);
+    assert_eq!(pp.rec_input_height, 48);
+    assert_eq!(pp.rec_input_width, 320);
+    assert!(pp.rec_append_space);
+    assert_eq!(pp.rec_blank_index, 0);
+
+    let report = manager.verify_integrity().unwrap();
+    assert!(report.is_ok());
+}

@@ -28,7 +28,9 @@ use std::path::PathBuf;
 pub use manager::ModelManager;
 pub use manifest::{
     InferenceParams, ModelEntry, ModelManifest, OcrModelGroup, PreprocessParams,
-    TranslationModelGroup,
+    TranslationModelGroup, DEFAULT_BOX_THRESHOLD, DEFAULT_MAX_CANDIDATES, DEFAULT_MIN_BOX_SIZE,
+    DEFAULT_REC_APPEND_SPACE, DEFAULT_REC_BLANK_INDEX, DEFAULT_REC_INPUT_HEIGHT,
+    DEFAULT_REC_INPUT_WIDTH,
 };
 pub use verify::VerifyReport;
 

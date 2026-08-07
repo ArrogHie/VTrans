@@ -150,7 +150,7 @@ logs/
 
 - 模型文件（.onnx, .bin, 字典文件）不提交 Git
 - manifest.json 提交到 src-tauri/resources/models/
-- 下载脚本 scripts/download_models.ps1 提交到 Git
+- 下载脚本 scripts/ppocrv6/setup_ppocrv6.ps1 提交到 Git
 - 如需 Git LFS，在 .gitattributes 中配置 *.onnx filter=lfs
 
 ## 8. 发布流程
