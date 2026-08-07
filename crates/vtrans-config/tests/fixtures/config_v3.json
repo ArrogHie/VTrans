@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "capture": {
+    "interval_ms": 1000
+  },
+  "ocr": {
+    "language": "ja"
+  },
+  "translation": {
+    "provider": "local",
+    "source_language": "en",
+    "target_language": "zh-CN"
+  }
+}

@@ -35,6 +35,11 @@ pub(crate) fn default_provider() -> String {
     "api".to_string()
 }
 
+/// Default translation quality preset.
+pub(crate) fn default_translation_quality() -> String {
+    "fast".to_string()
+}
+
 /// Default OCR language (auto-detection).
 pub(crate) const fn default_language_auto() -> Language {
     Language::Auto
@@ -152,6 +157,7 @@ impl Default for TranslationConfig {
     fn default() -> Self {
         Self {
             provider: default_provider(),
+            quality: default_translation_quality(),
             source_language: default_source_language(),
             target_language: default_target_language(),
             timeout_seconds: default_timeout_seconds(),
@@ -230,6 +236,7 @@ mod tests {
     fn translation_defaults() {
         let config = TranslationConfig::default();
         assert_eq!(config.provider, "api");
+        assert_eq!(config.quality, "fast");
         assert_eq!(config.source_language, Language::Auto);
         assert_eq!(config.target_language, Language::ChineseSimplified);
         assert_eq!(config.timeout_seconds, 30);
