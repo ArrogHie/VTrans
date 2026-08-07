@@ -24,7 +24,7 @@
 | 序号 | 模块 | 任务类型 | 依赖 | 建议分支 | 状态 |
 |------|------|----------|------|----------|------|
 | 1 | 08 vtrans-models | 修改（schema + manifest + 脚本 + 文档） | — | `feat/08-ppocrv6-models` | 待整合（复检通过） |
-| 2 | 05 vtrans-ocr | 修改（预处理/后处理/字典/测试/文档） | 依赖 1（schema 字段） | `feat/05-ppocrv6-ocr` | 待派单 |
+| 2 | 05 vtrans-ocr | 修改（预处理/后处理/字典/测试/文档） | 依赖 1（schema 字段） | `feat/05-ppocrv6-ocr` | 待整合（审查通过） |
 | 3 | 07 vtrans-translation | 修改（仅测试字面量兼容修复） | 依赖 1 | `fix/07-ppocrv6-params-test` | 待派单 |
 | 4 | 整合（协调者） | 合并 + workspace 验证 + 端到端 + 报告 | 依赖 1、2、3 | main 上整合 | 待整合 |
 

@@ -10,7 +10,7 @@
 |------|-----------|------|------|
 | 2026-08-07 | 功能：OCR v6 升级 | 开发中 | 决策 1/2/3 已确认；08 已交付并审查 |
 | 2026-08-07 | 08 vtrans-models | 待整合 | 修复复检通过：5 项修复全部确认；fmt/clippy/test 全绿（43+8+5） |
-| 2026-08-07 | 05 vtrans-ocr | 待派单 | v6 适配 + 回归测试（依赖 08 修复合并） |
+| 2026-08-07 | 05 vtrans-ocr | 待整合 | 审查通过：70 单测 + 35 doctest + 5 provider_load + 5 真实模型回归全绿；模块边界干净 |
 | 2026-08-07 | 07 vtrans-translation | 待派单 | 仅测试字面量兼容修复（依赖 08 修复合并） |
 | 2026-08-07 | 整合 | 待整合 | 依赖 08、05、07 完成 |
 
@@ -30,5 +30,15 @@
 - ✅ `inspect_onnx.py` 写入前 mkdir parents（并加 dtype 可读名）
 - ✅ 模块边界：仅 vtrans-models（lib.rs / manifest.rs）+ 脚本 + 文档，未触碰其他 crate 与前端
 - ⚠️ 遗留：`docs/GIT_WORKFLOW.md` §7「字典文件不提交 Git」与新决策（ppocrv6_dict.txt 入库）措辞不一致；由 08 顺手修正或在整合阶段处理
+
+05 审查记录（2026-08-07，commits aca1c98 / 042081e）：
+
+- ✅ 质量门禁：fmt / clippy / test 全绿（70 单测 + 35 doctest + 5 provider_load）
+- ✅ 真实模型回归（`--ignored`）：英文长句完整、中文 auto/zh-CN 4/4、竖排不崩溃、auto 无 multi 报错 —— 5/5 通过（4.57s）
+- ✅ 实现核对：det 动态 H/W + 最近 32 对齐 + BGR（baseline 误差 0.0）；DB box_threshold/max_candidates/min_box_size 全参数化；rec 48 高、动态宽单次推理 ≤3200、超宽分片；类数加载期 fail-fast（诊断信息含 shape/字典行数/append_space/blank_index/路径）；rec_ja/en/multi 同模型共享 session；`--dump-det-input` 支持基准对照
+- ✅ 模块边界：仅 vtrans-ocr 4 个源文件 + 测试素材 + 文档；未触碰其他 crate / 前端 / app
+- ✅ 契约一致：OcrProvider / OcrOptions / OcrError 零改动；provider id 不变
+- ⚠️ 小问题（非阻塞）：`tests/long_line_regression.rs` 头部注释仍引用旧脚本 `scripts/download_models.ps1`，整合阶段顺手修正
+- ⚠️ workspace 全量：仅剩 07 `vtrans-translation` 测试字面量 1 处失败（E0063，计划内）
 
 状态流转：待拆解 → 开发中 → 待审查 → 待整合 → 已整合 → 已验收 → 已关闭
