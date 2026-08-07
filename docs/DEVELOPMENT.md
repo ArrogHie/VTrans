@@ -115,6 +115,20 @@ cargo run --bin vtrans-verify-models
 
 校验 CLI 输出 `all model files are valid` 即通过。
 
+### 4.4 翻译模型来源（可选）
+
+本地翻译模型（`translation/model.onnx` + `tokenizer.json`）不属于 v6 OCR
+升级范围，旧版 `scripts/download_models.ps1` 已随 v4 一并移除。如需重新
+生成翻译模型，使用 `teradata-opus-translate`：
+
+```powershell
+python -m pip install teradata-opus-translate
+python -c "from teradata_opus_translate import convert_model, convert_tokenizer; convert_model('Helsinki-NLP/opus-mt-en-zh', output_path='src-tauri/resources/models/translation/model.onnx', precision='int8'); convert_tokenizer('Helsinki-NLP/opus-mt-en-zh', output_path='src-tauri/resources/models/translation/tokenizer.json')"
+```
+
+注意：`tokenizer.json` 是模型文件，不提交 Git；`.gitignore` 已忽略
+`src-tauri/resources/models/translation/` 整个目录。
+
 ## 5. 构建与运行
 
 ### 5.1 开发模式

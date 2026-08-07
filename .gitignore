@@ -4,7 +4,6 @@
 src-tauri/resources/models/ocr/*
 !src-tauri/resources/models/ocr/ppocrv6_dict.txt
 src-tauri/resources/models/translation/*
-!src-tauri/resources/models/translation/*.json
 
 # PP-OCRv6 准备脚本的中间产物（下载包、转换、基准）
 scripts/ppocrv6/work/

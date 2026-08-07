@@ -69,7 +69,7 @@ fn main() -> Result<(), ModelError> {
     "rec_en": {{ "id": "rec-en", "path": "ocr/rec_en.onnx", "sha256": "{rec_en_sha}", "size_bytes": 12 }},
     "rec_multi": null,
     "dicts": {{}},
-    "preprocess_params": {{ "image_size": [960, 960], "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "det_threshold": 0.3, "unclip_ratio": 2.0 }}
+    "preprocess_params": {{ "image_size": [640, 640], "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "det_threshold": 0.2, "unclip_ratio": 1.4 }}
   }},
   "translation": null
 }}"#
@@ -156,7 +156,7 @@ pub enum ModelError {
     Io(std::io::Error),                     // 文件存在但读取失败
 }
 ```
-serde 表示：`ModelManifest` 及其子结构实现 `Serialize` / `Deserialize`；语言对序列化为 JSON 数组（如 `["en","zh-CN"]`），`dicts` 为对象，`image_size` 为 `[960, 960]`。`VerifyReport` 也可序列化，便于跨 IPC 传递校验结果。
+serde 表示：`ModelManifest` 及其子结构实现 `Serialize` / `Deserialize`；语言对序列化为 JSON 数组（如 `["en","zh-CN"]`），`dicts` 为对象，`image_size` 为 `[640, 640]`（检测输入上限，与 Python 基准 limit_side=640 一致）。`VerifyReport` 也可序列化，便于跨 IPC 传递校验结果。
 
 `PreprocessParams` 的 det/rec 新字段均为 `#[serde(default)]`：v4 时代旧
 manifest（无这些字段）反序列化后自动取 PP-OCRv6 默认值；缺省值常量
@@ -205,7 +205,7 @@ manifest（无这些字段）反序列化后自动取 PP-OCRv6 默认值；缺�
 | `verify_integrity` 串行逐文件校验 | 性能限制 | 大目录可在上层并行调用 `verify_entry` |
 | `size_bytes` 不参与校验 | 待优化 | 先做大小预检可跳过明显错误的哈希计算 |
 | `load_progress` 不驱动真实下载/加载 | 待后续 Phase | 由 `vtrans-app` 的加载流程写入进度 |
-| 无自动下载/修复机制 | 待后续 Phase | 使用 `scripts/download_models.ps1` 完成下载 |
+| 无自动下载/修复机制 | 待后续 Phase | 使用 `scripts/ppocrv6/setup_ppocrv6.ps1` 完成下载 |
 | 验证 CLI 依赖真实模型目录 | 设计使然 | `vtrans-verify-models` 读取 `--models` / `$VTRANS_MODEL_DIR`，缺文件时以非零码退出 |
 | v6 字典未入库时 `verify_integrity` 报 dict not found | 已通过 .gitignore 白名单提交 | 字典 `ppocrv6_dict.txt` 随 manifest 入库，模型 onnx 仍忽略 |
 
@@ -224,6 +224,9 @@ cargo fmt -p vtrans-models -- --check
 .\scripts\ppocrv6\setup_ppocrv6.ps1
 # 或使用已提供的 ONNX：.\scripts\ppocrv6\setup_ppocrv6.ps1 -SkipConversion
 ```
+
+已核验的模型元数据（输入/输出节点名、dtype、shape、opset、类数一致性）记录在
+`scripts/ppocrv6/inspect_report.json`，`vtrans-ocr` 以该报告为对照基准。
 
 测试覆盖：manifest 解析、缺失字段、SHA-256 匹配/不匹配、文件不存在、路径解析、批量校验报告（单元 + 集成 + 文档测试，共 52 个用例）。部署模型后可用独立验证 CLI 全量校验：
 

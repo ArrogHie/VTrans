@@ -146,7 +146,7 @@ crates/vtrans-models/
 - manifest.json 位于 src-tauri/resources/models/ 目录
 - SHA-256 使用 sha2 crate
 - 模型路径在 manifest 中用相对路径，运行时解析为绝对路径
-- 提供下载脚本 scripts/download_models.ps1
+- 提供下载脚本 scripts/ppocrv6/setup_ppocrv6.ps1
 - .gitignore 排除 *.onnx 和 *.bin 模型文件
 
 ## PP-OCRv6 Small 模型清单（v0.2.0）
@@ -175,7 +175,7 @@ rec_ja / rec_en / rec_multi 指向同一 `PP-OCRv6_small_rec` ONNX，因此 `aut
 
 | 字段 | 值 | 说明 |
 |------|-----|------|
-| `image_size` | `[960, 960]` | 检测输入上限 |
+| `image_size` | `[640, 640]` | 检测输入上限（与 Python 基准 limit_side=640 一致） |
 | `mean` / `std` | ImageNet 均值/方差 | BGR 通道顺序（以 Python 基准为准） |
 | `det_threshold` | 0.2 | DB 二值化阈值（原 v4 0.3） |
 | `unclip_ratio` | 1.4 | 外扩系数（原 v4 2.0） |

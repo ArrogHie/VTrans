@@ -62,8 +62,8 @@ cd VTrans
 pnpm install
 cargo fetch
 
-# 下载 OCR/翻译模型（需网络；模型文件不提交 Git）
-.\scripts\download_models.ps1
+# 准备 OCR v6 / 翻译模型（需网络与 Python；模型文件不提交 Git）
+.\scripts\ppocrv6\setup_ppocrv6.ps1
 
 # 校验模型完整性（与应用内 load_local_models 同一逻辑）
 cargo run --bin vtrans-verify-models
@@ -76,8 +76,8 @@ manifest.json
 ocr/det.onnx
 ocr/rec_ja.onnx
 ocr/rec_en.onnx
-ocr/dict_ja.txt
-ocr/dict_en.txt
+ocr/rec_multi.onnx
+ocr/ppocrv6_dict.txt
 translation/model.onnx
 translation/tokenizer.json
 ```

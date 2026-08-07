@@ -11,11 +11,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 import onnx
 import onnxruntime as ort
+
+
+def _dtype_name(elem_type: int) -> str:
+    try:
+        return onnx.TensorProto.DataType.Name(elem_type)
+    except ValueError:
+        return str(elem_type)
 
 
 def _dims(value_info) -> list:
@@ -34,11 +42,19 @@ def inspect_model(path: Path) -> dict:
     model = onnx.load(str(path))
     opset = model.opset_import[0].version if model.opset_import else None
     inputs = [
-        {"name": vi.name, "dtype": vi.type.tensor_type.elem_type, "shape": _dims(vi)}
+        {
+            "name": vi.name,
+            "dtype": _dtype_name(vi.type.tensor_type.elem_type),
+            "shape": _dims(vi),
+        }
         for vi in model.graph.input
     ]
     outputs = [
-        {"name": vi.name, "dtype": vi.type.tensor_type.elem_type, "shape": _dims(vi)}
+        {
+            "name": vi.name,
+            "dtype": _dtype_name(vi.type.tensor_type.elem_type),
+            "shape": _dims(vi),
+        }
         for vi in model.graph.output
     ]
 
@@ -47,7 +63,7 @@ def inspect_model(path: Path) -> dict:
     ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
     return {
-        "path": str(path),
+        "path": os.path.relpath(path).replace("\\", "/"),
         "size_bytes": path.stat().st_size,
         "opset": opset,
         "ir_version": model.ir_version,
@@ -87,7 +103,7 @@ def main() -> int:
         "det": det,
         "rec": rec,
         "dict": {
-            "path": str(args.dict),
+            "path": os.path.relpath(args.dict).replace("\\", "/"),
             "lines": lines,
             "expected_classes_with_blank_and_space": expected_classes,
         },
@@ -103,6 +119,7 @@ def main() -> int:
     }
 
     print(json.dumps(report, indent=2, ensure_ascii=False))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     if not report["class_consistency"]["match"]:

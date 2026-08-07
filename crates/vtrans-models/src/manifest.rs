@@ -68,7 +68,7 @@ pub struct ModelManifest {
 /// Group of OCR model files and preprocessing parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OcrModelGroup {
-    /// Text detection model (e.g. PP-OCRv4 det).
+    /// Text detection model (e.g. PP-OCRv6 Small det).
     pub det: ModelEntry,
     /// Japanese text recognition model.
     pub rec_ja: ModelEntry,
