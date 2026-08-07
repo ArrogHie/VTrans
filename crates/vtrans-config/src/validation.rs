@@ -14,6 +14,9 @@ const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error", "off"];
 /// Allowed translation provider identifiers.
 const TRANSLATION_PROVIDERS: &[&str] = &["api", "local"];
 
+/// Allowed translation quality presets.
+const TRANSLATION_QUALITIES: &[&str] = &["fast", "balanced"];
+
 /// Valid range for `capture.interval_ms`.
 const INTERVAL_MS_RANGE: std::ops::RangeInclusive<u32> = 250..=2000;
 
@@ -53,6 +56,7 @@ impl AppConfig {
         self.validate_capture()?;
         self.validate_ocr()?;
         self.validate_translation()?;
+        self.validate_language_linkage()?;
         self.validate_result_window()?;
         self.validate_floating_ball()?;
         self.validate_hotkeys()?;
@@ -94,6 +98,13 @@ impl AppConfig {
             )));
         }
 
+        let quality = self.translation.quality.as_str();
+        if !TRANSLATION_QUALITIES.contains(&quality) {
+            return Err(ConfigError::Validation(format!(
+                "translation.quality must be one of {TRANSLATION_QUALITIES:?}, got {quality:?}"
+            )));
+        }
+
         if self.translation.target_language.is_auto() {
             return Err(ConfigError::Validation(
                 "translation.target_language must not be \"auto\"".to_string(),
@@ -127,6 +138,26 @@ impl AppConfig {
                     "translation.api_model must not be empty".to_string(),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Cross-field rule: the OCR recognition language and the translation
+    /// source language must always agree.
+    ///
+    /// The two settings are linked: changing either one (via the
+    /// `set_ocr_language` / `set_source_language` commands) keeps the other
+    /// in sync, so a persisted config where they disagree indicates a manual
+    /// edit or an old file that never went through the `v3 -> v4` migration.
+    fn validate_language_linkage(&self) -> Result<(), ConfigError> {
+        if self.ocr.language != self.translation.source_language {
+            return Err(ConfigError::Validation(format!(
+                "ocr.language ({}) and translation.source_language ({}) must be identical; \
+                 they are linked settings — use the set_ocr_language / set_source_language \
+                 command to keep them in sync",
+                self.ocr.language.code(),
+                self.translation.source_language.code(),
+            )));
         }
         Ok(())
     }
@@ -323,6 +354,72 @@ mod tests {
     }
 
     #[test]
+    fn quality_fast_and_balanced_are_accepted() {
+        assert!(config_with(|c| c.translation.quality = "fast".to_string())
+            .validate()
+            .is_ok());
+        assert!(
+            config_with(|c| c.translation.quality = "balanced".to_string())
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn quality_invalid_value_is_rejected() {
+        for invalid in ["slow", "Fast", "", "ultra"] {
+            let config = config_with(|c| c.translation.quality = invalid.to_string());
+            let err = config.validate().unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::Validation(ref msg) if msg.contains("translation.quality")
+                ),
+                "quality {invalid:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_ocr_and_source_language_is_rejected() {
+        let config = config_with(|c| {
+            c.ocr.language = Language::Japanese;
+            c.translation.source_language = Language::English;
+        });
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => {
+                assert!(msg.contains("ocr.language"), "message: {msg}");
+                assert!(msg.contains("source_language"), "message: {msg}");
+                assert!(msg.contains("set_ocr_language"), "message: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matched_ocr_and_source_language_is_accepted() {
+        for language in Language::all_concrete() {
+            let config = config_with(|c| {
+                c.ocr.language = *language;
+                c.translation.source_language = *language;
+            });
+            assert!(
+                config.validate().is_ok(),
+                "language pair {} must validate",
+                language.code()
+            );
+        }
+        // `auto` on both sides is also consistent.
+        assert!(config_with(|c| {
+            c.ocr.language = Language::Auto;
+            c.translation.source_language = Language::Auto;
+        })
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
     fn auto_target_language_is_rejected() {
         let config = config_with(|c| c.translation.target_language = Language::Auto);
         assert!(matches!(
@@ -406,7 +503,7 @@ mod tests {
 
     #[test]
     fn invalid_version_is_rejected() {
-        let config = config_with(|c| c.version = 4);
+        let config = config_with(|c| c.version = 5);
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Validation(ref msg)) if msg.contains("version")
@@ -609,6 +706,7 @@ mod tests {
         let config = config_with(|c| {
             c.capture.interval_ms = 800;
             c.ocr.language = Language::Japanese;
+            c.translation.source_language = Language::Japanese;
             c.translation.provider = "local".to_string();
             c.translation.target_language = Language::English;
             c.hotkeys.live_translate = "Ctrl+Shift+L".to_string();

@@ -5,7 +5,9 @@
 //! upgraded step by step to [`CURRENT_CONFIG_VERSION`]. Missing fields are
 //! filled with defaults during deserialization (see [`crate::defaults`]),
 //! so migrations only need to handle structural changes and version
-//! stamping; see [`migrate_v0_to_v1`].
+//! stamping — with the exception of `v3 -> v4`, which also re-synchronizes
+//! the OCR language and translation source language; see
+//! [`migrate_v3_to_v4`].
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -39,6 +41,11 @@ const MIGRATIONS: &[Migration] = &[
         from: 2,
         to: 3,
         apply: migrate_v2_to_v3,
+    },
+    Migration {
+        from: 3,
+        to: 4,
+        apply: migrate_v3_to_v4,
     },
 ];
 
@@ -128,6 +135,24 @@ fn migrate_v2_to_v3(config: &mut AppConfig) {
     config.version = 3;
 }
 
+/// Migrates a version-`3` config to version `4`.
+///
+/// v4 adds `translation.quality`, which defaults to `"fast"`. The default is
+/// applied by `serde(default)` during deserialization, so a v3 file without
+/// the field is backfilled automatically while an explicit value (should one
+/// exist in the file) is preserved.
+///
+/// v4 also requires `translation.source_language` to equal `ocr.language`.
+/// Historical v3 files may have drifted apart, so the source language is
+/// re-synchronized here with the OCR language as the authoritative value.
+///
+/// The step is idempotent: applying it to an already-synchronized config
+/// leaves every field unchanged except the version stamp.
+fn migrate_v3_to_v4(config: &mut AppConfig) {
+    config.translation.source_language = config.ocr.language;
+    config.version = 4;
+}
+
 /// Minimal deserialization target used to read the `version` field.
 #[derive(Deserialize)]
 struct VersionProbe {
@@ -174,19 +199,19 @@ mod tests {
     #[test]
     fn current_version_passes_through() {
         let raw = serde_json::json!({
-            "version": 3,
+            "version": 4,
             "capture": { "interval_ms": 700 }
         });
         let config = migrate_value(raw).unwrap().config;
-        assert_eq!(config.version, 3);
+        assert_eq!(config.version, 4);
         assert_eq!(config.capture.interval_ms, 700);
     }
 
     #[test]
     fn newer_version_is_rejected() {
-        let raw = serde_json::json!({ "version": 4 });
+        let raw = serde_json::json!({ "version": 5 });
         let err = migrate_value(raw).unwrap_err();
-        assert!(matches!(err, ConfigError::UnsupportedVersion(4)));
+        assert!(matches!(err, ConfigError::UnsupportedVersion(5)));
     }
 
     #[test]
@@ -225,10 +250,10 @@ mod tests {
 
     #[test]
     fn migrated_flag_is_false_for_current_version() {
-        let raw = serde_json::json!({ "version": 3 });
+        let raw = serde_json::json!({ "version": 4 });
         let migrated = migrate_value(raw).unwrap();
         assert!(!migrated.migrated);
-        assert_eq!(migrated.from_version, 3);
+        assert_eq!(migrated.from_version, 4);
     }
 
     #[test]
@@ -295,6 +320,8 @@ mod tests {
         assert!(config.floating_ball.enabled);
         assert!((config.floating_ball.opacity - 0.85).abs() < f64::EPSILON);
         assert_eq!(config.floating_ball.size_px, 64);
+        assert_eq!(config.translation.quality, "fast");
+        assert_eq!(config.ocr.language, config.translation.source_language);
     }
 
     #[test]
@@ -308,5 +335,119 @@ mod tests {
         assert!(!migrated.config.floating_ball.enabled);
         assert!((migrated.config.floating_ball.opacity - 1.0).abs() < f64::EPSILON);
         assert_eq!(migrated.config.floating_ball.size_px, 48);
+        assert_eq!(migrated.config.translation.quality, "fast");
+        assert_eq!(
+            migrated.config.ocr.language,
+            migrated.config.translation.source_language
+        );
+    }
+
+    #[test]
+    fn v3_config_with_inconsistent_languages_is_synced() {
+        let raw = serde_json::json!({
+            "version": 3,
+            "ocr": { "language": "ja" },
+            "translation": {
+                "source_language": "en",
+                "target_language": "zh-CN"
+            }
+        });
+        let migrated = migrate_value(raw).unwrap();
+        assert!(migrated.migrated);
+        assert_eq!(migrated.from_version, 3);
+        assert_eq!(migrated.config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(migrated.config.ocr.language, Language::Japanese);
+        assert_eq!(
+            migrated.config.translation.source_language,
+            Language::Japanese
+        );
+        assert_eq!(migrated.config.translation.quality, "fast");
+        assert_eq!(
+            migrated.config.translation.target_language,
+            Language::ChineseSimplified
+        );
+    }
+
+    #[test]
+    fn v3_config_missing_quality_defaults_to_fast() {
+        let raw = serde_json::json!({
+            "version": 3,
+            "translation": { "provider": "local" }
+        });
+        let config = migrate_value(raw).unwrap().config;
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.translation.quality, "fast");
+    }
+
+    #[test]
+    fn v3_config_explicit_quality_is_preserved() {
+        // A v3 file that already carries a quality value keeps it; only a
+        // missing field is backfilled with the default.
+        let raw = serde_json::json!({
+            "version": 3,
+            "translation": { "quality": "balanced" }
+        });
+        let config = migrate_value(raw).unwrap().config;
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.translation.quality, "balanced");
+    }
+
+    #[test]
+    fn v3_sync_when_ocr_language_is_missing() {
+        // When only `source_language` was set in a v3 file, the OCR default
+        // (`auto`) is authoritative and the source language follows it.
+        let raw = serde_json::json!({
+            "version": 3,
+            "translation": { "source_language": "en" }
+        });
+        let config = migrate_value(raw).unwrap().config;
+        assert_eq!(config.ocr.language, Language::Auto);
+        assert_eq!(config.translation.source_language, Language::Auto);
+    }
+
+    #[test]
+    fn v4_config_re_migration_is_idempotent() {
+        // A v4 config passes through `migrate_value` untouched: no version
+        // bump, no language rewrite, no quality change.
+        let raw = serde_json::json!({
+            "version": 4,
+            "ocr": { "language": "ja" },
+            "translation": {
+                "quality": "balanced",
+                "source_language": "ja",
+                "target_language": "zh-CN"
+            }
+        });
+        let migrated = migrate_value(raw).unwrap();
+        assert!(!migrated.migrated);
+        assert_eq!(migrated.config.version, 4);
+        assert_eq!(migrated.config.ocr.language, Language::Japanese);
+        assert_eq!(
+            migrated.config.translation.source_language,
+            Language::Japanese
+        );
+        assert_eq!(migrated.config.translation.quality, "balanced");
+    }
+
+    #[test]
+    fn migrate_v3_to_v4_is_idempotent() {
+        let mut config = AppConfig {
+            ocr: crate::schema::OcrConfig {
+                language: Language::Japanese,
+                ..Default::default()
+            },
+            translation: crate::schema::TranslationConfig {
+                quality: "fast".to_string(),
+                source_language: Language::Japanese,
+                ..Default::default()
+            },
+            version: 3,
+            ..Default::default()
+        };
+        migrate_v3_to_v4(&mut config);
+        let after_first = config.clone();
+        migrate_v3_to_v4(&mut config);
+        assert_eq!(config, after_first);
+        assert_eq!(config.version, 4);
     }
 }

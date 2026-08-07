@@ -14,7 +14,7 @@ use vtrans_core::Language;
 ///
 /// Bump this constant when the schema changes and add a corresponding
 /// migration step in [`crate::migration`].
-pub const CURRENT_CONFIG_VERSION: u32 = 3;
+pub const CURRENT_CONFIG_VERSION: u32 = 4;
 
 /// Root application configuration.
 ///
@@ -104,6 +104,12 @@ pub struct TranslationConfig {
     #[serde(default = "crate::defaults::default_provider")]
     pub provider: String,
 
+    /// Translation quality preset: `"fast"` or `"balanced"`. Defaults to
+    /// `"fast"`. The value is consumed by the local translation provider
+    /// (e.g. beam size); see `docs/modules/02-config.md`.
+    #[serde(default = "crate::defaults::default_translation_quality")]
+    pub quality: String,
+
     /// Source language; [`Language::Auto`] enables auto-detection.
     #[serde(default = "crate::defaults::default_source_language")]
     pub source_language: Language,
@@ -192,7 +198,7 @@ mod tests {
 
     #[test]
     fn missing_sections_are_filled_with_defaults() {
-        let json = r#"{"version":3}"#;
+        let json = r#"{"version":4}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config, AppConfig::default());
     }
@@ -206,14 +212,14 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_ignored() {
-        let json = r#"{"version":3,"unknown_field":123}"#;
+        let json = r#"{"version":4,"unknown_field":123}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config, AppConfig::default());
     }
 
     #[test]
     fn partial_section_keeps_present_fields() {
-        let json = r#"{"capture":{"interval_ms":1000},"version":3}"#;
+        let json = r#"{"capture":{"interval_ms":1000},"version":4}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.capture.interval_ms, 1000);
         assert!((config.capture.difference_threshold - 0.03).abs() < f32::EPSILON);
@@ -236,7 +242,7 @@ mod tests {
 
     #[test]
     fn invalid_language_code_is_rejected() {
-        let json = r#"{"ocr":{"language":"klingon"},"version":3}"#;
+        let json = r#"{"ocr":{"language":"klingon"},"version":4}"#;
         assert!(serde_json::from_str::<AppConfig>(json).is_err());
     }
 
@@ -256,14 +262,37 @@ mod tests {
         let json = r#"{
             "capture": {"difference_threshold": 0.5},
             "translation": {"target_language": "en"},
-            "version": 3
+            "version": 4
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.capture.interval_ms, 500);
         assert!((config.capture.difference_threshold - 0.5).abs() < f32::EPSILON);
         assert_eq!(config.translation.target_language, Language::English);
+        assert_eq!(config.translation.quality, "fast");
         assert_eq!(config.translation.provider, "api");
         assert_eq!(config.hotkeys.select_and_translate, "Alt+Shift+A");
+    }
+
+    #[test]
+    fn translation_quality_defaults_to_fast() {
+        let json = r#"{"version":4,"translation":{"provider":"local"}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.translation.quality, "fast");
+    }
+
+    #[test]
+    fn translation_quality_round_trip() {
+        let config = AppConfig {
+            translation: TranslationConfig {
+                quality: "balanced".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""quality":"balanced""#));
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.translation.quality, "balanced");
     }
 
     #[test]
@@ -301,7 +330,7 @@ mod tests {
 
     #[test]
     fn missing_result_window_fields_are_filled_with_defaults() {
-        let json = r#"{"result_window":{"always_on_top":false},"version":3}"#;
+        let json = r#"{"result_window":{"always_on_top":false},"version":4}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(!config.result_window.always_on_top);
         assert!((config.result_window.opacity - 0.95).abs() < f64::EPSILON);
@@ -311,7 +340,7 @@ mod tests {
 
     #[test]
     fn missing_floating_ball_fields_are_filled_with_defaults() {
-        let json = r#"{"floating_ball":{"enabled":true},"version":3}"#;
+        let json = r#"{"floating_ball":{"enabled":true},"version":4}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(config.floating_ball.enabled);
         assert!((config.floating_ball.opacity - 1.0).abs() < f64::EPSILON);

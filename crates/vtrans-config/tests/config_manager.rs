@@ -103,7 +103,7 @@ fn update_on_missing_file_returns_not_found() {
 #[test]
 fn invalid_range_is_rejected_on_load() {
     let dir = tempdir().unwrap();
-    write_config(dir.path(), r#"{"capture":{"interval_ms":10},"version":3}"#);
+    write_config(dir.path(), r#"{"capture":{"interval_ms":10},"version":4}"#);
     let manager = ConfigManager::new(dir.path()).unwrap();
 
     let err = manager.load().unwrap_err();
@@ -182,9 +182,9 @@ fn update_migrates_v0_file_before_applying_mutation() {
 #[test]
 fn load_does_not_rewrite_current_version_file() {
     let dir = tempdir().unwrap();
-    // Compact v3 JSON: loading must not touch the file when it is already
+    // Compact v4 JSON: loading must not touch the file when it is already
     // at the current version (no pretty-printing, no field expansion).
-    let raw = r#"{"version":3,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
+    let raw = r#"{"version":4,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
     write_config(dir.path(), raw);
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -225,6 +225,7 @@ fn v1_config_missing_new_fields_is_migrated_with_defaults() {
     assert_eq!(persisted["floating_ball"]["enabled"].as_bool(), Some(false));
     assert_eq!(persisted["floating_ball"]["opacity"].as_f64(), Some(1.0));
     assert_eq!(persisted["floating_ball"]["size_px"].as_u64(), Some(48));
+    assert_eq!(persisted["translation"]["quality"].as_str(), Some("fast"));
 }
 
 #[test]
@@ -232,7 +233,7 @@ fn invalid_opacity_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":3,"result_window":{"opacity":0.2}}"#,
+        r#"{"version":4,"result_window":{"opacity":0.2}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -248,7 +249,7 @@ fn invalid_font_size_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":3,"result_window":{"font_size_px":30}}"#,
+        r#"{"version":4,"result_window":{"font_size_px":30}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -307,7 +308,7 @@ fn invalid_floating_ball_opacity_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":3,"floating_ball":{"opacity":0.2}}"#,
+        r#"{"version":4,"floating_ball":{"opacity":0.2}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -323,7 +324,7 @@ fn invalid_floating_ball_size_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":3,"floating_ball":{"size_px":80}}"#,
+        r#"{"version":4,"floating_ball":{"size_px":80}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -332,6 +333,87 @@ fn invalid_floating_ball_size_is_rejected_on_load() {
         ConfigError::Validation(msg) => assert!(msg.contains("floating_ball.size_px")),
         other => panic!("expected Validation, got {other:?}"),
     }
+}
+
+#[test]
+fn v3_config_with_inconsistent_languages_is_migrated_and_persisted() {
+    let dir = tempdir().unwrap();
+    let fixture = fs::read_to_string(Path::new(FIXTURES_DIR).join("config_v3.json")).unwrap();
+    write_config(dir.path(), &fixture);
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let config = manager.load().unwrap();
+
+    // The OCR language is authoritative: the drifted source language follows it.
+    assert_eq!(config.ocr.language, Language::Japanese);
+    assert_eq!(config.translation.source_language, Language::Japanese);
+    assert_eq!(config.translation.quality, "fast");
+    assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+
+    // The migration result is persisted, including the new quality field.
+    let persisted = read_raw(dir.path());
+    assert_eq!(
+        persisted["version"].as_u64(),
+        Some(u64::from(CURRENT_CONFIG_VERSION))
+    );
+    assert_eq!(persisted["ocr"]["language"].as_str(), Some("ja"));
+    assert_eq!(
+        persisted["translation"]["source_language"].as_str(),
+        Some("ja")
+    );
+    assert_eq!(persisted["translation"]["quality"].as_str(), Some("fast"));
+}
+
+#[test]
+fn mismatched_languages_at_current_version_are_rejected_on_load() {
+    let dir = tempdir().unwrap();
+    write_config(
+        dir.path(),
+        r#"{"version":4,"ocr":{"language":"ja"},"translation":{"source_language":"en"}}"#,
+    );
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let err = manager.load().unwrap_err();
+    match err {
+        ConfigError::Validation(msg) => {
+            assert!(msg.contains("ocr.language"), "message: {msg}");
+            assert!(msg.contains("source_language"), "message: {msg}");
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[test]
+fn quality_round_trip_through_manager() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let mut config = AppConfig::default();
+    config.translation.quality = "balanced".to_string();
+    manager.save(&config).unwrap();
+
+    let loaded = manager.load().unwrap();
+    assert_eq!(loaded.translation.quality, "balanced");
+    let persisted = read_raw(dir.path());
+    assert_eq!(
+        persisted["translation"]["quality"].as_str(),
+        Some("balanced")
+    );
+}
+
+#[test]
+fn invalid_quality_is_rejected_on_save() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let mut config = AppConfig::default();
+    config.translation.quality = "ultra".to_string();
+    let err = manager.save(&config).unwrap_err();
+    match err {
+        ConfigError::Validation(msg) => assert!(msg.contains("translation.quality")),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert!(!manager.config_path().exists());
 }
 
 #[test]
