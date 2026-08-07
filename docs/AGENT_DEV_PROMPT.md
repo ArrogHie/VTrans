@@ -80,7 +80,7 @@ cargo test -p {{MODULE_NAME}}
 git add .
 git commit -m "feat({{SCOPE}}): 简述实现了什么"
 git push origin {{BRANCH_NAME}}
-``+
+```
 
 提交信息格式：`<type>(<scope>): <subject>`
 

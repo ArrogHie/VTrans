@@ -9,10 +9,10 @@
 | 日期 | 功能/任务 | 状态 | 说明 |
 |------|-----------|------|------|
 | 2026-08-07 | 功能：OCR v6 升级 | 开发中 | 决策 1/2/3 已确认；08 已交付并审查 |
-| 2026-08-07 | 08 vtrans-models | 待整合 | 修复复检通过：5 项修复全部确认；fmt/clippy/test 全绿（43+8+5） |
-| 2026-08-07 | 05 vtrans-ocr | 待整合 | 审查通过：70 单测 + 35 doctest + 5 provider_load + 5 真实模型回归全绿；模块边界干净 |
-| 2026-08-07 | 07 vtrans-translation | 待派单 | 仅测试字面量兼容修复（依赖 08 修复合并） |
-| 2026-08-07 | 整合 | 待整合 | 依赖 08、05、07 完成 |
+| 2026-08-07 | 08 vtrans-models | 已整合 | 已合并到 main（merge 08，no-ff） |
+| 2026-08-07 | 05 vtrans-ocr | 已整合 | 已合并到 main（merge 05，no-ff）；5 真实模型回归 5/5 |
+| 2026-08-07 | 07 vtrans-translation | 待派单 | 唯一阻塞项：workspace test 仅剩 local_onnx.rs:1094 字面量失败 |
+| 2026-08-07 | 整合 | 整合中 | 08+05 已合并；workspace lib/fmt 全绿；07 完成后复跑全量 |
 
 审查记录（2026-08-07）：
 
@@ -40,5 +40,13 @@
 - ✅ 契约一致：OcrProvider / OcrOptions / OcrError 零改动；provider id 不变
 - ⚠️ 小问题（非阻塞）：`tests/long_line_regression.rs` 头部注释仍引用旧脚本 `scripts/download_models.ps1`，整合阶段顺手修正
 - ⚠️ workspace 全量：仅剩 07 `vtrans-translation` 测试字面量 1 处失败（E0063，计划内）
+
+整合记录（2026-08-07，main 3c1d77b）：
+
+- ✅ merge --no-ff feat/08-ppocrv6-models → main
+- ✅ merge --no-ff feat/05-ppocrv6-ocr → main
+- ✅ 协调文档更新提交（ledger/plan）
+- ✅ 整合验证：fmt ✅ / cargo check --workspace ✅ / cargo test --workspace：仅 07 local_onnx.rs:1094 失败（计划内）
+- ⏳ 待办：07 修复 → 全量测试/clippy 复跑 → 端到端冒烟 → 整合报告
 
 状态流转：待拆解 → 开发中 → 待审查 → 待整合 → 已整合 → 已验收 → 已关闭
