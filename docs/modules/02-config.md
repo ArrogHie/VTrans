@@ -41,8 +41,9 @@ pub struct OcrConfig {
 
 pub struct TranslationConfig {
     pub provider: String,          // "api" | "local"
+    pub quality: String,           // "fast" | "balanced"，默认 "fast"
     pub source_language: Language, // 默认 Auto
-    pub target_language: Language, // 载 ChineseSimplified
+    pub target_language: Language, // 默认 ChineseSimplified
     pub timeout_seconds: u32,      // 默认 30
     pub api_endpoint: String,      // 默认 "https://api.openai.com/v1/chat/completions"
     pub api_model: String,         // 默认 "gpt-4o-mini"
@@ -110,22 +111,38 @@ crates/vtrans-config/
 |--------|------|------|
 | 默认值生成 | 单元 | 所有字段有合理默认值 |
 | 序列化往返 | 单元 | to_json -> from_json 一致 |
-| 版本迁移 | 单元 | v0 -> v1 字段补全 |
+| 版本迁移 | 单元 | v0 -> v4 迁移链完整；v3 -> v4 补 `quality`、同步 `source_language = ocr.language`；v4 重复迁移幂等 |
 | 范围校验 | 单元 | interval_ms 超范围返回 Validation |
+| 质量档位校验 | 单元 | `"fast"` / `"balanced"` 接受，非法值拒绝 |
+| 跨字段一致性校验 | 单元 | `ocr.language != translation.source_language` 拒绝，一致接受 |
 | 文件不存在时创建默认 | 集成 | 首次加载返回默认配置并写入文件 |
 | 并发写入安全 | 集成 | 多线程 update 不冲突 |
 
 ## 验收标准
 
-- [ ] 配置可加载、保存、更新
-- [ ] 缺失字段使用默认值填充
-- [ ] 范围违规返回明确错误
-- [ ] 单元测试通过
-- [ ] README.md 完整
+- [x] 配置可加载、保存、更新
+- [x] 缺失字段使用默认值填充（含 `translation.quality` 缺省补 `"fast"`）
+- [x] 范围违规返回明确错误
+- [x] `translation.quality` 非法值拒绝、`"fast"` / `"balanced"` 接受且序列化往返
+- [x] v3 配置（含不一致的 `ocr.language` / `source_language`）迁移后两字段一致、`quality == "fast"`；v4 重复迁移无副作用
+- [x] `ocr.language != translation.source_language` 拒绝保存；一致接受；`AppConfig::default()` 恒通过
+- [x] 单元测试通过（`cargo test -p vtrans-config` 全绿）
+- [x] README.md 完整
 
 ## 开发注意事项
 
 - 配置文件路径：directories::config_dir() / "vtrans" / "config.json"
 - 保存时先写临时文件再原子替换，避免写入中断导致损坏
 - update 方法内部加锁（RwLock），保证并发安全
-- 配置版本号用于未来迁移，当前为 1
+- 配置版本号用于未来迁移，当前为 4
+
+## 增量记录
+
+### v4 增量：翻译质量档位 + 语言统一（分支 `feat/02-new-translate-model`）
+
+对应功能计划 `docs/feature-plans/new-translate-model/PLAN.md`（本地翻译模型升级 en→zh / ja→zh，OCR 语言与翻译源语言强制统一）。
+
+- schema：`TranslationConfig` 新增 `quality: String`，`#[serde(default = "fast")]`，合法值 `"fast" | "balanced"`。
+- 迁移：`CURRENT_CONFIG_VERSION` 3 → 4。`migrate_v3_to_v4` 补齐缺省的 `translation.quality`（由 serde default 兜底）并强制 `translation.source_language = ocr.language`（OCR 语言为权威）；迁移幂等，v2→v3→v4 迁移链完整。
+- 校验：`ocr.language != translation.source_language` 返回 `ConfigError::Validation`（错误信息提示两字段必须一致、使用 `set_ocr_language` / `set_source_language` 联动命令）；`quality` 非法值同样返回 `ConfigError::Validation`。
+- 行为变更：`AppConfig::validate()` 拒绝保存「OCR 语言与源语言不一致」的配置；旧 v3 配置在加载时自动同步后放行。
