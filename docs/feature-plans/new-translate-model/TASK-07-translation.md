@@ -12,6 +12,7 @@
 ### 功能上下文
 
 - 功能目标：本地翻译从「单 ONNX 模型」升级为「Bergamot en→zh + CTranslate2 INT8 ja→zh」双引擎原生实现（接入指南 §5/§6/§10/§11/§15/§21/§25）
+- 决策状态（已确认 2026-08-07）：A2 本地运行时 id 定为 `"local-native"`；A3 彻底删除旧 ONNX 路径（`local_onnx.rs` 及其测试），不保留双维护
 - 本模块承担的部分：
   1. `native/translation_bridge/`：C++17 统一 C ABI bridge（封装 Bergamot + CTranslate2 + SentencePiece），含 CMake 构建与 Windows 构建脚本
   2. Rust FFI 绑定 + `NativeTranslationProvider`（实现 `TranslationProvider`，`id` 见 A2）

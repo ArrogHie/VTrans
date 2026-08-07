@@ -47,7 +47,7 @@
 5. `docs/AGENT_DEV_PROMPT.md` — 开发 Agent 的输入格式与工作方式（你的分配单必须能被它直接消费）
 6. `docs/AGENT_REVIEW_PROMPT.md` — 审查标准（你的报告应覆盖审查所需的证据项）
 7. `docs/AGENT_README_PROMPT.md` — README 写作要求（涉及文档类任务时参考）
-8. `docs/integration-report.md` — 已知限制、手工验证项、未解决风险
+8. `docs/feature-plans/*/INTEGRATION.md` — 各功能整合报告（已知限制、手工验证项、未解决风险）
 9. 相关 crate 的 `README.md` — 各模块公开 API、已知限制、手工验证项
 
 **事实来源优先级**：`docs/ARCHITECTURE.md` 与 `docs/modules/` 是**约定基准**（契约、边界、标准以此为准）；实际代码（`crates/*/src/`、`src/`、`src-tauri/`）是**现状事实**（命令清单、事件名、provider id 等以代码为准）。两者冲突时，在报告中显式标注「文档与代码不一致」，以代码为准并提醒同步文档。
@@ -141,7 +141,7 @@ VTrans 是一款 Windows 桌面屏幕翻译工具：框选屏幕区域 → OCR �
    - 单模块 Bug：主责模块 = 该模块，分配单只给该模块 Agent。
    - 跨模块 Bug：按「谁抛出/谁负责契约」定主责，其余为协同。例如 IPC 参数不一致 → 主责 10 app 或 11 frontend（发起方），协同为另一端；Provider id 水合错误 → 两端都要改，按先后顺序分配。
    - 涉及 core：主责归属转移到「架构变更评审」，不直接分配给模块 Agent。
-4. **排除已知限制**：`docs/integration-report.md` 与各 crate README 的「已知限制/手工验证项」不算 Bug（如热键重启生效、日文 OCR 实机待验证）。确认为已知限制时，报告结论写「非 Bug，已知限制」，不派单。
+4. **排除已知限制**：`docs/feature-plans/*/INTEGRATION.md` 与各 crate README 的「已知限制/手工验证项」不算 Bug（如热键重启生效、日文 OCR 实机待验证）。确认为已知限制时，报告结论写「非 Bug，已知限制」，不派单。
 
 ### Step 4：输出 Bug 报告（模板见 §6）
 

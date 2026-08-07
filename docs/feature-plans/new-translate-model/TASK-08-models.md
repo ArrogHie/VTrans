@@ -78,6 +78,7 @@
   - `audit_model_sizes.py` 对合成目录的通过/超限行为（脚本自测或 CI 说明）
   - 既有 OCR 段测试全量回归
 - 文档要求：crate README（manifest v2 说明、脚本用法）；`docs/modules/08-models.md` 同步（新 schema、脚本、模型清单 v0.3.0）；`docs/DEVELOPMENT.md` 开发机要求补充（Python 3.10+、CTranslate2 4.8.1、CMake/MSVC 用于 07，下载转换需网络）
+- 文档同步（已确认删除项的引用修复）：`crates/vtrans-models/src/manifest.rs` 顶部注释引用已删除的 `docs/PP-OCRv6_small_ONNX_Rust_TS_接入指南.md` §10.1，改为指向 `docs/modules/08-models.md`（或移除失效引用）；A4（manifest v2 破坏性升级）已确认
 
 ### 横切标准提醒
 

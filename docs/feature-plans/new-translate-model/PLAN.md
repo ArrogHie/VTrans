@@ -6,7 +6,7 @@
 - 功能目标：本地翻译模型从「opus-mt-en-zh-int8 ONNX（约 403 MB，仅 en→zh）」升级为「Bergamot en→zh + CTranslate2 INT8 ja→zh（翻译模型总预算硬门槛 ≤200 MB）」；同时将 OCR 语言与翻译源语言拆为两个独立设置项并强制统一（改动任一自动同步另一项）
 - 使用场景：单次框选翻译与实时区域翻译的本地翻译路径；主窗口「语言与引擎」设置区；安装包模型体积与 CI 体积门禁
 - 优先级 / 版本目标：P1 / 建议 v0.3.0
-- 状态：开发中（02 已整合；A1–A4 待用户确认，不影响 02 结果）
+- 状态：开发中（02 已整合；A1–A4 已由用户确认 2026-08-07）
 
 ## 验收标准（用户可验证）
 
@@ -95,12 +95,12 @@
 
 ## 风险与假设
 
-### 假设（待用户确认）
+### 假设（已确认 2026-08-07）
 
-- A1：翻译质量档位（Fast / Balanced）**纳入本次**（指南 §7 明确建议 UI 提供，配置模板已含两档参数）；若裁剪则 02/10/11 三处同步缩小范围
-- A2：本地 Provider 运行时 id 从 `"local-onnx"` **改为 `"local-native"`**（语义准确；两端契约同步在本功能范围内）；若希望最小改动可保持 `"local-onnx"` 不变
-- A3：**删除**旧 ONNX 单模型路径（`local_onnx.rs` 及其测试），指南已明确弃用「ONNX 自回归 decoder」路线，不保留双维护
-- A4：manifest **v2 为破坏性升级**（v1 翻译段不再支持），与「模型整体替换」一致；OCR 段结构不变（v1 兼容字段保留）
+- A1（已确认·纳入）：翻译质量档位（Fast / Balanced）纳入本次（指南 §7 明确建议 UI 提供，配置模板已含两档参数）；02 已落地 `translation.quality`，10/11 按纳入范围开发
+- A2（已确认·按推荐）：本地 Provider 运行时 id 从 `"local-onnx"` **改为 `"local-native"`**；10/11 两端契约同步
+- A3（已确认·彻底删除）：**删除**旧 ONNX 单模型路径（`local_onnx.rs` 及其测试），指南已明确弃用「ONNX 自回归 decoder」路线，不保留双维护
+- A4（已确认·整体替换）：manifest **v2 为破坏性升级**（v1 翻译段不再支持），与「模型整体替换」一致；OCR 段结构不变（v1 兼容字段保留）
 
 ### 风险
 
@@ -110,7 +110,7 @@
 - B4：Mozilla 模型 registry 持续更新 → 下载脚本必须冻结 revision + SHA-256，运行时只读 manifest，禁止跟随 latest
 - B5：CPU oversubscription → 线程上限约束（OCR det/rec 各 2、Bergamot 2、CTranslate2 intra 2 / inter 1），07 实现时不得放开为「全核」
 - B6：许可证合规（MPL-2.0 引擎 + Apache-2.0 模型）需在 `licenses/` 登记 NOTICE；正式商业发布前需法律复核（指南 §24），本次仅完成登记
-- B7：`docs/integration-report.md` 实际不存在（角色设定文档与仓库现状不一致）；本项目按 `docs/feature-plans/*/INTEGRATION.md` 组织整合报告，本次沿用该组织方式
+- B7：`docs/integration-report.md` 与根目录 PP-OCRv6 指南已删除（2026-08-07 用户确认）；协调提示词（AGENT_*_PROMPT）引用已同步到 `docs/feature-plans/*/INTEGRATION.md`；`crates/vtrans-models/src/manifest.rs` 注释对已删指南的引用列入 08 任务同步
 
 ## 实施顺序
 

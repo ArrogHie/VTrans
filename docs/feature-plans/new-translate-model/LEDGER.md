@@ -2,14 +2,16 @@
 
 > 状态流转：待拆解 → 开发中 → 待审查 → 待整合 → 已整合 → 已验收 → 已关闭
 
-## 待用户确认的决策（2026-08-07，影响任务范围）
+## 已确认的决策（2026-08-07）
 
-| # | 决策 | 推荐 | 影响范围 |
+| # | 决策 | 结论 | 影响范围 |
 |---|------|------|----------|
-| A1 | 翻译质量档位 Fast/Balanced 是否纳入本次 | 纳入（指南 §7 建议） | 02 / 10 / 11 |
-| A2 | 本地 Provider 运行时 id `"local-onnx"` → `"local-native"` | 改为 `"local-native"` | 10 / 11（两端契约同步） |
-| A3 | 删除旧 ONNX 单模型路径（`local_onnx.rs`） | 删除（指南弃用 ONNX 自回归路线） | 07 |
-| A4 | manifest v2 为破坏性升级（v1 翻译段不再支持） | 破坏性升级（模型整体替换） | 08 / 07 / 10 |
+| A1 | 翻译质量档位 Fast/Balanced 是否纳入本次 | ✅ 纳入（02 已落地 `translation.quality`；10/11 按纳入开发） | 02 / 10 / 11 |
+| A2 | 本地 Provider 运行时 id `"local-onnx"` → `"local-native"` | ✅ 按推荐改为 `"local-native"` | 10 / 11（两端契约同步） |
+| A3 | 删除旧 ONNX 单模型路径（`local_onnx.rs`） | ✅ 彻底删除，不保留双维护 | 07 |
+| A4 | manifest v2 为破坏性升级（v1 翻译段不再支持） | ✅ 按推荐整体替换 | 08 / 07 / 10 |
+
+同日确认：`docs/integration-report.md` 与根目录 `PP-OCRv6_small_ONNX_Rust_TS_接入指南.md` 确定删除；协调提示词引用已同步，`vtrans-models` 注释引用列入 08 任务。
 
 ## 功能台账
 
@@ -35,7 +37,7 @@
 - ✅ 模块边界：diff 仅限 `crates/vtrans-config/` + `docs/modules/02-config.md`；未触碰 vtrans-core 与其他 crate
 - ✅ 横切标准：错误复用 `ConfigError`（`Validation` / `UnsupportedVersion`）；无敏感日志
 - ✅ 验收标准：quality 持久化、迁移一致、跨字段校验、既有测试回归 全部满足
-- ⚠️ 待同步：A1（quality 是否纳入本次）影响 10/11 消费该字段的范围；若 A1 裁定不纳入，`quality` 字段保留但前端暂不暴露
+- ✅ A1 已确认：quality 纳入本次，10/11 按「暴露质量档位」开发
 
 ## 整合记录
 
@@ -44,4 +46,5 @@
 - ✅ merge --no-ff `feat/02-new-translate-model` → main（8 文件 +427/-35）
 - ✅ 合并后 workspace 验证：fmt / check / test（全 crate 含 doctest）/ clippy 零警告 / pnpm test 177 通过 / tsc 全绿
 - ✅ 工作区整理：feature-plans/new-translate-model 文档（PLAN/LEDGER/TASK + 接入指南与 starter）已提交到 main；旧 `docs/integration-report.md` 与根目录 PP-OCRv6 指南按用户暂存删除提交（2 个 docs commit）
-- ⚠️ 遗留：删除的两个文档仍有引用（`docs/AGENT_FEATURE_COORDINATOR_PROMPT.md` / `docs/AGENT_COORDINATOR_PROMPT.md` 引用 integration-report；`crates/vtrans-models/src/manifest.rs` 文档注释引用根目录 PP-OCRv6 指南），待用户确认后由相关模块/文档负责人同步
+- ✅ 遗留已处理：删除确认后，`AGENT_FEATURE_COORDINATOR_PROMPT.md` / `AGENT_COORDINATOR_PROMPT.md` 对 integration-report 的引用已同步到 `docs/feature-plans/*/INTEGRATION.md`；`crates/vtrans-models/src/manifest.rs` 注释引用（模块源码，属 08 边界）已列入 TASK-08 文档同步项
+- ⏳ 待办：本地遗留分支清理（已合并 18 个分支待删除；远端分支待用户确认后清理）

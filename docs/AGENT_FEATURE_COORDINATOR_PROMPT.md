@@ -52,7 +52,7 @@
 5. `docs/AGENT_DEV_PROMPT.md` — 开发 Agent 的输入格式与工作方式（你的开发说明必须能被它直接消费）
 6. `docs/AGENT_REVIEW_PROMPT.md` — 审查 Agent 的标准（整合前逐模块把关可调用它）
 7. `docs/AGENT_README_PROMPT.md` — README 写作要求（涉及文档类任务时参考）
-8. `docs/integration-report.md` — 已知限制、手工验证项、未解决风险
+8. `docs/feature-plans/*/INTEGRATION.md` — 各功能整合报告（已知限制、手工验证项、未解决风险）
 9. 相关 crate 的 `README.md` 与 `src/lib.rs` — 各模块现有公开 API 与已知限制
 
 **事实来源优先级**：`docs/ARCHITECTURE.md` 与 `docs/modules/` 是**约定基准**（契约、边界、标准以此为准）；实际代码（`crates/*/src/`、`src/`、`src-tauri/`）是**现状事实**（命令清单、事件名、provider id 等以代码为准）。两者冲突时，在计划中显式标注「文档与代码不一致」，以代码为准并提醒同步文档。
@@ -196,7 +196,7 @@ VTrans 是一款 Windows 桌面屏幕翻译工具：框选屏幕区域 → OCR �
 ## 风险与假设
 - 假设：{{信息不足时的假设，需用户确认}}
 - 风险：{{跨模块协调风险、性能/隐私/兼容性风险}}
-- 已知限制排除：{{与 integration-report.md 对照}}
+- 已知限制排除：{{与 feature-plans/*/INTEGRATION.md 及各 crate README 对照}}
 ```
 
 ### 6.2 模块开发说明（任务分配单）
@@ -312,7 +312,7 @@ pnpm exec tsc --noEmit
 - 垂直链路冒烟：触发方式 → 采集/OCR/翻译 → 展示，与功能验收标准逐条对照。
 - 契约核对：新增 Command/Event 在 `cargo tauri dev` 下可用；前端监听/调用无 404（invoke 无对应命令、事件未注册等）。
 - 回归范围：与功能相邻的既有链路（单次翻译、实时翻译、设置保存、热键、托盘）不受影响。
-- 已知限制复核：与 `docs/integration-report.md` 对照，新增限制需记录。
+- 已知限制复核：与 `docs/feature-plans/*/INTEGRATION.md` 及各 crate README 对照，新增限制需记录。
 
 ### 第四步：输出整合报告并关闭功能
 
@@ -350,7 +350,7 @@ pnpm exec tsc --noEmit
 6. **禁止在文档中出现敏感信息**——API Key、Bearer Token、完整原文/译文；引用日志必须脱敏。
 7. **禁止臆造**——证据不足时标注「待补充」并向用户提问，不做无依据的拆解与归因。
 8. **禁止过度拆分或压缩**——单模块可完成的功能不强行拆多模块；跨模块功能不压成单模块。
-9. **禁止把已知限制/手工验证项当作新功能缺陷派单**——对照 `docs/integration-report.md` 与各 crate README。
+9. **禁止把已知限制/手工验证项当作新功能缺陷派单**——对照 `docs/feature-plans/*/INTEGRATION.md` 与各 crate README。
 10. **禁止代替用户决策**——优先级、范围裁剪、是否纳入版本由用户决定；你给出建议，不擅自决定。
 
 ## 10. 拆解与整合质量自检（每次输出前核对）

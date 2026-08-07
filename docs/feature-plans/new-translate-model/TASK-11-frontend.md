@@ -12,6 +12,7 @@
 ### 功能上下文
 
 - 功能目标：主窗口「OCR 语言」与「源语言」两个下拉独立显示、改动任一自动联动另一项；本地模型能力提示更新（en/ja → zh-CN）；翻译质量档位 UI（A1）；Provider id 映射同步（A2）
+- 决策状态（已确认 2026-08-07）：A1 质量档位 UI 纳入本次；A2 本地实现 id 为 `"local-native"`（`normalizeProviderId` 增加映射）
 - 本模块承担的部分：`MainWindow` 语言联动交互与 store 同步；`isLocalPairSupported` 与提示文案更新；`SettingsPanel` 质量档位；`normalizeProviderId` 映射；对应测试
 - 上游已提供：10 的联动命令（`set_ocr_language` / `set_source_language` 后端已双向同步）；02 的 `translation.quality` 字段；`AppStatus.translation_provider` 新实现 id（A2）
 

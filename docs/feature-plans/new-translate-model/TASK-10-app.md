@@ -12,6 +12,7 @@
 ### 功能上下文
 
 - 功能目标：OCR 语言与翻译源语言强制统一（后端权威联动）；本地 Provider 组装切换到 Native 双引擎；native dll 随包分发；Provider 运行时 id 契约更新（A2）
+- 决策状态（已确认 2026-08-07）：A1 质量档位纳入本次（消费 `translation.quality`）；A2 本地实现 id 定为 `"local-native"`
 - 本模块承担的部分：`set_ocr_language` / `set_source_language` 双向联动；`build_translation_provider` 改用 `NativeTranslationProvider` 并传入质量档位；`AppStatus.translation_provider` 实现 id；`tauri.conf.json` bundle resources；Provider id 白名单/契约测试同步
 - 上游已提供：02 的 `translation.quality` 与跨字段校验；07 的 `NativeTranslationProvider`（`from_manager` + `with_quality`）；08 的 manifest v2
 
