@@ -94,6 +94,26 @@ fn public_ipc_contracts_round_trip_through_json() {
 }
 
 #[test]
+fn local_provider_runtime_id_is_serialized_as_local_native() {
+    // Decision A2: the local provider's runtime implementation id changed
+    // from `"local-onnx"` to `"local-native"`. The frontend maps it back to
+    // the configuration identifier `"local"` via `normalizeProviderId`, so
+    // the wire value is part of the IPC contract.
+    let status = AppStatus {
+        mode: PipelineMode::SingleCapture,
+        pipeline_status: PipelineStatus::Idle,
+        ocr_provider: "pp-ocr".to_string(),
+        translation_provider: vtrans_translation::NATIVE_PROVIDER_ID.to_string(),
+        selected_region: None,
+        live_running: false,
+        model_progress: None,
+        debug_mode: false,
+    };
+    let json = serde_json::to_string(&status).unwrap();
+    assert!(json.contains(r#""translation_provider":"local-native""#));
+}
+
+#[test]
 fn app_errors_are_frontend_safe_strings() {
     let error = AppError::Pipeline(PipelineError::Cancelled);
     assert_eq!(

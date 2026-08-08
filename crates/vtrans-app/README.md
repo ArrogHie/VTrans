@@ -22,7 +22,8 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - vtrans-security：Windows Credential Manager 凭据访问。
 - vtrans-capture：WindowsCaptureSource。
 - vtrans-ocr：PaddleOcrProvider。
-- vtrans-translation：API 和本地 Provider。
+- vtrans-translation：API Provider 与本地 Native 双引擎 Provider
+  （Bergamot en→zh + CTranslate2 ja→zh，经 `translation_bridge.dll` FFI）。
 - vtrans-models：manifest、模型路径和完整性报告。
 - vtrans-pipeline：捕获、OCR、标准化和翻译编排。
 
@@ -98,10 +99,14 @@ get_app_status() -> Result<AppStatus, AppError>
 `translation_started` 等阶段事件推送到前端（单次捕获没有 live session，
 因此不发送 `live_session_stopped`），命令本身仍只返回最终的 `OcrResult`。
 
-`set_source_language` / `set_target_language` 与 `set_ocr_language` 语义对称：
-实时会话运行中拒绝修改（`PipelineError::AlreadyRunning`），仅局部更新配置并
-清除缓存的 pipeline。目标语言为 `Language::Auto` 时由配置校验拒绝
-（`translation.target_language must not be "auto"`）。
+`set_ocr_language` 与 `set_source_language` 是**联动设置**：任一命令都会把
+`config.ocr.language` 与 `config.translation.source_language` 同步为同一个
+值（后端权威联动，`apply_ocr_language` / `apply_source_language` 纯函数）。
+实时会话运行中拒绝修改（`PipelineError::AlreadyRunning`）；保存后清除
+缓存的 pipeline。`set_target_language` 只改目标语言，`Language::Auto` 由
+配置校验拒绝（`translation.target_language must not be "auto"`）。整包
+`save_settings` 若提交两字段不一致的配置，由 `vtrans-config` v4 跨字段
+校验拒绝并返回 `AppError::Config`。
 
 `set_api_key` 把翻译 API Key 写入 Windows Credential Manager（target 固定为
 `"translation"`，与 `load_api_key` 读取的 target 一致），Key 不进入
@@ -129,7 +134,7 @@ camelCase，命令未加 `rename_all`）。
 LiveTranslationConfig 包含 region、capture_interval_ms 和 difference_threshold，字段可直接由前端 JSON 反序列化。
 
 `AppStatus.translation_provider` 返回运行时 Provider 的实现 id（`"api"` /
-`"local-onnx"`），与 `set_translation_provider` 接受的配置标识符（`"api"` /
+`"local-native"`），与 `set_translation_provider` 接受的配置标识符（`"api"` /
 `"local"`）值域不同；前端 `normalizeProviderId` 负责把实现 id 映射回配置标识符。
 
 ### Events
@@ -313,14 +318,17 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 3. **get_app_status 全链路**：启动后前端状态栏显示正确的 Provider、区域和
    pipeline 状态；启动/停止实时会话后轮询结果同步变化。
 4. **Provider 切换全链路**：切换 api/local 后调用 `get_app_status`，确认
-   `translation_provider` 返回对应实现 id（`"api"`/`"local-onnx"`），重启后
+   `translation_provider` 返回对应实现 id（`"api"`/`"local-native"`），重启后
    前端引擎开关仍显示正确。
 5. **快捷键注册与触发**：依次按 Alt+Shift+A（选区）、Alt+Shift+R（实时）、
    Alt+Shift+S（停止），确认动作触发且日志无 `HotkeyFailed`；通过
    `save_settings` 修改热键后重启应用生效。
-6. **源/目标语言切换**：在设置面板切换源语言（含 auto）与目标语言
-   （zh-CN/ja/en），确认立即生效且 `get_app_status` 后状态正常；实时会话
-   运行中切换应返回 `AlreadyRunning` 错误；重启应用确认配置持久化。
+6. **语言联动与目标语言切换**：在设置面板切换源语言（含 auto）后，确认
+   OCR 语言同步变为同一值（反之亦然），`get_app_status` 状态正常且
+   config.json 两字段一致；目标语言（zh-CN/ja/en）独立切换不受影响；实时
+   会话运行中切换应返回 `AlreadyRunning` 错误；重启应用确认配置持久化。
+   手工构造两字段不一致的 `config.json` 后整包保存，确认被
+   `vtrans-config` 校验拒绝。
 7. **set_api_key 全链路**：在设置面板输入 API Key 保存，确认日志只有掩码
    形式（`sk-****1234`）；重启应用后 Key 仍在（Credential Manager），且
    provider 为 `"api"` 时翻译请求携带新 Key 生效；输入空串/超长 Key 确认
@@ -353,13 +361,23 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
     CSS 背景 alpha 后，半透明内容透出桌面（无需 setOpacity，窗口已声明
     `transparent: true`）。同时检查 Windows 下透明窗口的文字渲染清晰、
     缩放重绘无残留、原生阴影表现正常（若有不完善处见「已知限制」建议）。
+15. **本地 Native 双引擎加载**：部署 manifest v2 翻译模型（`en-zh`/
+    `ja-zh`）与 `translation_bridge.dll`（构建机产出，位于
+    `src-tauri/resources/native/`）后，把 provider 切换为 local：确认
+    启动/切换日志出现 `native translation provider loaded`，
+    `get_app_status` 返回 `"local-native"`；框选日文区域实时翻译，确认
+    ja→zh-CN 由 CTranslate2 引擎翻译、en→zh-CN 由 Bergamot 引擎翻译；
+    把 `translation.quality` 改为 `"balanced"` 后重新加载 Provider，确认
+    日志与翻译结果反映更高 beam 档位。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
-`AppStatus` 序列化契约、语言配置更新与目标语言校验、错误映射与事件转换。
+`AppStatus` 序列化契约（含 A2 运行时 id `"local-native"`）、语言联动纯函数
+（`apply_ocr_language` / `apply_source_language` 双向同步）、quality 解析
+（`fast`/`balanced` 接受、非法值拒绝）、错误映射与事件转换。
 
 `AppStatus.translation_provider` 与 `set_translation_provider` 使用不同的
-标识符域（实现 id `"api"`/`"local-onnx"` ↔ 配置 id `"api"`/`"local"`）。
+标识符域（实现 id `"api"`/`"local-native"` ↔ 配置 id `"api"`/`"local"`）。
 **新增翻译 Provider 时**，必须同步更新后端 `validate_translation_provider_id`
 白名单与前端 `normalizeProviderId` 映射，否则重启后前端引擎开关会错误回退
 显示为 API。
@@ -372,8 +390,13 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
   Escape/关闭操作应调用 cancel_region_selection。
 - 模型完整性校验通过 blocking pool 执行，避免大文件 SHA-256 计算阻塞 Tokio worker。
 - 切换翻译 Provider（`set_translation_provider` / `save_settings`）会在 blocking
-  pool 中重新加载本地 ONNX 模型（tokenizer + session），期间持有生命周期锁，
-  其他启动/停止命令会等待切换完成。
+  pool 中重新加载本地 Native 双引擎（Bergamot + CTranslate2，含
+  `translation_bridge.dll` 动态加载），期间持有生命周期锁，其他启动/停止
+  命令会等待切换完成。
+- 本地 Native Provider 需要 `translation_bridge.dll`（由 07 的构建机产出，
+  声明于 `src-tauri/tauri.conf.json` 的 `bundle.resources`，打包后位于
+  安装目录 `resources/native/`）与 manifest v2 翻译模型；缺失时切换 local
+  会返回 `AppError::Translation`，不影响 API Provider 路径。
 - 全局快捷键由配置字符串解析，冲突或非法快捷键会在启动时返回 HotkeyFailed；当前没有 UI 内热键冲突编辑器。
   通过 `save_settings` 修改热键配置后需要重启应用才会重新注册。
 - 单次捕获的进度事件（ocr_started 等）由 capture_once 转发，但命令契约仍只返回 OcrResult；前端如需进度提示需同时监听 ocr_started/translation_started。

@@ -389,7 +389,8 @@ pub async fn update_live_region(
     Ok(())
 }
 
-/// Updates the OCR language in the persisted configuration.
+/// Updates the OCR language in the persisted configuration and keeps the
+/// translation source language identical (language linkage).
 ///
 /// # Errors
 ///
@@ -405,13 +406,17 @@ pub async fn set_ocr_language(
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
-    state.update_config(|config| config.ocr.language = language)?;
+    state.update_config(|config| apply_ocr_language(config, language))?;
     state.clear_pipeline();
-    tracing::info!(language = language.code(), "OCR language updated");
+    tracing::info!(
+        language = language.code(),
+        "OCR language updated and linked to translation source"
+    );
     Ok(())
 }
 
-/// Updates the translation source language in the persisted configuration.
+/// Updates the translation source language in the persisted configuration
+/// and keeps the OCR language identical (language linkage).
 ///
 /// `Language::Auto` enables automatic source-language detection.
 ///
@@ -433,7 +438,7 @@ pub async fn set_source_language(
     state.clear_pipeline();
     tracing::info!(
         language = language.code(),
-        "translation source language updated"
+        "translation source language updated and linked to OCR language"
     );
     Ok(())
 }
@@ -466,12 +471,28 @@ pub async fn set_target_language(
     Ok(())
 }
 
+/// Applies an OCR-language change to a configuration snapshot.
+///
+/// Kept as a pure function so the exact mutation performed by
+/// [`set_ocr_language`] can be unit-tested without a Tauri runtime. The OCR
+/// language and the translation source language are linked settings: both
+/// fields are set to `language` so `vtrans-config`'s cross-field validation
+/// never rejects a snapshot produced by this command.
+fn apply_ocr_language(config: &mut AppConfig, language: Language) {
+    config.ocr.language = language;
+    config.translation.source_language = language;
+}
+
 /// Applies a source-language change to a configuration snapshot.
 ///
 /// Kept as a pure function so the exact mutation performed by
-/// [`set_source_language`] can be unit-tested without a Tauri runtime.
+/// [`set_source_language`] can be unit-tested without a Tauri runtime. The
+/// source language and the OCR language are linked settings: both fields are
+/// set to `language` so `vtrans-config`'s cross-field validation never
+/// rejects a snapshot produced by this command.
 fn apply_source_language(config: &mut AppConfig, language: Language) {
     config.translation.source_language = language;
+    config.ocr.language = language;
 }
 
 /// Applies a target-language change to a configuration snapshot.
@@ -809,14 +830,43 @@ mod tests {
     }
 
     #[test]
-    fn source_language_update_mutates_only_source_field() {
+    fn source_language_update_syncs_ocr_language_and_keeps_target() {
         let mut config = AppConfig::default();
         apply_source_language(&mut config, Language::Japanese);
         assert_eq!(config.translation.source_language, Language::Japanese);
+        assert_eq!(config.ocr.language, Language::Japanese);
         assert_eq!(
             config.translation.target_language,
             AppConfig::default().translation.target_language
         );
+    }
+
+    #[test]
+    fn ocr_language_update_syncs_source_language_and_keeps_target() {
+        let mut config = AppConfig::default();
+        apply_ocr_language(&mut config, Language::English);
+        assert_eq!(config.ocr.language, Language::English);
+        assert_eq!(config.translation.source_language, Language::English);
+        assert_eq!(
+            config.translation.target_language,
+            AppConfig::default().translation.target_language
+        );
+    }
+
+    #[test]
+    fn linked_language_snapshots_always_pass_config_validation() {
+        // The linkage contract is that `set_ocr_language` /
+        // `set_source_language` snapshots never trip the cross-field
+        // validation added by `vtrans-config` v4.
+        for &language in Language::all_concrete() {
+            let mut config = AppConfig::default();
+            apply_ocr_language(&mut config, language);
+            assert!(config.validate().is_ok(), "ocr link: {language:?}");
+
+            let mut config = AppConfig::default();
+            apply_source_language(&mut config, language);
+            assert!(config.validate().is_ok(), "source link: {language:?}");
+        }
     }
 
     #[test]

@@ -159,6 +159,29 @@ opacity 能力——Rust `WebviewWindow` 无 `set_opacity`、JS 无
 （`CapturedImage` 不得跨 IPC）。命令命名约定维持 Tauri 默认 camelCase，
 如需统一 snake_case 需前后端同步修改（见 `contracts.rs` 注释）。
 
+### 语言联动与本地 Native Provider 组装（翻译模型升级增量）
+
+- **语言联动（后端权威）**：`set_ocr_language` 与 `set_source_language`
+  互为联动——任一命令都把 `config.ocr.language` 与
+  `config.translation.source_language` 同步为同一个值（纯函数
+  `apply_ocr_language` / `apply_source_language` 各自同时写两个字段，可
+  单测）。`set_target_language` 独立；整包 `save_settings` 提交两字段
+  不一致的配置时由 vtrans-config v4 跨字段校验拒绝（`AppError::Config`）。
+- **本地 Provider 组装（A2/A3）**：`build_translation_provider` 的
+  `"local"` 分支改为
+  `NativeTranslationProvider::from_manager(&model_manager)?.with_quality(
+  parse_translation_quality(&config.translation.quality)?)?`——`quality`
+  解析 `"fast"`/`"balanced"`，非法值防御性映射为
+  `AppError::Config(Validation)`；Provider 长驻共享（`Arc<dyn
+  TranslationProvider>`），仅切换时重建，加载走 `spawn_blocking`。
+- **运行时 id（A2）**：`AppStatus.translation_provider` 返回
+  `"api"` / `"local-native"`（`NATIVE_PROVIDER_ID`）；配置标识符白名单
+  仍为 `"api" | "local"`，`validate_translation_provider_id` 不变。
+- **打包资源**：`src-tauri/tauri.conf.json` 的 `bundle.resources` 声明
+  `resources/native/translation_bridge.dll`（07 构建机产出到
+  `src-tauri/resources/native/`）；打包后位于安装目录
+  `resources/native/`，与 07 `locate_library` 的 exe 旁候选路径一致。
+
 ### Debug 模式（捕获帧预览）
 
 - **开关**：`--debug` 或 `VTRANS_DEBUG=1`（`true` 亦可），默认关闭，不写入
@@ -229,6 +252,10 @@ crates/vtrans-app/
 | save_settings | 手工验证 + 单元 | 全链路（IPC → 持久化 → 重启生效）手工验证（README 第 2 条）；配置校验与原子持久化由 vtrans-config 单测覆盖 |
 | get_app_status | 手工验证 + 单元 | 全链路手工验证（README 第 3 条）；`AppStatus` 序列化契约有单测 |
 | Provider 切换 | 手工验证 + 单元 | 全链路手工验证（README 第 4 条）；`validate_translation_provider_id` / `update_translation_provider_config` 有单测 |
+| 语言联动 | 单元 | `apply_ocr_language` / `apply_source_language` 双向同步两个字段、其余字段不动；联动快照通过 vtrans-config 跨字段校验（commands.rs tests）✅ |
+| quality 组装 | 单元 | `parse_translation_quality`：`"fast"`/`"balanced"` 接受、非法值拒绝为 `AppError::Config(Validation)`（state.rs tests）✅ |
+| Provider id 契约 | 单元 + 契约 | `NATIVE_PROVIDER_ID == "local-native"`（A2）；`AppStatus.translation_provider` 序列化断言（contracts.rs）✅ |
+| 本地 Native 加载 | 手工验证 | 依赖 dll 与 manifest v2 模型（README 第 15 条）；Provider 组装函数分支由上游 07 集成测试覆盖 |
 | set_api_key | 手工验证 + 单元 | 全链路手工验证（README 第 7 条）；key 校验与凭据存储有单测，IPC 参数契约见 contracts.rs |
 | get_app_config | 手工验证 + 单元 | 前端水合手工验证（README 第 8 条）；AppConfig 序列化字段契约见 contracts.rs |
 | 快捷键注册 | 手工验证 | 依赖真实全局快捷键注册环境（README 第 5 条）；动作分派枚举有单测 |
@@ -248,7 +275,7 @@ crates/vtrans-app/
 ### Provider id 契约
 
 `AppStatus.translation_provider` 返回运行时 Provider 的实现 id（当前为
-`"api"` / `"local-onnx"`），而 `set_translation_provider` 与配置 schema 使用
+`"api"` / `"local-native"`），而 `set_translation_provider` 与配置 schema 使用
 配置标识符（`"api"` / `"local"`）。两端映射：
 
 - 后端：`validate_translation_provider_id` 维护配置标识符白名单；
@@ -271,6 +298,28 @@ crates/vtrans-app/
 - [x] Release 构建关闭不必要 capability（Debug 面板采用主窗口内嵌方案，
       不新增窗口/权限；capability 归属见「capability 归属」一节）
 - [x] README.md 完整
+
+### 翻译模型升级/语言统一增量验收（feat/10-new-translate-model）
+
+- [x] `set_ocr_language` 写入 `config.ocr.language` 并同步
+      `translation.source_language`（两字段相等）
+- [x] `set_source_language` 写入 `translation.source_language` 并同步
+      `config.ocr.language`（两字段相等）
+- [x] 联动纯函数 `apply_ocr_language` / `apply_source_language` 单测覆盖
+      （改一个字段两个字段都变、其余字段不动、快照通过 vtrans-config 校验）
+- [x] `save_settings` 整包保存两字段不一致时由 02 validation 拒绝
+      （`AppError::Config`，ConfigManager::save 内部校验）
+- [x] `build_translation_provider` `"local"` 分支使用
+      `NativeTranslationProvider`（`from_manager` + `with_quality`），
+      quality 解析非法值 → `AppError::Config(Validation)`（防御性）
+- [x] `AppStatus.translation_provider` 实现 id 为 `"local-native"`
+      （A2，`NATIVE_PROVIDER_ID` 契约断言 + contracts.rs 序列化断言）
+- [x] `tauri.conf.json` `bundle.resources` 声明
+      `resources/native/translation_bridge.dll`（构建期可校验）
+- [x] 配置标识符白名单保持 `"api" | "local"`（`validate_translation_provider_id`
+      与 `update_translation_provider_config` 既有测试回归）
+- [x] 本地 Provider 加载保持 `spawn_blocking`、长驻共享、不每次重建
+- [x] 手工验证项：README 第 15 条（本地双引擎加载 + ja→zh 翻译）
 
 ### Debug 模式验收（本任务）
 

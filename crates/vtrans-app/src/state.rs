@@ -8,14 +8,14 @@ use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use vtrans_capture::WindowsCaptureSource;
-use vtrans_config::{AppConfig, ConfigManager};
+use vtrans_config::{AppConfig, ConfigError, ConfigManager};
 use vtrans_core::traits::{CaptureSource, OcrProvider, TranslationProvider};
 use vtrans_core::{OcrOptions, PipelineMode, PipelineStatus, ScreenRegion, TranslationRequest};
 use vtrans_models::ModelManager;
 use vtrans_ocr::PaddleOcrProvider;
 use vtrans_pipeline::{Pipeline, PipelineConfig, PipelineDeps};
 use vtrans_security::CredentialManager;
-use vtrans_translation::{ApiTranslationProvider, LocalTranslationProvider};
+use vtrans_translation::{ApiTranslationProvider, NativeTranslationProvider, TranslationQuality};
 
 use crate::error::AppError;
 
@@ -35,7 +35,7 @@ pub struct AppStatus {
     /// Stable identifier of the configured OCR provider.
     pub ocr_provider: String,
     /// Runtime implementation id of the configured translation provider
-    /// (`"api"` or `"local-onnx"`).
+    /// (`"api"` or `"local-native"`).
     ///
     /// This differs from the configuration identifier domain (`"api"` /
     /// `"local"`) accepted by `set_translation_provider_id`; the frontend
@@ -471,10 +471,33 @@ fn build_translation_provider(
             config.translation.max_retries,
         )))
     } else {
-        Ok(Arc::new(LocalTranslationProvider::from_manager(
-            model_manager,
-        )?))
+        // The native dual-engine provider is assembled once per provider
+        // switch and shared for the lifetime of the application. Loading the
+        // engines is a blocking, heavy operation; callers must run this
+        // function on the blocking pool (see `prepare_translation_provider`).
+        let quality = parse_translation_quality(&config.translation.quality)?;
+        Ok(Arc::new(
+            NativeTranslationProvider::from_manager(model_manager)?.with_quality(quality)?,
+        ))
     }
+}
+
+/// Parses the configured translation quality preset into the native
+/// provider's typed enum.
+///
+/// `vtrans-config` validates `translation.quality` before persistence, so an
+/// invalid value here is defensive only; it surfaces as a configuration
+/// validation error instead of panicking or silently falling back to the
+/// default preset.
+///
+/// # Errors
+///
+/// Returns `AppError::Config(ConfigError::Validation)` when the value is not
+/// `"fast"` or `"balanced"`.
+fn parse_translation_quality(quality: &str) -> Result<TranslationQuality, AppError> {
+    quality
+        .parse::<TranslationQuality>()
+        .map_err(|message| AppError::Config(ConfigError::Validation(message.to_string())))
 }
 
 /// Validates a translation provider identifier against the stable
@@ -552,6 +575,7 @@ fn poison_inner<T>(poisoned: std::sync::PoisonError<T>) -> T {
 mod tests {
     use super::*;
     use vtrans_security::InMemoryCredentialStore;
+    use vtrans_translation::NATIVE_PROVIDER_ID;
 
     #[test]
     fn status_snapshot_contract_is_serializable() {
@@ -579,11 +603,49 @@ mod tests {
     }
 
     #[test]
+    fn native_provider_runtime_id_contract_is_local_native() {
+        // Decision A2: the local provider's runtime implementation id is
+        // `"local-native"`; the frontend maps it back to the configuration
+        // identifier `"local"` via `normalizeProviderId`.
+        assert_eq!(NATIVE_PROVIDER_ID, "local-native");
+    }
+
+    #[test]
     fn translation_provider_validation_rejects_unknown_ids() {
         let error = validate_translation_provider_id("local-onnx").unwrap_err();
         assert!(error
             .to_string()
             .contains("unsupported translation provider"));
+    }
+
+    #[test]
+    fn translation_quality_parse_accepts_fast_and_balanced() {
+        assert_eq!(
+            parse_translation_quality("fast").unwrap(),
+            TranslationQuality::Fast
+        );
+        assert_eq!(
+            parse_translation_quality("balanced").unwrap(),
+            TranslationQuality::Balanced
+        );
+    }
+
+    #[test]
+    fn translation_quality_parse_rejects_invalid_values() {
+        for invalid in ["", "ultra", "Fast", "fast ", "balanced\n"] {
+            let error = parse_translation_quality(invalid).unwrap_err();
+            assert!(
+                matches!(error, AppError::Config(ConfigError::Validation(_))),
+                "quality {invalid:?} must surface as a config validation error"
+            );
+        }
+    }
+
+    #[test]
+    fn translation_quality_parse_error_message_names_the_presets() {
+        let error = parse_translation_quality("ultra").unwrap_err();
+        assert!(error.to_string().contains("fast"));
+        assert!(error.to_string().contains("balanced"));
     }
 
     #[test]
