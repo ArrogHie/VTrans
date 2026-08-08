@@ -3,15 +3,20 @@
 | 属性 | 值 |
 |------|-----|
 | Crate | `vtrans-translation` |
-| 分支 | `feat/07-translation` |
+| 分支 | `feat/07-new-translate-model` |
 | 上游依赖 | `vtrans-core`, `vtrans-models` |
 | 层级 | 2 |
 | 复杂度 | 高 |
-| 阶段 | Phase 2 |
+| 阶段 | Phase 2（v0.3.0 起本地路径重构为双引擎原生） |
 
 ## 职责
 
-实现 TranslationProvider trait，提供 API 翻译和本地 ONNX 翻译两种实现。支持取消、超时和有限次数重试。Prompt 明确要求只返回译文不解释内容。
+实现 `TranslationProvider` trait，提供 API 翻译和本地双引擎翻译两种实现。
+
+- API 翻译：OpenAI-compatible chat completions，支持取消、超时和有限次数重试。
+- 本地翻译：Bergamot en→zh + CTranslate2 INT8 ja→zh 双引擎，通过 C++ C ABI 桥（`native/translation_bridge/`）接入；SentencePiece 子词编解码；质量档位 Fast / Balanced。
+
+本地运行时 id 为 `"local-native"`（决策 A2）；旧 ONNX 单模型路径（`local_onnx.rs`）已彻底删除（决策 A3），不保留双维护。
 
 ## 公开 API
 
@@ -31,12 +36,21 @@ impl ApiTranslationProvider {
     ) -> Self;
 }
 
-/// 本地 ONNX 翻译器
-pub struct LocalTranslationProvider { /* ... */ }
+/// 本地多引擎翻译 Provider（Bergamot en-zh + CTranslate2 ja-zh）
+pub struct NativeTranslationProvider { /* ... */ }
 
-impl LocalTranslationProvider {
-    pub fn from_manifest(manifest: &ModelManifest) -> Result<Self, TranslationError>;
+impl NativeTranslationProvider {
+    /// 从 manifest v2 加载双引擎；阻塞重操作，须在 spawn_blocking 中调用
+    pub fn from_manager(manager: &ModelManager) -> Result<Self, TranslationError>;
+    /// 显式指定质量档位（缺省为 Fast，与 AppConfig.translation.quality 默认一致）
+    pub fn with_quality(self, quality: TranslationQuality) -> Result<Self, TranslationError>;
 }
+
+/// 翻译质量档位：serde 表示 "fast" / "balanced"
+pub enum TranslationQuality { Fast, Balanced }
+
+/// 原生引擎句柄封装（Send + Sync，Drop 自动释放）
+pub struct NativeTranslator { /* ... */ }
 
 /// 校验语言对是否被支持
 pub fn validate_language_pair(
@@ -46,33 +60,30 @@ pub fn validate_language_pair(
 ) -> Result<(), TranslationError>;
 ```
 
+`TranslationProvider` 实现要点：
+
+- `id()` 返回 `"local-native"`；`supported_pairs()` 返回 `[(en, zh-CN), (ja, zh-CN)]`。
+- `translate()` 按 `request.source` 路由（en → Bergamot、ja → CTranslate2）；`Auto` 由上层（pipeline）解析为具体语言后传入，Provider 拒绝 `Auto` 与不支持对 → `TranslationError::UnsupportedPair`。
+- 质量档位 → beam 映射（与 `native/translation_bridge/` 内实现保持一致）：Bergamot fast 1 / balanced 2；CTranslate2 fast 1 / balanced 4；`max_input_tokens` 恒为 256。
+
 ## 错误类型
 
-> **定义位置**：`TranslationError` 定义在 `vtrans-core` 中（因为 `TranslationProvider` trait 需要引用它）。本模块从 `vtrans-core` 导入，不重新定义。
+> **定义位置**：`TranslationError` 定义在 `vtrans-core` 中（因为 `TranslationProvider` trait 需要引用它）。本模块从 `vtrans-core` 导入，不重新定义、不新增变体。
 
-```rust
-[derive(Debug, thiserror::Error)]
-pub enum TranslationError {
-    #[error("unsupported language pair: {source:?} -> {target:?}")]
-    UnsupportedPair { source: Language, target: Language },
-    #[error("api request failed: {0}")]
-    ApiRequest(String),
-    #[error("api timeout after {0:?}")]
-    Timeout(Duration),
-    #[error("api rate limited")]
-    RateLimited,
-    #[error("api unauthorized: check api key")]
-    Unauthorized,
-    #[error("model load failed: {0}")]
-    ModelLoad(String),
-    #[error("inference failed: {0}")]
-    Inference(String),
-    #[error("cancelled")]
-    Cancelled,
-    #[error("response parse error: {0}")]
-    ParseResponse(String),
-}
-```
+原生桥错误码映射（接入指南 §21，语义映射到现有变体）：
+
+| 桥错误码 | 含义 | 映射 |
+|---------|------|------|
+| 0 | OK | 无 |
+| 1 | invalid argument | `TranslationError::Inference` |
+| 2 | unsupported language | `TranslationError::UnsupportedPair { src, target }` |
+| 3 | model not loaded | `TranslationError::ModelLoad` |
+| 4 | tokenizer failure | `TranslationError::ModelLoad` |
+| 5 | inference failure | `TranslationError::Inference` |
+| 6 | output encoding failure | `TranslationError::Inference` |
+| 7 | version mismatch（DLL ABI 与 Rust 绑定不一致） | `TranslationError::ModelLoad` |
+
+DLL 加载失败、符号缺失、ABI 版本不匹配、`translation_create` 返回 NULL、manifest 缺 translation 段 → `TranslationError::ModelLoad`。空文本 / 含 NUL 输入 / 桥输出非 UTF-8 / 空输出指针 → `TranslationError::Inference`。
 
 ## 内部文件结构
 
@@ -82,21 +93,59 @@ crates/vtrans-translation/
 ├── README.md
 ├── src/
 │   ├── lib.rs              # re-export
-│   ├── api.rs               # ApiTranslationProvider
-│   ├── local_onnx.rs        # LocalTranslationProvider
-│   ├── prompt.rs            # Prompt 模板构建
-│   ├── retry.rs             # 重试逻辑
-│   └── validate.rs          # 语言对校验
+│   ├── api.rs               # ApiTranslationProvider（未改动）
+│   ├── ffi.rs               # libloading 绑定 + 错误码映射 + NativeTranslator
+│   ├── native.rs            # NativeTranslationProvider + TranslationQuality
+│   ├── prompt.rs            # Prompt 模板构建（未改动）
+│   ├── retry.rs             # 重试逻辑（未改动）
+│   └── validate.rs          # 语言对校验（未改动）
 ├── examples/
-│   └── translation_verify.rs
+│   └── translation_verify.rs # 双引擎 + API 双模式验证 CLI
 └── tests/
+    ├── api_provider.rs       # API 集成测试（未改动）
+    ├── native_provider.rs    # 双引擎集成测试（#[ignore]，需真实模型 + DLL）
+    └── fixtures/
+        └── regression_samples.json  # 质量回归样本（指南 §27）
+
+native/translation_bridge/   # C++17 C ABI 桥（Bergamot + CTranslate2 + SentencePiece）
+├── CMakeLists.txt
+├── build.ps1
+├── translation_bridge.h
+├── translation_bridge.cpp
+└── README.md
+
+licenses/                    # 引擎许可证登记（B6）：Bergamot MPL-2.0、CTranslate2 MIT、MarianMT/SentencePiece Apache-2.0
 ```
+
+## 本地双引擎架构
+
+```mermaid
+graph LR
+    req["TranslationRequest"]
+    req --> route{"source?"}
+    route -->|en| berg["Bergamot en→zh<br/>v0.4.5 INT8"]
+    route -->|ja| ct2["CTranslate2 ja→zh<br/>4.8.1 INT8"]
+    berg --> out["TranslationResult"]
+    ct2 --> spm["SentencePiece<br/>source.spm encode<br/>target.spm decode"]
+    spm --> out
+```
+
+- 生命周期：`translation_create` 在 Provider 构造时加载两个引擎，进程内常驻（指南 §15）；`translation_destroy` 在 Drop 时释放。
+- 线程预算（B5）：Bergamot `cpu-threads=2`；CTranslate2 intra 2 / inter 1；桥内互斥锁串行化全部调用，总并发不随核心数膨胀。
+- 文本通道：全部 UTF-8，禁止系统 ACP/ANSI 中转（指南 §20）。SentencePiece 使用模型自带 source/target spm，不混用其他模型词表（指南 §6.4）。
+- 取消（B3）：原生推理不可中断 → `spawn_blocking` + 调用前检查 token + 调用完成后检查；取消返回 `TranslationError::Cancelled`；进行中的原生推理无法中断（README 已登记已知限制）。
+
+## 日志
+
+- 入口函数标注 `#[tracing::instrument]`；记录 `provider_id`、`model_id`、`source`/`target`、`quality`、`elapsed_ms`、`text_len`。
+- 错误路径 `warn!`/`error!`。
+- **禁止记录**：原文完整内容、译文完整内容、API Key；引用文本使用 `vtrans_core::truncate_for_log`，引用 Key 使用 `vtrans_core::mask_sensitive`。
 
 ## 测试计划
 
 | 测试项 | 类型 | 说明 |
 |--------|------|------|
-| 语言对校验 | 单元 | Auto 源语言合法，不支持对返回错误 |
+| 语言对校验 | 单元 | Auto 源语言本地拒绝；不支持对返回错误 |
 | Prompt 构建 | 单元 | 只要求译文，不含解释 |
 | 超时映射 | 单元 | 超时返回 Timeout 错误 |
 | 401 映射 | 单元 | HTTP 401 返回 Unauthorized |
@@ -104,85 +153,31 @@ crates/vtrans-translation/
 | 重试逻辑 | 单元 | max_retries 次后放弃 |
 | 取消传播 | 单元 | CancellationToken 触发后返回 Cancelled |
 | 响应解析 | 单元 | JSON 响应提取译文 |
-| 验证 CLI | 手动 | examples/translation_verify 对测试文本翻译 |
+| 桥错误码映射 | 单元 | 0–7 全映射到现有 `TranslationError` 变体 |
+| quality → beam 映射 | 单元 | Fast/Balanced → Bergamot 1/2、CTranslate2 1/4、max_input_tokens 256 |
+| FFI 空指针/编码错误 | 单元 | null 输出指针、非法 UTF-8 输出、空文本、Auto/不支持源，均不触达真实 DLL |
+| 双引擎真实回归 | 集成（`#[ignore]`） | en→zh 与 ja→zh 各 ≥1 条固定样本（`regression_samples.json`，断言 `expected_contains` 任一命中） |
+| 验证 CLI | 手动 | `translation_verify --models <dir> --source en|ja --text ... [--quality fast|balanced]` |
 
 ## 验收标准
 
-- [ ] API Provider 可翻译中/日/英
-- [ ] Local Provider 可加载 ONNX 模型并翻译
-- [ ] 超时正确返回 Timeout
-- [ ] 取消正确返回 Cancelled
-- [ ] 401 返回 Unauthorized
-- [ ] 重试不超过 max_retries 次
-- [ ] API Key 从 CredentialManager 读取，不写明文
-- [ ] Local 模型加载失败给出明确错误，不自动切换 API
-- [ ] README.md 完整
+- [x] API Provider 可翻译中/日/英
+- [x] Native Provider 可加载双引擎并翻译 en→zh / ja→zh（集成测试 `--ignored` 覆盖，需真实模型 + DLL）
+- [x] 超时正确返回 Timeout
+- [x] 取消正确返回 Cancelled（API 全覆盖；原生为调用前后检查，B3）
+- [x] 401 返回 Unauthorized
+- [x] 重试不超过 max_retries 次
+- [x] API Key 从 CredentialManager 读取，不写明文
+- [x] 本地模型加载失败给出明确错误（`ModelLoad`），不自动切换 API
+- [x] 旧 ONNX 路径已删除（A3），`ort` 依赖未从 workspace 移除（仍由 vtrans-ocr 使用）
+- [x] README.md 完整（双引擎架构、生命周期、取消语义、线程约束、已知限制）
 
 ## 开发注意事项
 
-- API Provider 使用 reqwest，默认 rustls-tls
-- 请求超时用 tokio::time::timeout 包装
-- CancellationToken 用 tokio_util::sync::CancellationToken
-- 重试使用指数退避（1s, 2s, 4s），429 不立即重试
-- Local Provider 使用 ort crate，与 OCR 共用 runtime
-- Prompt 模板：固定前缀 + 原文，明确要求"只输出译文"
-- 日志记录 provider_id、elapsed_ms、source/target（不记录完整原文和译文）
-
-## 本地 ONNX 接口契约
-
-`LocalTranslationProvider` 在加载时探测模型的 I/O 形态，自动选择推理路径。支持两种接口，**生成型为主**，逐 token 兼容保留防回归。
-
-### 生成型（Generation，推荐）
-
-整图生成接口，beam search 由 ONNX 图内实现，单次 `session.run` 完成全部解码。
-
-**输入张量**
-
-| 名称 | 类型 | 形状 | 说明 |
-|------|------|------|------|
-| `input_ids` | int64 | `[1, src_len]` | 源语言 token ids |
-| `attention_mask` | int64 | `[1, src_len]` | 全 1（无 padding） |
-| `num_beams` | int64 | `[1]` | beam 数，0/1 退化为 greedy |
-| `min_length` | int64 | `[1]` | 固定传 0 |
-| `max_length` | int64 | `[1]` | 取 manifest `max_length` |
-| `length_penalty` | float32 | `[1]` | 固定传 1.0 |
-| `repetition_penalty` | float32 | `[1]` | 固定传 1.0 |
-
-输入名通过子串匹配探测（如 `num_beams`、`max_length`），不要求精确名。
-
-**输出张量**
-
-| 名称 | 类型 | 形状 | 说明 |
-|------|------|------|------|
-| `sequences` | int64 | `[batch*beams, seq_len]` 或 `[1, seq_len]` | 生成序列 |
-
-输出名取包含 `sequences` 的张量，或唯一输出。取第一条序列解码。
-
-**解码流程**：从 tokenizer 的 `eos_id` 截断 → 剥离 pad/bos 等特殊 token → `tokenizer.decode` → trim → 空则返回 `Inference("decoder produced empty translation")`。
-
-### 逐 token 型（Stepwise，兼容）
-
-Decoder-loop 接口，每步喂入 `decoder_input_ids` 读取 `logits`，客户端做 greedy argmax。
-
-**输入张量**：`input_ids`、`attention_mask`、`decoder_input_ids`
-**输出张量**：`logits`（取最后一行 argmax）
-
-### I/O 探测规则
-
-1. 优先探测生成型：输入含 `num_beams`/`min_length`/`max_length`/`length_penalty`/`repetition_penalty` 且输出含 `sequences`（或唯一输出）。
-2. 回退逐 token 型：输入含 `decoder_input_ids` 且输出含 `logits`（或唯一输出）。
-3. 两者均不匹配时，错误信息列出两种形态的期望输入名清单。
-4. 探测结果在 `debug!` 日志中记录，包含 `model_kind`、各张量名。
-
-### 取消语义
-
-生成型 `session.run` 是长阻塞操作，通过 `spawn_blocking` + `RunOptions::terminate()` 实现协作取消。`CancellationToken` 触发时调用 `terminate()` 中断 ONNX run，返回 `TranslationError::Cancelled`。
-
-### manifest 参数映射
-
-| manifest 字段 | ONNX 输入 | 说明 |
-|---------------|----------|------|
-| `inference_params.num_beams` | `num_beams` | 0 或 1 传 1（greedy），≥2 启用 beam search |
-| `max_length` | `max_length` | 解码最大长度，与图内 `max_length` 语义对齐 |
-
-`min_length`、`length_penalty`、`repetition_penalty` 固定传默认值（0、1.0、1.0），显式喂齐避免依赖图内默认。
+- API Provider 使用 reqwest，默认 rustls-tls；请求超时用 `tokio::time::timeout` 包装。
+- `CancellationToken` 用 `tokio_util::sync::CancellationToken`。
+- 重试使用指数退避（1s, 2s, 4s），429 不立即重试。
+- 原生桥用 `libloading` 动态加载；DLL 查找顺序：模型目录同级 `native/` → 模型目录内 `native/` → 可执行文件旁 `native/` → 可执行文件旁 `resources/native/`。
+- `unsafe` 代码块全部带 `// SAFETY:` 注释（模块级 `#![allow(unsafe_code)]`，与 vtrans-capture 惯例一致）。
+- 日志记录 provider_id、model_id、elapsed_ms、source/target、text_len（不记录完整原文和译文）。
+- DLL 构建产物输出到 `src-tauri/resources/native/`（打包声明由 10 任务在 `tauri.conf.json` 完成）；构建步骤见 `native/translation_bridge/README.md`。
