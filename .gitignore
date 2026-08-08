@@ -4,6 +4,10 @@
 src-tauri/resources/models/ocr/*
 !src-tauri/resources/models/ocr/ppocrv6_dict.txt
 src-tauri/resources/models/translation/*
+# 原生翻译桥构建产物（translation_bridge.dll），由 native/translation_bridge/build.ps1 产出
+src-tauri/resources/native/
+# 原生翻译桥 CMake 构建目录
+native/translation_bridge/build/
 
 # PP-OCRv6 准备脚本的中间产物（下载包、转换、基准）
 scripts/ppocrv6/work/
