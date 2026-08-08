@@ -66,13 +66,32 @@ pub fn varied_image(width: u32, height: u32, base: u8, offset: u8) -> CapturedIm
     CapturedImage::new(width, height, PixelFormat::Rgba8, data).expect("valid test image")
 }
 
-/// Builds a single-line OCR result with the given text.
+/// Builds a single-line OCR result with the given text, detecting English.
 #[must_use]
 pub fn ocr_result(text: &str) -> OcrResult {
+    ocr_result_with_detection(text, Language::English)
+}
+
+/// Builds a single-line OCR result with the given text and detected
+/// language.
+#[must_use]
+pub fn ocr_result_with_detection(text: &str, detected: Language) -> OcrResult {
     let polygon = [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]];
     OcrResult::from_lines(
         vec![vtrans_core::OcrLine::new(text, 0.9, polygon, 0)],
-        Some(Language::English),
+        Some(detected),
+        5,
+    )
+}
+
+/// Builds a single-line OCR result with the given text and no language
+/// detection.
+#[must_use]
+pub fn ocr_result_no_detection(text: &str) -> OcrResult {
+    let polygon = [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]];
+    OcrResult::from_lines(
+        vec![vtrans_core::OcrLine::new(text, 0.9, polygon, 0)],
+        None,
         5,
     )
 }
@@ -218,6 +237,10 @@ pub struct MockTranslationBehavior {
     pub last_request_text: Mutex<Option<String>>,
     /// All request texts passed to `translate`, in order.
     pub request_texts: Mutex<Vec<String>>,
+    /// Most recent request source passed to `translate`.
+    pub last_request_source: Mutex<Option<Language>>,
+    /// All request sources passed to `translate`, in order.
+    pub request_sources: Mutex<Vec<Language>>,
 }
 
 impl MockTranslationBehavior {
@@ -279,6 +302,16 @@ impl TranslationProvider for MockTranslation {
             .lock()
             .unwrap_or_else(poison_inner)
             .push(request.text.clone());
+        behavior
+            .last_request_source
+            .lock()
+            .unwrap_or_else(poison_inner)
+            .clone_from(&Some(request.source));
+        behavior
+            .request_sources
+            .lock()
+            .unwrap_or_else(poison_inner)
+            .push(request.source);
         let current = behavior.concurrent.fetch_add(1, Ordering::SeqCst) + 1;
         behavior.max_concurrent.fetch_max(current, Ordering::SeqCst);
 

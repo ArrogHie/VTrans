@@ -1,10 +1,10 @@
 //! Single-capture pipeline mode.
 //!
 //! Runs one capture -> OCR -> normalize -> translate pass and reports each
-//! stage through [`PipelineEvent`](crate::PipelineEvent). The entry point
+//! stage through [`PipelineEvent`]. The entry point
 //! [`run_single_capture`] is a crate-level convenience that wraps a
-//! [`Pipeline`](crate::Pipeline) in single mode; [`Pipeline::run`] uses
-//! [`run_single_capture_internal`] internally.
+//! [`Pipeline`](crate::Pipeline) in single mode; [`crate::Pipeline::run`]
+//! uses `run_single_capture_internal` internally.
 
 use std::sync::Arc;
 
@@ -15,8 +15,8 @@ use vtrans_core::truncate_for_log;
 use vtrans_core::types::{PipelineMode, PipelineStatus};
 
 use crate::{
-    image_aligned_region, normalize_result, translate_text, FrameSink, PipelineConfig,
-    PipelineDeps, PipelineError, PipelineEvent, PipelineState,
+    image_aligned_region, normalize_result, resolve_effective_source, translate_text, FrameSink,
+    PipelineConfig, PipelineDeps, PipelineError, PipelineEvent, PipelineState,
 };
 
 /// Runs a single capture -> OCR -> translate pass.
@@ -89,7 +89,15 @@ pub(crate) async fn run_single_capture_internal(
         "OCR pass completed"
     );
 
-    let normalized = normalize_result(result, request.source);
+    // Resolve the effective translation source (configured language ->
+    // OCR detection -> Unicode heuristic -> Auto) before normalizing, so
+    // Japanese punctuation rules use the same source that is translated.
+    let source = resolve_effective_source(
+        result.detected_language,
+        request.source,
+        &result.merged_text,
+    );
+    let normalized = normalize_result(result, source);
     let _ = event_tx
         .send(PipelineEvent::OcrCompleted(normalized.clone()))
         .await;
@@ -114,7 +122,7 @@ pub(crate) async fn run_single_capture_internal(
         result = translate_text(
             &deps,
             &normalized.merged_text,
-            request.source,
+            source,
             request.target,
             stop.clone(),
         ) => result.map_err(PipelineError::from)?,

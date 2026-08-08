@@ -26,6 +26,18 @@ fn live_config(region: ScreenRegion) -> PipelineConfig {
     )
 }
 
+/// Live-mode configuration whose translation source is `Auto`; the pipeline
+/// must resolve it per frame after OCR.
+fn live_auto_source_config(region: ScreenRegion) -> PipelineConfig {
+    PipelineConfig::live(
+        region,
+        16,
+        0.0,
+        OcrOptions::new(Language::Auto),
+        TranslationRequest::new("", Language::Auto, Language::ChineseSimplified),
+    )
+}
+
 fn deps(capture: MockCaptureSource, ocr: MockOcr, translation: MockTranslation) -> PipelineDeps {
     PipelineDeps::new(Box::new(capture), Box::new(ocr), Box::new(translation))
 }
@@ -215,6 +227,48 @@ async fn live_full_chain_emits_events_in_order() {
         Some("Hello".to_string())
     );
     assert!(matches!(pipeline.status(), PipelineStatus::Idle));
+}
+
+#[tokio::test]
+async fn live_auto_source_resolves_from_ocr_detection() {
+    let region = ScreenRegion::new("m0", 0, 0, 8, 8);
+    let capture = Arc::new(MockCaptureBehavior::default());
+    let ocr = Arc::new(MockOcrBehavior::default());
+    ocr.push(Ok(ocr_result_with_detection(
+        "こんにちは",
+        Language::Japanese,
+    )));
+    let translation = Arc::new(MockTranslationBehavior::default());
+    translation.push(Ok(translation_result("你好", "mock-translation")));
+
+    let pipeline = Arc::new(Pipeline::new(
+        live_auto_source_config(region),
+        deps(
+            MockCaptureSource::new(capture.clone()),
+            MockOcr::new(ocr),
+            MockTranslation::new(translation.clone()),
+        ),
+    ));
+    let (run_handle, log) = start_live(&pipeline);
+
+    feed_frame(&capture, solid_image(8, 8, 1)).await;
+    log.wait_until(
+        |e| matches!(e, PipelineEvent::TranslationCompleted(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    pipeline.stop().await.unwrap();
+    assert!(run_handle.await.unwrap().is_ok());
+
+    assert_eq!(
+        *translation
+            .last_request_source
+            .lock()
+            .unwrap_or_else(poison_inner),
+        Some(Language::Japanese)
+    );
+    let _ = log.finish().await;
 }
 
 #[tokio::test]

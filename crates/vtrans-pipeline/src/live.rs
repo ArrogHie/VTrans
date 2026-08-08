@@ -14,7 +14,7 @@
 //! 3. the **translation worker** runs at most one translation at a time and
 //!    emits the result.
 //!
-//! Every stage observes the shared stop token, so [`Pipeline::stop`]
+//! Every stage observes the shared stop token, so [`crate::Pipeline::stop`]
 //! terminates the whole pipeline in bounded time. All channels are
 //! capacity 1, so queue memory never grows unboundedly: when a channel is
 //! full, the newest item is dropped and a debug log records the backpressure
@@ -33,8 +33,8 @@ use vtrans_core::OcrError;
 use crate::cancel::TaskSlot;
 use crate::dedup::{FrameDiffer, TextDedup};
 use crate::{
-    image_aligned_region, normalize_result, poison_inner, translate_text, FrameSink, PipelineDeps,
-    PipelineError, PipelineEvent, PipelineState,
+    image_aligned_region, normalize_result, poison_inner, resolve_effective_source, translate_text,
+    FrameSink, PipelineDeps, PipelineError, PipelineEvent, PipelineState,
 };
 
 /// Capture intervals below this (in milliseconds) would busy-spin the loop;
@@ -291,7 +291,12 @@ async fn run_ocr_job(
         "OCR pass completed"
     );
 
-    let normalized = normalize_result(result, params.source);
+    // Resolve the effective translation source per frame (configured
+    // language -> OCR detection -> Unicode heuristic -> Auto) so the
+    // translated request and the Japanese punctuation normalization agree.
+    let source =
+        resolve_effective_source(result.detected_language, params.source, &result.merged_text);
+    let normalized = normalize_result(result, source);
     let _ = ctx
         .event_tx
         .send(PipelineEvent::OcrCompleted(normalized.clone()))
@@ -319,7 +324,7 @@ async fn run_ocr_job(
 
     let job = OcrJob {
         text: normalized.merged_text,
-        source: params.source,
+        source,
         target: params.target,
     };
     match jobs_tx.try_send(job) {

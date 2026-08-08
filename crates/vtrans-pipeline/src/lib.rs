@@ -21,6 +21,7 @@
 
 pub mod cancel;
 pub mod dedup;
+pub mod language;
 pub mod live;
 pub mod single;
 
@@ -42,6 +43,8 @@ use vtrans_text::TextNormalizer;
 
 pub use cancel::TaskSlot;
 pub use dedup::{FrameDiffer, TextDedup, DEFAULT_DIFFERENCE_THRESHOLD};
+pub(crate) use language::resolve_effective_source;
+pub use language::{heuristic_detect_language, resolve_translation_source};
 pub use single::run_single_capture;
 
 /// Observes captured frames before they enter OCR.
@@ -542,36 +545,163 @@ pub(crate) fn image_aligned_region(monitor_id: &str, image: &CapturedImage) -> S
     ScreenRegion::new(monitor_id.to_string(), 0, 0, image.width, image.height)
 }
 
-/// Maximum number of characters sent to the translation provider in one
-/// call. Screen text usually fits well below this limit, so the pipeline
-/// translates it in a single call (fastest with generation-in-graph
-/// models); longer texts are split at character boundaries.
-const MAX_TRANSLATION_CHUNK_CHARS: usize = 2000;
+/// Absolute ceiling for one translation chunk, in characters.
+///
+/// This is the final hard-split fallback: sources without a dedicated
+/// budget (Chinese, or an unresolved `Auto`) keep the historical
+/// 2000-character limit, and every chunk produced by the punctuation-aware
+/// splitter is at most this long.
+pub const MAX_TRANSLATION_CHUNK_CHARS: usize = 2000;
 
-/// Splits `text` into translation chunks: a single chunk when it fits
-/// within [`MAX_TRANSLATION_CHUNK_CHARS`], otherwise hard splits at
-/// character boundaries (never inside a Unicode scalar).
-fn chunk_translation_text(text: &str) -> Vec<String> {
-    if text.chars().count() <= MAX_TRANSLATION_CHUNK_CHARS {
+/// Character budget for a translation chunk of Japanese text.
+///
+/// Aligned with the native engines' `max_input_tokens = 256` using a
+/// conservative characters-per-token estimate (translation integration
+/// guide §9.3). Unit tests lock the value.
+pub const JA_CHUNK_CHARS: usize = 512;
+
+/// Character budget for a translation chunk of English text.
+///
+/// English tokenizes denser than Japanese (roughly 4 characters per token
+/// for the `SentencePiece` vocabularies used by the native engines), so the
+/// budget is larger while still staying within `max_input_tokens = 256`.
+/// Unit tests lock the value.
+pub const EN_CHUNK_CHARS: usize = 1024;
+
+/// Returns the per-chunk character budget for `source`.
+fn chunk_budget(source: Language) -> usize {
+    match source {
+        Language::Japanese => JA_CHUNK_CHARS,
+        Language::English => EN_CHUNK_CHARS,
+        // Chinese and unresolved `Auto` sources keep the historical
+        // ceiling; the native provider does not serve Chinese sources, and
+        // API providers have their own length limits.
+        Language::ChineseSimplified | Language::Auto => MAX_TRANSLATION_CHUNK_CHARS,
+    }
+}
+
+/// Splits `text` into translation chunks for `source`.
+///
+/// A text that fits within the source-specific budget
+/// ([`chunk_budget`]) is translated in a single call with newlines
+/// preserved - the common case for screen translation. Longer texts are
+/// separated at newlines first (each paragraph becomes one or more chunks,
+/// matching the paragraph semantics of `vtrans-text`), and an over-long
+/// paragraph is split at sentence boundaries (`。！？.!?`), then at
+/// commas/semicolons (`，、,;`), then at whitespace, and finally at a hard
+/// character boundary (never inside a Unicode scalar). Chunks are trimmed;
+/// [`translate_text`] joins the translations back with `\n`, so paragraph
+/// structure survives chunking.
+fn chunk_translation_text(text: &str, source: Language) -> Vec<String> {
+    let budget = chunk_budget(source);
+    if text.is_empty() || text.chars().count() <= budget {
         return vec![text.to_string()];
     }
-    text.chars()
-        .collect::<Vec<char>>()
-        .chunks(MAX_TRANSLATION_CHUNK_CHARS)
-        .map(|chunk| chunk.iter().collect::<String>())
-        .collect()
+    let mut chunks = Vec::new();
+    for paragraph in text.split('\n') {
+        let paragraph = paragraph.trim();
+        if paragraph.is_empty() {
+            continue;
+        }
+        if paragraph.chars().count() <= budget {
+            chunks.push(paragraph.to_string());
+        } else {
+            chunks.extend(split_long_paragraph(paragraph, budget));
+        }
+    }
+    chunks
+}
+
+/// Splits one over-long paragraph into chunks of at most `budget` chars.
+fn split_long_paragraph(paragraph: &str, budget: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut remaining = paragraph;
+    while remaining.chars().count() > budget {
+        let (chunk, rest) = take_chunk(remaining, budget);
+        // `trim_end` guards the window-boundary cut: the window may end
+        // with whitespace when the input has consecutive spaces.
+        chunks.push(chunk.trim_end().to_string());
+        remaining = rest.trim_start();
+    }
+    if !remaining.is_empty() {
+        chunks.push(remaining.to_string());
+    }
+    chunks
+}
+
+/// Returns `true` when `ch` ends a sentence for chunking purposes.
+///
+/// The union of the Japanese (`。！？`) and English (`.!?`) sentence-ending
+/// sets (translation integration guide §9.3). Fullwidth forms are matched
+/// as well because `vtrans-text` cleaning may leave either representation.
+fn is_sentence_ender(ch: char) -> bool {
+    matches!(ch, '。' | '！' | '？' | '.' | '!' | '?')
+}
+
+/// Returns `true` when `ch` is a clause-level chunk boundary.
+fn is_comma_boundary(ch: char) -> bool {
+    matches!(ch, '，' | '、' | ',' | ';')
+}
+
+/// Cuts the next chunk off `paragraph`.
+///
+/// Returns `(chunk, rest)` where `chunk` has at most `budget` characters.
+/// Sentence-ending punctuation is preferred, then commas/semicolons, then
+/// whitespace; each boundary must consume at least half of the window so no
+/// tiny fragments are produced. When no soft boundary exists, the chunk is
+/// cut at the window boundary (a Unicode-scalar boundary by construction).
+fn take_chunk(paragraph: &str, budget: usize) -> (&str, &str) {
+    debug_assert!(paragraph.chars().count() > budget);
+
+    let mut indices = paragraph.char_indices();
+    // Byte offset just past the first `budget` characters (the window).
+    let window_end = indices
+        .nth(budget - 1)
+        .map_or(paragraph.len(), |(idx, ch)| idx + ch.len_utf8());
+
+    let window = &paragraph[..window_end];
+    let floor = budget / 2;
+    if let Some((byte_idx, ch)) = last_boundary(window, is_sentence_ender, floor) {
+        // Include the sentence-ending punctuation in the chunk.
+        let end = byte_idx + ch.len_utf8();
+        return (&paragraph[..end], &paragraph[end..]);
+    }
+    if let Some((byte_idx, ch)) = last_boundary(window, is_comma_boundary, floor) {
+        let end = byte_idx + ch.len_utf8();
+        return (&paragraph[..end], &paragraph[end..]);
+    }
+    if let Some((byte_idx, _)) = last_boundary(window, char::is_whitespace, floor) {
+        // Cut before the whitespace; `split_long_paragraph` trims the rest.
+        return (&paragraph[..byte_idx], &paragraph[byte_idx..]);
+    }
+    (&paragraph[..window_end], &paragraph[window_end..])
+}
+
+/// Finds the last character in `window` matching `predicate` whose chunk
+/// prefix would consume at least half of the window (`floor + 1` characters
+/// or more), and returns its byte index together with the character itself
+/// so the caller can decide whether to include it.
+///
+/// Returns `None` when no such boundary exists.
+fn last_boundary(window: &str, predicate: fn(char) -> bool, floor: usize) -> Option<(usize, char)> {
+    let mut result = None;
+    for (char_idx, (byte_idx, ch)) in window.char_indices().enumerate() {
+        if char_idx + 1 >= floor && predicate(ch) {
+            result = Some((byte_idx, ch));
+        }
+    }
+    result
 }
 
 /// Translates `text` through the configured provider.
 ///
-/// The whole text is sent as a single request whenever it fits within
-/// [`MAX_TRANSLATION_CHUNK_CHARS`] characters - the common case for screen
-/// translation. This keeps the number of provider calls (and therefore the
-/// number of generation-graph runs for local models) as low as possible,
-/// which is the dominant cost for the generation-in-graph ONNX interface
-/// chosen for this project. Only texts longer than the limit are hard-split
-/// at character boundaries; each chunk is translated sequentially with the
-/// same cancellation token. Chunk translations are joined with `\n` into a
+/// The whole text is sent as a single request whenever it fits within the
+/// source-specific budget (see [`chunk_translation_text`]) - the common
+/// case for screen translation. This keeps the number of provider calls as
+/// low as possible, which is the dominant cost for local engines. Longer
+/// texts are split at newlines and then at sentence / comma / whitespace
+/// boundaries; each chunk is translated sequentially with the same
+/// cancellation token. Chunk translations are joined with `\n` into a
 /// single [`TranslationResult`]; `elapsed_ms` is the sum over all chunks.
 ///
 /// Note: providers truncate input at their own `max_length` (see the model
@@ -589,7 +719,7 @@ pub(crate) async fn translate_text(
     target: Language,
     cancel: CancellationToken,
 ) -> Result<TranslationResult, TranslationError> {
-    let chunks = chunk_translation_text(text);
+    let chunks = chunk_translation_text(text, source);
     let mut translated = Vec::with_capacity(chunks.len());
     let mut provider_id = String::new();
     let mut total_elapsed_ms = 0;
@@ -610,9 +740,12 @@ pub(crate) async fn translate_text(
 /// Merges and cleans OCR lines for translation.
 ///
 /// Applies the language-neutral cleaner, then Japanese punctuation
-/// normalization when the source is Japanese (or detected as Japanese while
-/// the source is `Auto`). The cleaned text replaces `merged_text` in the
-/// returned result.
+/// normalization when the effective translation source is Japanese.
+///
+/// Callers must pass the source resolved by
+/// [`language::resolve_effective_source`]; the `Auto` + detected-Japanese
+/// combination is still honored defensively for standalone use.
+/// The cleaned text replaces `merged_text` in the returned result.
 pub(crate) fn normalize_result(result: OcrResult, source: Language) -> OcrResult {
     let merged = TextNormalizer::merge_lines(&result.lines);
     let cleaned = TextNormalizer::clean(&merged);
@@ -633,17 +766,55 @@ pub(crate) fn normalize_result(result: OcrResult, source: Language) -> OcrResult
 mod tests {
     use super::*;
 
+    // ── chunk budgets ──
+
+    #[test]
+    fn chunk_budgets_are_locked_by_tests() {
+        assert_eq!(MAX_TRANSLATION_CHUNK_CHARS, 2000);
+        assert_eq!(JA_CHUNK_CHARS, 512);
+        assert_eq!(EN_CHUNK_CHARS, 1024);
+        assert_eq!(chunk_budget(Language::Japanese), JA_CHUNK_CHARS);
+        assert_eq!(chunk_budget(Language::English), EN_CHUNK_CHARS);
+        assert_eq!(
+            chunk_budget(Language::ChineseSimplified),
+            MAX_TRANSLATION_CHUNK_CHARS
+        );
+        assert_eq!(chunk_budget(Language::Auto), MAX_TRANSLATION_CHUNK_CHARS);
+    }
+
+    // ── chunk_translation_text ──
+
     #[test]
     fn chunk_short_text_in_single_call() {
-        assert_eq!(chunk_translation_text("hello world"), vec!["hello world"]);
-        let exactly = "a".repeat(MAX_TRANSLATION_CHUNK_CHARS);
-        assert_eq!(chunk_translation_text(&exactly), vec![exactly]);
+        assert_eq!(
+            chunk_translation_text("hello world", Language::English),
+            vec!["hello world"]
+        );
+        let exactly_en = "a".repeat(EN_CHUNK_CHARS);
+        assert_eq!(
+            chunk_translation_text(&exactly_en, Language::English),
+            vec![exactly_en]
+        );
+        let exactly_ja = "あ".repeat(JA_CHUNK_CHARS);
+        assert_eq!(
+            chunk_translation_text(&exactly_ja, Language::Japanese),
+            vec![exactly_ja]
+        );
     }
 
     #[test]
-    fn chunk_long_text_at_character_boundaries() {
+    fn chunk_short_text_preserves_newlines() {
+        let text = "line one\nline two";
+        assert_eq!(
+            chunk_translation_text(text, Language::English),
+            vec![text.to_string()]
+        );
+    }
+
+    #[test]
+    fn chunk_long_text_hard_splits_at_default_budget() {
         let text = "x".repeat(2500);
-        let chunks = chunk_translation_text(&text);
+        let chunks = chunk_translation_text(&text, Language::ChineseSimplified);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), MAX_TRANSLATION_CHUNK_CHARS);
         assert_eq!(chunks[1].len(), 500);
@@ -653,7 +824,7 @@ mod tests {
     #[test]
     fn chunk_never_splits_unicode_scalars() {
         let text = "日".repeat(2500);
-        let chunks = chunk_translation_text(&text);
+        let chunks = chunk_translation_text(&text, Language::ChineseSimplified);
         assert_eq!(chunks.len(), 2);
         assert!(chunks.iter().all(|chunk| chunk.chars().all(|c| c == '日')));
         assert_eq!(chunks.concat(), text);
@@ -661,6 +832,128 @@ mod tests {
 
     #[test]
     fn chunk_empty_text_is_single_call() {
-        assert_eq!(chunk_translation_text(""), vec![""]);
+        assert_eq!(chunk_translation_text("", Language::English), vec![""]);
+    }
+
+    #[test]
+    fn chunk_japanese_uses_512_char_budget() {
+        let text = "こんにちは".repeat(200); // 1000 characters > 512
+        let chunks = chunk_translation_text(&text, Language::Japanese);
+        assert!(chunks.len() >= 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= JA_CHUNK_CHARS));
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn chunk_splits_long_text_at_newlines() {
+        let first = "あ".repeat(300);
+        let second = "い".repeat(300);
+        let text = format!("{first}\n{second}");
+        let chunks = chunk_translation_text(&text, Language::Japanese);
+        assert_eq!(chunks, vec![first, second]);
+    }
+
+    #[test]
+    fn chunk_drops_blank_lines_only_when_over_budget() {
+        let first = "あ".repeat(300);
+        let second = "い".repeat(300);
+        let text = format!("{first}\n\n{second}");
+        let chunks = chunk_translation_text(&text, Language::Japanese);
+        assert_eq!(chunks, vec![first, second]);
+    }
+
+    // ── split_long_paragraph / take_chunk ──
+
+    #[test]
+    fn split_prefers_sentence_boundaries() {
+        let chunks = split_long_paragraph("AAAA. BBBB. CCCC.", 8);
+        assert_eq!(chunks, vec!["AAAA.", "BBBB.", "CCCC."]);
+    }
+
+    #[test]
+    fn split_prefers_sentence_over_comma_within_window() {
+        // The last sentence ender (index 15) wins over the comma (index 10)
+        // inside the 20-character window.
+        let chunks = split_long_paragraph("AAAA. BBBB, CCCC. DDDD, EEEE.", 20);
+        assert_eq!(chunks, vec!["AAAA. BBBB, CCCC.", "DDDD, EEEE."]);
+    }
+
+    #[test]
+    fn split_falls_back_to_comma_boundaries() {
+        let chunks = split_long_paragraph("aaaa,bbbb cccc", 8);
+        assert_eq!(chunks, vec!["aaaa,", "bbbb", "cccc"]);
+    }
+
+    #[test]
+    fn split_falls_back_to_whitespace() {
+        let chunks = split_long_paragraph("aaaa bbbb cccc", 6);
+        assert_eq!(chunks, vec!["aaaa", "bbbb", "cccc"]);
+    }
+
+    #[test]
+    fn split_falls_back_to_hard_cut() {
+        let chunks = split_long_paragraph("abcdefgh", 3);
+        assert_eq!(chunks, vec!["abc", "def", "gh"]);
+    }
+
+    #[test]
+    fn split_respects_japanese_sentence_enders() {
+        let chunks = split_long_paragraph("こんにちは。また明日。さようなら。", 10);
+        assert_eq!(chunks, vec!["こんにちは。", "また明日。", "さようなら。"]);
+    }
+
+    #[test]
+    fn split_never_breaks_unicode_scalars() {
+        let text = "😀".repeat(600);
+        let chunks = split_long_paragraph(&text, 512);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= 512 && chunk.chars().all(|c| c == '😀')));
+        assert_eq!(chunks.concat(), text);
+    }
+
+    #[test]
+    fn take_chunk_prefers_sentence_ender_over_comma() {
+        // Window "AAAA, BBBB." with budget 12: the sentence ender at index
+        // 11 is preferred over the comma at index 4.
+        let (chunk, rest) = take_chunk("AAAA, BBBB. CCCC", 12);
+        assert_eq!(chunk, "AAAA, BBBB.");
+        assert_eq!(rest, " CCCC");
+    }
+
+    #[test]
+    fn normalize_result_uses_resolved_source_for_japanese_punctuation() {
+        let polygon = [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]];
+        let result = OcrResult::from_lines(
+            vec![vtrans_core::OcrLine::new(
+                "ＨＰ １００，攻撃力アップ．",
+                0.9,
+                polygon,
+                0,
+            )],
+            Some(Language::Japanese),
+            5,
+        );
+        let normalized = normalize_result(result, Language::Japanese);
+        assert_eq!(normalized.merged_text, "HP 100、攻撃力アップ。");
+    }
+
+    #[test]
+    fn normalize_result_keeps_punctuation_for_non_japanese_source() {
+        let polygon = [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]];
+        let result = OcrResult::from_lines(
+            vec![vtrans_core::OcrLine::new(
+                "ＨＰ １００，攻撃力アップ．",
+                0.9,
+                polygon,
+                0,
+            )],
+            Some(Language::Japanese),
+            5,
+        );
+        let normalized = normalize_result(result, Language::English);
+        assert_eq!(normalized.merged_text, "HP 100，攻撃力アップ．");
     }
 }
