@@ -8,7 +8,9 @@
 //! Usage:
 //!
 //! ```text
-//! # 本地翻译模型（需先运行 scripts/download_models.ps1 下载模型）
+//! # 本地翻译模型（需先运行 scripts/download_models.ps1 下载 OCR 模型、
+//! # scripts/translation/setup_translation_models.ps1 下载翻译模型，并构建
+//! # native/translation_bridge（translation_bridge.dll））
 //! cargo run -p vtrans-pipeline --example pipeline_verify -- \
 //!     --models src-tauri/resources/models \
 //!     --language ja --target zh-CN --mode single
@@ -38,7 +40,7 @@ use vtrans_core::TranslationError;
 use vtrans_models::ModelManager;
 use vtrans_ocr::PaddleOcrProvider;
 use vtrans_pipeline::{Pipeline, PipelineConfig, PipelineDeps, PipelineEvent};
-use vtrans_translation::{ApiTranslationProvider, LocalTranslationProvider};
+use vtrans_translation::{ApiTranslationProvider, NativeTranslationProvider};
 
 /// Pipeline operating mode.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -103,25 +105,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let manager = ModelManager::from_manifest_dir(&args.models_dir)?;
     let ocr = PaddleOcrProvider::from_manager(&manager)?;
 
-    // 3. Translation provider: local ONNX or OpenAI-compatible API.
-    if matches!(args.translation, TranslationChoice::Local) {
-        check_local_pair(&manager, args.language, args.target)?;
-    }
+    // 3. Translation provider: native dual-engine or OpenAI-compatible API.
     let translation = match build_translation(&args, &manager) {
         Ok(provider) => provider,
         Err(TranslationError::ModelLoad(message)) => {
             eprintln!("本地翻译模型加载失败: {message}");
             eprintln!();
-            eprintln!("提示：vtrans-translation 支持「整图生成」（输入 num_beams/min_length/");
             eprintln!(
-                "      max_length 等，输出 sequences）与「逐 token 解码」（含 decoder_input_ids）"
+                "提示：本地翻译需要 native/translation_bridge 构建产物（translation_bridge.dll）"
             );
-            eprintln!("      两种 ONNX 接口；当前模型与两者都不匹配，请检查模型文件或 manifest。");
+            eprintln!(
+                "      与 manifest v2 声明的模型文件；请先运行 native/translation_bridge/build.ps1"
+            );
+            eprintln!("      和 scripts/translation/setup_translation_models.ps1。");
             eprintln!("      现在可先用 API 翻译验证全管线：--api-endpoint <url> --api-model <name> --api-key <key>");
             std::process::exit(2);
         }
         Err(error) => return Err(error.into()),
     };
+    if matches!(args.translation, TranslationChoice::Local) {
+        check_local_pair(translation.as_ref(), args.language, args.target)?;
+    }
 
     // 4. Assemble and run the pipeline.
     let options = OcrOptions {
@@ -174,7 +178,7 @@ fn build_translation(
 ) -> Result<Box<dyn vtrans_core::TranslationProvider>, TranslationError> {
     match &args.translation {
         TranslationChoice::Local => {
-            let provider = LocalTranslationProvider::from_manager(manager)?;
+            let provider = NativeTranslationProvider::from_manager(manager)?;
             Ok(Box::new(provider))
         }
         TranslationChoice::Api {
@@ -191,21 +195,27 @@ fn build_translation(
     }
 }
 
-/// Fails with an actionable message when the local model does not declare
-/// the requested language pair.
+/// Fails with an actionable message when the local provider does not
+/// support the requested language pair.
+///
+/// The pairs come from the provider's
+/// [`TranslationProvider::supported_pairs`] trait method, so the check can
+/// never drift from the implementation. `Auto` sources are resolved by the
+/// pipeline after OCR (detection first, then the Unicode heuristic);
+/// unsupported resolutions are reported by the provider at translate time.
 fn check_local_pair(
-    manager: &ModelManager,
+    provider: &dyn vtrans_core::TranslationProvider,
     source: Language,
     target: Language,
 ) -> Result<(), String> {
-    let Some(group) = manager.manifest().translation.as_ref() else {
-        return Err("manifest.json 没有声明 translation 模型组".to_string());
-    };
-    if group.supported_pairs.contains(&(source, target)) {
+    if source.is_auto() {
         return Ok(());
     }
-    let pairs: Vec<String> = group
-        .supported_pairs
+    let supported = provider.supported_pairs();
+    if supported.contains(&(source, target)) {
+        return Ok(());
+    }
+    let pairs: Vec<String> = supported
         .iter()
         .map(|(s, t)| format!("{}->{}", s.code(), t.code()))
         .collect();
