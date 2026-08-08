@@ -3,15 +3,21 @@
 //! Usage:
 //!
 //! ```text
+//! # Native dual-engine mode (needs models + translation_bridge.dll):
+//! cargo run --example translation_verify -- \
+//!     --text "hello" --source en --target zh-CN \
+//!     --models src-tauri/resources/models [--quality fast|balanced]
+//!
+//! # API mode:
 //! cargo run --example translation_verify -- \
 //!     --text "hello" --source en --target ja \
 //!     --api-endpoint https://api.example.com/v1/chat/completions \
 //!     --api-model translator --api-key sk-... [--timeout 30] [--retries 2]
-//!
-//! cargo run --example translation_verify -- \
-//!     --text "hello" --source en --target ja \
-//!     --models src-tauri/resources/models
 //! ```
+//!
+//! The native mode only supports `en -> zh-CN` and `ja -> zh-CN`; the
+//! source language must be concrete (`auto` is resolved by the pipeline,
+//! not by the provider).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 use vtrans_core::types::{Language, TranslationRequest};
 use vtrans_core::TranslationProvider;
 use vtrans_models::ModelManager;
-use vtrans_translation::{ApiTranslationProvider, LocalTranslationProvider};
+use vtrans_translation::{ApiTranslationProvider, NativeTranslationProvider, TranslationQuality};
 
 enum Mode {
     Api {
@@ -31,8 +37,9 @@ enum Mode {
         timeout: Duration,
         retries: u32,
     },
-    Local {
+    Native {
         models_dir: PathBuf,
+        quality: TranslationQuality,
     },
 }
 
@@ -62,9 +69,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ApiTranslationProvider::new(endpoint, model, api_key, *timeout, *retries);
             provider.translate(&request, cancel).await?
         }
-        Mode::Local { models_dir } => {
+        Mode::Native {
+            models_dir,
+            quality,
+        } => {
             let manager = ModelManager::from_manifest_dir(models_dir)?;
-            let provider = LocalTranslationProvider::from_manager(&manager)?;
+            let provider =
+                NativeTranslationProvider::from_manager(&manager)?.with_quality(*quality)?;
             provider.translate(&request, cancel).await?
         }
     };
@@ -87,6 +98,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut timeout = Duration::from_secs(30);
     let mut retries = 2;
     let mut models_dir = None;
+    let mut quality = TranslationQuality::default();
 
     let mut index = 0;
     while index < args.len() {
@@ -124,11 +136,17 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             "--models" => {
                 models_dir = Some(PathBuf::from(next_value(args, &mut index, "--models")?));
             }
+            "--quality" => {
+                let value = next_value(args, &mut index, "--quality")?;
+                quality = value
+                    .parse::<TranslationQuality>()
+                    .map_err(|_| format!("invalid quality: {value} (expected fast|balanced)"))?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "usage: translation_verify --text <text> --source <code> --target <code> \
-                     (--api-endpoint <url> --api-model <model> [--api-key <key>] [--timeout <secs>] [--retries <n>] \
-                     | --models <dir>)"
+                    "usage: translation_verify --text <text> --source <code> --target <code> \n\
+                     (--api-endpoint <url> --api-model <model> [--api-key <key>] [--timeout <secs>] [--retries <n>] \n\
+                     | --models <dir> [--quality fast|balanced])"
                 );
                 std::process::exit(0);
             }
@@ -144,7 +162,10 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
         if endpoint.is_some() || model.is_some() || api_key.is_some() {
             return Err("--models cannot be combined with API arguments".to_string());
         }
-        Mode::Local { models_dir }
+        Mode::Native {
+            models_dir,
+            quality,
+        }
     } else {
         let endpoint = endpoint.ok_or("missing required argument --api-endpoint <url>")?;
         let model = model.ok_or("missing required argument --api-model <model>")?;

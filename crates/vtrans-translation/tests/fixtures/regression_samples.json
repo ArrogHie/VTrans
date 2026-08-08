@@ -1,0 +1,12 @@
+[
+  {
+    "source_language": "en",
+    "source_text": "Thank you.",
+    "expected_contains": ["谢谢"]
+  },
+  {
+    "source_language": "ja",
+    "source_text": "今日はもう帰るね。",
+    "expected_contains": ["今天", "回"]
+  }
+]
