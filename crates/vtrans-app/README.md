@@ -103,6 +103,11 @@ get_app_status() -> Result<AppStatus, AppError>
 清除缓存的 pipeline。目标语言为 `Language::Auto` 时由配置校验拒绝
 （`translation.target_language must not be "auto"`）。
 
+`ocr.language` 与 `translation.source_language` 是**联动字段**
+（vtrans-config 的 `validate_language_linkage` 要求二者恒等）：
+`set_ocr_language` 与 `set_source_language` 各自同时写入两个字段，任一命令
+执行后两字段恒相等，`ConfigManager::save` 的校验不会因联动不一致而拒绝。
+
 `set_api_key` 把翻译 API Key 写入 Windows Credential Manager（target 固定为
 `"translation"`，与 `load_api_key` 读取的 target 一致），Key 不进入
 `config.json`、前端 store、事件或日志。写入通过 `spawn_blocking` 在阻塞池

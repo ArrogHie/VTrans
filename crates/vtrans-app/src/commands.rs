@@ -405,7 +405,7 @@ pub async fn set_ocr_language(
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
-    state.update_config(|config| config.ocr.language = language)?;
+    state.update_config(|config| apply_ocr_language(config, language))?;
     state.clear_pipeline();
     tracing::info!(language = language.code(), "OCR language updated");
     Ok(())
@@ -466,12 +466,28 @@ pub async fn set_target_language(
     Ok(())
 }
 
+/// Applies an OCR-language change to a configuration snapshot.
+///
+/// `ocr.language` and `translation.source_language` are linked settings
+/// (see `vtrans_config::validate_language_linkage`): both are set to the
+/// same value so the subsequent `ConfigManager::save` validation always
+/// succeeds. Kept as a pure function so the exact mutation performed by
+/// [`set_ocr_language`] is unit-testable without a Tauri runtime.
+fn apply_ocr_language(config: &mut AppConfig, language: Language) {
+    config.ocr.language = language;
+    config.translation.source_language = language;
+}
+
 /// Applies a source-language change to a configuration snapshot.
 ///
-/// Kept as a pure function so the exact mutation performed by
-/// [`set_source_language`] can be unit-tested without a Tauri runtime.
+/// `translation.source_language` and `ocr.language` are linked settings
+/// (see `vtrans_config::validate_language_linkage`): both are set to the
+/// same value so the subsequent `ConfigManager::save` validation always
+/// succeeds. Kept as a pure function so the exact mutation performed by
+/// [`set_source_language`] is unit-testable without a Tauri runtime.
 fn apply_source_language(config: &mut AppConfig, language: Language) {
     config.translation.source_language = language;
+    config.ocr.language = language;
 }
 
 /// Applies a target-language change to a configuration snapshot.
@@ -809,14 +825,65 @@ mod tests {
     }
 
     #[test]
-    fn source_language_update_mutates_only_source_field() {
+    fn source_language_update_syncs_linked_fields_and_preserves_others() {
         let mut config = AppConfig::default();
         apply_source_language(&mut config, Language::Japanese);
         assert_eq!(config.translation.source_language, Language::Japanese);
+        assert_eq!(config.ocr.language, Language::Japanese);
         assert_eq!(
             config.translation.target_language,
             AppConfig::default().translation.target_language
         );
+    }
+
+    #[test]
+    fn ocr_language_update_syncs_linked_fields_and_preserves_others() {
+        let mut config = AppConfig::default();
+        apply_ocr_language(&mut config, Language::English);
+        assert_eq!(config.ocr.language, Language::English);
+        assert_eq!(config.translation.source_language, Language::English);
+        assert_eq!(
+            config.translation.target_language,
+            AppConfig::default().translation.target_language
+        );
+    }
+
+    #[test]
+    fn linked_language_updates_cover_every_language_variant() {
+        for &language in &[
+            Language::Auto,
+            Language::English,
+            Language::Japanese,
+            Language::ChineseSimplified,
+        ] {
+            let mut via_ocr = AppConfig::default();
+            apply_ocr_language(&mut via_ocr, language);
+            assert_eq!(via_ocr.ocr.language, language);
+            assert_eq!(via_ocr.translation.source_language, language);
+
+            let mut via_source = AppConfig::default();
+            apply_source_language(&mut via_source, language);
+            assert_eq!(via_source.ocr.language, language);
+            assert_eq!(via_source.translation.source_language, language);
+        }
+    }
+
+    #[test]
+    fn linked_language_updates_pass_config_validation() {
+        for &language in &[
+            Language::Auto,
+            Language::English,
+            Language::Japanese,
+            Language::ChineseSimplified,
+        ] {
+            let mut via_ocr = AppConfig::default();
+            apply_ocr_language(&mut via_ocr, language);
+            assert!(via_ocr.validate().is_ok(), "ocr path: {language:?}");
+
+            let mut via_source = AppConfig::default();
+            apply_source_language(&mut via_source, language);
+            assert!(via_source.validate().is_ok(), "source path: {language:?}");
+        }
     }
 
     #[test]

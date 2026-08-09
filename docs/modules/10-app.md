@@ -360,6 +360,11 @@ crates/vtrans-app/
 - 快捷键冲突时允许用户修改（配置中定义）
 - 所有 Command 返回 Result<T, AppError>
 - AppError 实现 Serialize 用于前端错误展示
+- `ocr.language` 与 `translation.source_language` 是联动字段
+  （vtrans-config `validate_language_linkage` 要求二者恒等）。
+  `set_ocr_language` 与 `set_source_language` 各自同时写入两个字段，
+  任一命令执行后两字段恒相等，`ConfigManager::save` 校验不会因联动不一致
+  而拒绝。`set_target_language` 只写 `translation.target_language`。
 - src-tauri/main.rs 只调用 vtrans-app::init_app，保持薄层
 - 主窗口关闭默认隐藏到托盘而非退出；托盘是唯一恢复入口，托盘创建失败时
   应用启动失败而不是留下无法恢复的孤儿进程
