@@ -8,6 +8,7 @@ const {
   captureOnce,
   getAppConfig,
   setApiKey,
+  setOcrLanguage,
   setTranslationProvider,
   setSourceLanguage,
   setTargetLanguage,
@@ -48,6 +49,12 @@ describe("tauri IPC service", () => {
     invoke.mockResolvedValueOnce(undefined);
     await updateLiveRegion(region, "live");
     expect(invoke).toHaveBeenCalledWith("update_live_region", { region, mode: "live" });
+  });
+
+  it("passes the OCR language under the command argument name", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setOcrLanguage("ja");
+    expect(invoke).toHaveBeenCalledWith("set_ocr_language", { language: "ja" });
   });
 
   it("passes the source language under the command argument name", async () => {

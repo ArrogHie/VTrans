@@ -146,6 +146,14 @@ interface AppState {
 }
 ```
 
+`updateLanguage(kind, language)` 的乐观更新与后端联动语义一致：`ocr.language` 与
+`translation.source_language` 是后端联动字段（`vtrans-app` 的 `set_ocr_language` /
+`set_source_language` 总是同时赋值两者，由 `vtrans_config::validate_language_linkage`
+校验）。切换 OCR 语言或源语言时，本地 state 同步更新两个字段，避免 hydrate 回滚前
+本地短暂不一致导致 UI 闪烁或与后端联动校验冲突；`target_language` 不参与联动，
+`updateLanguage("target", …)` 行为不变。`setOcrLanguage` / `setSourceLanguage` 的
+`tauri.ts` 封装签名不变，跨 IPC 序列化契约不变。
+
 ## 构建与测试
 
 在仓库根目录执行：
@@ -176,6 +184,8 @@ pnpm tauri dev
 ## 测试覆盖
 
 - Zustand store 的 mode/status、嵌套配置不可变更新和错误状态。
+- 语言联动乐观更新：切换 OCR 语言或源语言时 `ocr.language` 与
+  `translation.source_language` 同步更新；切换目标语言不触碰联动字段。
 - IPC command 参数名和 payload 结构（含选区取消识别）。
 - 物理像素坐标转换（含反向拖拽）和零尺寸选区拒绝。
 - pipeline 状态标签和序列化错误分支。

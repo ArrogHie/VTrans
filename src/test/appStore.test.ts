@@ -37,6 +37,57 @@ describe("appStore", () => {
     expect(after.translation.provider).toBe(before.translation.provider);
   });
 
+  it("syncs ocr.language and translation.source_language when switching ocr language", () => {
+    // 后端 set_ocr_language 同时写入 ocr.language 与 translation.source_language
+    //（联动字段），乐观更新必须镜像该语义，避免 hydrate 回滚前本地短暂不一致。
+    useAppStore.getState().updateLanguage("ocr", "ja");
+    const config = useAppStore.getState().config;
+    expect(config.ocr.language).toBe("ja");
+    expect(config.translation.source_language).toBe("ja");
+  });
+
+  it("syncs translation.source_language and ocr.language when switching source language", () => {
+    // 后端 set_source_language 同样同时写入两个字段。
+    useAppStore.getState().updateLanguage("source", "en");
+    const config = useAppStore.getState().config;
+    expect(config.translation.source_language).toBe("en");
+    expect(config.ocr.language).toBe("en");
+  });
+
+  it("keeps the linked fields equal across repeated ocr/source switches", () => {
+    for (const language of ["auto", "ja", "en", "zh-CN"] as const) {
+      useAppStore.getState().updateLanguage("ocr", language);
+      const afterOcr = useAppStore.getState().config;
+      expect(afterOcr.ocr.language).toBe(language);
+      expect(afterOcr.translation.source_language).toBe(language);
+    }
+    for (const language of ["en", "zh-CN", "ja", "auto"] as const) {
+      useAppStore.getState().updateLanguage("source", language);
+      const afterSource = useAppStore.getState().config;
+      expect(afterSource.ocr.language).toBe(language);
+      expect(afterSource.translation.source_language).toBe(language);
+    }
+  });
+
+  it("does not touch the linked fields when switching target language", () => {
+    // target_language 不参与联动：切换 target 不应改动 ocr.language 或
+    // translation.source_language。
+    useAppStore.getState().updateLanguage("ocr", "ja");
+    const before = useAppStore.getState().config;
+    useAppStore.getState().updateLanguage("target", "en");
+    const after = useAppStore.getState().config;
+    expect(after.translation.target_language).toBe("en");
+    expect(after.ocr.language).toBe(before.ocr.language);
+    expect(after.translation.source_language).toBe(before.translation.source_language);
+  });
+
+  it("ignores an auto target language switch and leaves config unchanged", () => {
+    useAppStore.getState().updateLanguage("ocr", "ja");
+    const before = useAppStore.getState().config;
+    useAppStore.getState().updateLanguage("target", "auto");
+    expect(useAppStore.getState().config).toBe(before);
+  });
+
   it("shares live configuration and pause state across window adapters", () => {
     const config = {
       region: { monitor_id: "display-1", x: 0, y: 0, width: 100, height: 80 },

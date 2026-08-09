@@ -65,11 +65,26 @@ export const useAppStore = create<AppState>((set) => ({
   setLivePaused: (livePaused) => set({ livePaused }),
   updateLanguage: (kind, language) =>
     set((state) => {
-      if (kind === "ocr") return { config: { ...state.config, ocr: { ...state.config.ocr, language } } };
+      // `ocr.language` 与 `translation.source_language` 是后端联动字段
+      //（见 vtrans-app 的 set_ocr_language / set_source_language：两者
+      // 总是同步赋值，由 vtrans_config::validate_language_linkage 校验）。
+      // 乐观更新必须镜像后端语义，同时写入两个字段，避免 hydrate 回滚前
+      // 本地 state 短暂不一致导致 UI 闪烁或与后端联动校验冲突。
+      // target_language 不参与联动，行为保持不变。
+      if (kind === "ocr") {
+        return {
+          config: {
+            ...state.config,
+            ocr: { ...state.config.ocr, language },
+            translation: { ...state.config.translation, source_language: language },
+          },
+        };
+      }
       if (kind === "source") {
         return {
           config: {
             ...state.config,
+            ocr: { ...state.config.ocr, language },
             translation: { ...state.config.translation, source_language: language },
           },
         };
