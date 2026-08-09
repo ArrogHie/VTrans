@@ -153,8 +153,8 @@ impl AppConfig {
         if self.ocr.language != self.translation.source_language {
             return Err(ConfigError::Validation(format!(
                 "ocr.language ({}) and translation.source_language ({}) must be identical; \
-                 they are linked settings — use the set_ocr_language / set_source_language \
-                 command to keep them in sync",
+                 they are linked settings — change either one via the set_ocr_language / \
+                 set_source_language commands and both stay in sync",
                 self.ocr.language.code(),
                 self.translation.source_language.code(),
             )));
@@ -392,6 +392,8 @@ mod tests {
                 assert!(msg.contains("ocr.language"), "message: {msg}");
                 assert!(msg.contains("source_language"), "message: {msg}");
                 assert!(msg.contains("set_ocr_language"), "message: {msg}");
+                assert!(msg.contains("set_source_language"), "message: {msg}");
+                assert!(msg.contains("both stay in sync"), "message: {msg}");
             }
             other => panic!("expected Validation, got {other:?}"),
         }

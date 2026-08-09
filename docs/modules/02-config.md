@@ -144,5 +144,5 @@ crates/vtrans-config/
 
 - schema：`TranslationConfig` 新增 `quality: String`，`#[serde(default = "fast")]`，合法值 `"fast" | "balanced"`。
 - 迁移：`CURRENT_CONFIG_VERSION` 3 → 4。`migrate_v3_to_v4` 补齐缺省的 `translation.quality`（由 serde default 兜底）并强制 `translation.source_language = ocr.language`（OCR 语言为权威）；迁移幂等，v2→v3→v4 迁移链完整。
-- 校验：`ocr.language != translation.source_language` 返回 `ConfigError::Validation`（错误信息提示两字段必须一致、使用 `set_ocr_language` / `set_source_language` 联动命令）；`quality` 非法值同样返回 `ConfigError::Validation`。
+- 校验：`ocr.language != translation.source_language` 返回 `ConfigError::Validation`（错误信息提示两字段必须一致，并说明通过 `set_ocr_language` / `set_source_language` 任一联动命令修改即可保持两字段同步）；`quality` 非法值同样返回 `ConfigError::Validation`。
 - 行为变更：`AppConfig::validate()` 拒绝保存「OCR 语言与源语言不一致」的配置；旧 v3 配置在加载时自动同步后放行。

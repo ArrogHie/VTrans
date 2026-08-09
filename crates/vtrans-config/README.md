@@ -123,7 +123,7 @@ serde 表示（跨 JSON / IPC 边界）：`Language` 序列化为字符串 `auto
 | `update` 要求文件已存在，未先 `load` 会返回 `NotFound` | 启动时先调用一次 `load()`（同时创建默认文件），之后再用 `update` |
 | 用户改坏配置文件时 `load` 返回 `Parse` / `Validation`，应用不应崩溃 | 捕获 `ConfigError`，提示用户或回退到内存默认值 |
 | 文件版本高于当前应用时返回 `UnsupportedVersion` | 提示用户升级应用，不要自行改写 `version` 字段 |
-| 手动编辑 JSON 使 `ocr.language` 与 `translation.source_language` 不一致时保存被拒 | 两字段是联动设置，走 `set_ocr_language` / `set_source_language` 命令修改，或手动改成一致 |
+| 手动编辑 JSON 使 `ocr.language` 与 `translation.source_language` 不一致时保存被拒 | 两字段是联动设置，走 `set_ocr_language` / `set_source_language` 任一命令修改（两字段自动同步），或手动改成一致 |
 | 并发 `save` 是 last-writer-wins，可能覆盖彼此的变更 | 变更依赖当前值的场景一律用 `update`（内部加锁） |
 | 配置 schema 无密钥字段，往 JSON 里塞 `api_key` 会被反序列化忽略 | 凭据用 `vtrans-security` 管理，配置只保存非敏感设置 |
 
