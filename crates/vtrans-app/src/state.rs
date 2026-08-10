@@ -22,6 +22,94 @@ use vtrans_translation::{
 
 use crate::error::AppError;
 
+/// The `model_id` used for translation provider loading progress events.
+///
+/// Reused by the provider switch and settings save paths so the frontend
+/// shows a single "translation" progress bar during local model loads.
+const TRANSLATION_PROGRESS_MODEL_ID: &str = "translation";
+
+/// A lazily-loaded local translation provider cached across switches.
+///
+/// The local provider performs a heavy one-time load (SHA-256 verification
+/// of the full model file, tokenizer parse, and ONNX session commit with
+/// full graph optimization). Caching the assembled provider means only the
+/// first switch to `"local"` pays that cost; subsequent switches reuse the
+/// cached instance. The cache is invalidated when the configured model
+/// directory changes.
+///
+/// This struct is kept separate from [`AppState`] so the cache hit/miss and
+/// invalidation logic is unit-testable without a Windows capture/OCR/model
+/// environment.
+#[derive(Default)]
+pub(crate) struct LocalProviderCache {
+    /// The cached provider, or `None` when no load has succeeded yet.
+    provider: std::sync::RwLock<Option<Arc<dyn TranslationProvider>>>,
+    /// The model directory the cached provider was loaded from.
+    model_dir: std::sync::RwLock<Option<std::path::PathBuf>>,
+}
+
+impl LocalProviderCache {
+    /// Creates an empty cache.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the cached provider when it is still valid for
+    /// `configured_model_dir`, or `None` when the cache is empty or was
+    /// loaded from a different directory.
+    ///
+    /// When the directory has changed the cache is cleared in place so a
+    /// subsequent load can repopulate it. A `None` configured directory
+    /// (the default `app_data_dir/models`) is treated as the empty path,
+    /// matching how [`AppState::new_with_debug`] seeds the cache.
+    pub(crate) fn get(
+        &self,
+        configured_model_dir: Option<&std::path::Path>,
+    ) -> Option<Arc<dyn TranslationProvider>> {
+        let configured =
+            configured_model_dir.map_or_else(std::path::PathBuf::new, std::path::Path::to_path_buf);
+        let cached_dir = self.model_dir.read().unwrap_or_else(poison_inner).clone();
+        if cached_dir
+            .as_ref()
+            .is_some_and(|cached| *cached != configured)
+        {
+            debug!(
+                old = ?cached_dir,
+                new = %configured.display(),
+                "model directory changed; invalidating local provider cache"
+            );
+            *self.provider.write().unwrap_or_else(poison_inner) = None;
+            *self.model_dir.write().unwrap_or_else(poison_inner) = None;
+            return None;
+        }
+        self.provider.read().unwrap_or_else(poison_inner).clone()
+    }
+
+    /// Records a freshly loaded provider and the directory it was loaded
+    /// from.
+    pub(crate) fn set(
+        &self,
+        provider: Arc<dyn TranslationProvider>,
+        model_dir: Option<std::path::PathBuf>,
+    ) {
+        *self.provider.write().unwrap_or_else(poison_inner) = Some(provider);
+        *self.model_dir.write().unwrap_or_else(poison_inner) = Some(model_dir.unwrap_or_default());
+    }
+
+    /// Returns `true` when the cache holds a provider valid for the given
+    /// directory, without mutating state.
+    #[cfg(test)]
+    pub(crate) fn is_hit(&self, configured_model_dir: Option<&std::path::Path>) -> bool {
+        let configured =
+            configured_model_dir.map_or_else(std::path::PathBuf::new, std::path::Path::to_path_buf);
+        let cached_dir = self.model_dir.read().unwrap_or_else(poison_inner).clone();
+        cached_dir
+            .as_ref()
+            .is_some_and(|cached| *cached == configured)
+            && self.provider.read().unwrap_or_else(poison_inner).is_some()
+    }
+}
+
 /// A serializable snapshot returned by the `get_app_status` command.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppStatus {
@@ -81,6 +169,8 @@ pub struct AppState {
     model_progress: std::sync::RwLock<Option<f32>>,
     debug_mode: bool,
     current_mode: std::sync::RwLock<PipelineMode>,
+    /// Lazily-loaded local translation provider, cached across switches.
+    local_provider_cache: LocalProviderCache,
 }
 
 impl AppState {
@@ -129,6 +219,13 @@ impl AppState {
             model_dir = %model_dir.display(),
             "application state initialized"
         );
+        // Seed the local provider cache when the startup configuration
+        // already selects the local provider, so the first runtime switch
+        // back to "local" reuses this instance instead of reloading.
+        let local_provider_cache = LocalProviderCache::new();
+        if config.translation.provider == "local" {
+            local_provider_cache.set(Arc::clone(&translation_provider), config.model_dir.clone());
+        }
         Ok(Self {
             config: std::sync::RwLock::new(config_manager),
             credentials,
@@ -145,6 +242,7 @@ impl AppState {
             model_progress: std::sync::RwLock::new(None),
             debug_mode,
             current_mode: std::sync::RwLock::new(PipelineMode::SingleCapture),
+            local_provider_cache,
         })
     }
 
@@ -294,31 +392,107 @@ impl AppState {
         ))
     }
 
+    /// Assembles the translation provider for `config`, reusing the cached
+    /// local provider when possible.
+    ///
+    /// Cloud providers are cheap to assemble (no I/O) and always rebuilt
+    /// so credential and endpoint changes take effect. The local provider
+    /// is heavy (SHA-256 + ONNX session commit); it is loaded once and
+    /// cached, so only the first switch to `"local"` pays the full cost.
+    /// When `progress` is `Some`, `model_loading_progress` events are
+    /// emitted before the load (`0.0`) and after a hit or successful load
+    /// (`1.0`), giving the frontend feedback during the first load and a
+    /// near-instant completion when the cache is hit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an application error when the configured provider id is
+    /// unsupported, the vault cannot be read, or the local provider cannot
+    /// be assembled. A load failure leaves the cache untouched so the next
+    /// attempt retries from scratch.
+    #[tracing::instrument(skip(self, config, progress), fields(provider = %config.translation.provider))]
     pub(crate) async fn prepare_translation_provider(
         &self,
         config: AppConfig,
+        progress: Option<&AppHandle>,
     ) -> Result<Arc<dyn TranslationProvider>, AppError> {
+        if config.translation.provider == "local" {
+            return self
+                .prepare_local_translation_provider(&config, progress)
+                .await;
+        }
+        // Cloud providers perform no I/O; rebuild every time so credential
+        // and endpoint changes apply immediately.
         let credentials = Arc::clone(&self.credentials);
+        tokio::task::spawn_blocking(move || build_cloud_translation_provider(&config, &credentials))
+            .await
+            .map_err(|error| {
+                AppError::Tauri(format!("translation provider setup task failed: {error}"))
+            })?
+    }
+
+    /// Returns the cached local provider or loads it once, emitting progress
+    /// around the load.
+    async fn prepare_local_translation_provider(
+        &self,
+        config: &AppConfig,
+        progress: Option<&AppHandle>,
+    ) -> Result<Arc<dyn TranslationProvider>, AppError> {
+        if let Some(cached) = self.local_provider_cache.get(config.model_dir.as_deref()) {
+            debug!("local translation provider cache hit; reusing loaded session");
+            self.emit_provider_progress(progress, 1.0);
+            return Ok(cached);
+        }
+        self.emit_provider_progress(progress, 0.0);
         let model_manager = Arc::clone(&self.model_manager);
-        // Loading a local provider verifies SHA-256 hashes, parses the
-        // tokenizer, and creates an ONNX session; run it on the blocking
-        // pool so the Tokio workers never stall while switching providers.
-        tokio::task::spawn_blocking(move || {
-            build_translation_provider(&config, &credentials, &model_manager)
+        let provider = tokio::task::spawn_blocking(move || {
+            LocalTranslationProvider::from_manager(&model_manager)
+                .map(|provider| Arc::new(provider) as Arc<dyn TranslationProvider>)
+                .map_err(AppError::from)
         })
         .await
         .map_err(|error| {
-            AppError::Tauri(format!("translation provider setup task failed: {error}"))
-        })?
+            AppError::Tauri(format!(
+                "local translation provider load task failed: {error}"
+            ))
+        })??;
+        self.local_provider_cache
+            .set(Arc::clone(&provider), config.model_dir.clone());
+        info!("local translation provider loaded and cached");
+        self.emit_provider_progress(progress, 1.0);
+        Ok(provider)
     }
 
+    /// Emits a translation provider loading progress event and mirrors it
+    /// into `AppState` for `get_app_status`.
+    fn emit_provider_progress(&self, app: Option<&AppHandle>, progress: f32) {
+        self.set_model_progress(Some(progress));
+        if let Some(app) = app {
+            crate::events::emit_model_loading_progress(
+                app,
+                TRANSLATION_PROGRESS_MODEL_ID,
+                progress,
+            );
+        }
+    }
+
+    /// Switches the active translation provider, caching the local provider
+    /// and emitting loading progress when `progress` is provided.
+    ///
+    /// # Errors
+    ///
+    /// Returns an application error for an unsupported provider id, a
+    /// failed provider load, or a configuration persistence failure.
     pub(crate) async fn set_translation_provider_id(
         &self,
         provider_id: &str,
+        progress: Option<&AppHandle>,
     ) -> Result<(), AppError> {
         let mut config = self.load_config()?;
         update_translation_provider_config(&mut config, provider_id)?;
-        let provider = self.prepare_translation_provider(config.clone()).await?;
+        let provider = self
+            .prepare_translation_provider(config.clone(), progress)
+            .await?;
         self.save_config(&config)?;
         self.replace_translation_provider(provider);
         Ok(())
@@ -598,7 +772,6 @@ fn provider_default_endpoint(provider_id: &str) -> Option<&'static str> {
         "google" => Some("https://translation.googleapis.com/language/translate/v2"),
         "azure" => Some("https://api.cognitive.microsofttranslator.com/translate"),
         "baidu" => Some("https://fanyi-api.baidu.com/api/trans/vip/translate"),
-        "local" => None,
         _ => None,
     }
 }
@@ -1127,5 +1300,107 @@ mod tests {
         config.translation.region = Some("eastasia".to_string());
         let built = build_cloud_translation_provider(&config, &manager).unwrap();
         assert_eq!(built.id(), "azure");
+    }
+
+    // ── Local provider cache ──
+
+    /// A no-op translation provider used to exercise the cache without a
+    /// real ONNX model. Its identity is stable so tests can distinguish
+    /// cached instances from freshly built ones.
+    struct StubTranslationProvider {
+        id: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl TranslationProvider for StubTranslationProvider {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        async fn translate(
+            &self,
+            _request: &vtrans_core::TranslationRequest,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<vtrans_core::TranslationResult, vtrans_core::TranslationError> {
+            Ok(vtrans_core::TranslationResult::new("", self.id, 0))
+        }
+
+        fn supported_pairs(&self) -> &[(vtrans_core::Language, vtrans_core::Language)] {
+            &[]
+        }
+    }
+
+    fn stub_provider() -> Arc<dyn TranslationProvider> {
+        Arc::new(StubTranslationProvider { id: "stub-local" })
+    }
+
+    #[test]
+    fn local_provider_cache_miss_when_empty() {
+        let cache = LocalProviderCache::new();
+        assert!(!cache.is_hit(None));
+        assert!(cache.get(None).is_none());
+    }
+
+    #[test]
+    fn local_provider_cache_hit_after_set_with_matching_directory() {
+        let cache = LocalProviderCache::new();
+        let provider = stub_provider();
+        cache.set(Arc::clone(&provider), None);
+        assert!(cache.is_hit(None));
+        let cached = cache.get(None).expect("cache hit returns the provider");
+        assert_eq!(cached.id(), "stub-local");
+    }
+
+    #[test]
+    fn local_provider_cache_miss_after_directory_change() {
+        let cache = LocalProviderCache::new();
+        let provider = stub_provider();
+        let original_dir = std::path::PathBuf::from("/app/models");
+        cache.set(Arc::clone(&provider), Some(original_dir.clone()));
+        assert!(cache.is_hit(Some(&original_dir)));
+
+        // A different configured directory invalidates the cache.
+        let new_dir = std::path::PathBuf::from("/app/other-models");
+        assert!(!cache.is_hit(Some(&new_dir)));
+        assert!(cache.get(Some(&new_dir)).is_none());
+
+        // The invalidation cleared the cache, so even the original dir now
+        // misses.
+        assert!(!cache.is_hit(Some(&original_dir)));
+    }
+
+    #[test]
+    fn local_provider_cache_survives_cloud_provider_round_trip() {
+        // Switching to a cloud provider must not clear the local cache: a
+        // subsequent switch back to "local" should still hit.
+        let cache = LocalProviderCache::new();
+        let provider = stub_provider();
+        cache.set(Arc::clone(&provider), None);
+        // (cloud switch touches no cache state)
+        assert!(
+            cache.is_hit(None),
+            "cloud switch must not evict the local cache"
+        );
+        let cached = cache.get(None).expect("cache hit after cloud round trip");
+        assert_eq!(cached.id(), "stub-local");
+    }
+
+    #[test]
+    fn local_provider_cache_set_overwrites_previous_entry() {
+        let cache = LocalProviderCache::new();
+        let first = stub_provider();
+        cache.set(Arc::clone(&first), None);
+        let second = Arc::new(StubTranslationProvider { id: "stub-local-2" })
+            as Arc<dyn TranslationProvider>;
+        cache.set(Arc::clone(&second), None);
+        let cached = cache.get(None).expect("cache hit");
+        assert_eq!(cached.id(), "stub-local-2");
+    }
+
+    #[test]
+    fn translation_progress_model_id_is_stable() {
+        // The frontend listens for this id; changing it would silently drop
+        // the progress bar during provider switches.
+        assert_eq!(TRANSLATION_PROGRESS_MODEL_ID, "translation");
     }
 }

@@ -169,6 +169,8 @@ vtrans-config 校验一致），默认 `openai`。旧 id `"api"` 已废弃：迁
 只用 `vtrans_core::mask_sensitive` / `vtrans_security::mask_key` 掩码值。
 切换 provider（`set_translation_provider` / `save_settings`）立即重建并在
 配置持久化后生效；live 会话运行中切换仍返回 `PipelineError::AlreadyRunning`。
+本地 Provider 加载一次后缓存，再次切到 `local` 近瞬时命中缓存；切换期间发射
+`model_loading_progress`（`model_id="translation"`，0.0 → 1.0）。
 
 ### Events
 
@@ -412,8 +414,12 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
   Escape/关闭操作应调用 cancel_region_selection。
 - 模型完整性校验通过 blocking pool 执行，避免大文件 SHA-256 计算阻塞 Tokio worker。
 - 切换翻译 Provider（`set_translation_provider` / `save_settings`）会在 blocking
-  pool 中重新加载本地 ONNX 模型（tokenizer + session），期间持有生命周期锁，
-  其他启动/停止命令会等待切换完成。
+  pool 中加载本地 ONNX 模型（tokenizer + session），期间持有生命周期锁，
+  其他启动/停止命令会等待切换完成。已加载的本地 Provider 会被缓存：首次切到
+  `local` 走重路径（SHA-256 校验 + ONNX session commit + 全图优化），之后切回
+  云端再切到 `local` 命中缓存、近瞬时生效。切换路径发射 `model_loading_progress`
+  事件（`model_id="translation"`，0.0 → 1.0），命中缓存时近瞬时发 1.0。模型目录
+  变更（`AppConfig.model_dir`）会失效缓存并重新加载。
 - 全局快捷键由配置字符串解析，冲突或非法快捷键会在启动时返回 HotkeyFailed；当前没有 UI 内热键冲突编辑器。
   通过 `save_settings` 修改热键配置后需要重启应用才会重新注册。
 - 单次捕获的进度事件（ocr_started 等）由 capture_once 转发，但命令契约仍只返回 OcrResult；前端如需进度提示需同时监听 ocr_started/translation_started。

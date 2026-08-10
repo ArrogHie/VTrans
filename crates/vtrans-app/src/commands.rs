@@ -517,7 +517,10 @@ pub async fn set_translation_provider(
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
-    state.set_translation_provider_id(&provider_id).await?;
+    let app = state.app_handle()?;
+    state
+        .set_translation_provider_id(&provider_id, Some(&app))
+        .await?;
     tracing::info!(provider = provider_id, "translation provider selected");
     Ok(())
 }
@@ -562,7 +565,10 @@ pub async fn save_settings(
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
-    let provider = state.prepare_translation_provider(settings.clone()).await?;
+    let app = state.app_handle()?;
+    let provider = state
+        .prepare_translation_provider(settings.clone(), Some(&app))
+        .await?;
     state.save_config(&settings)?;
     state.replace_translation_provider(provider);
     tracing::info!("application settings saved");
@@ -700,7 +706,10 @@ pub async fn set_api_key(api_key: String, state: State<'_, AppState>) -> Result<
         .await
         .map_err(|error| AppError::Tauri(format!("credential store task failed: {error}")))??;
 
-    let provider = state.prepare_translation_provider(config).await?;
+    let app = state.app_handle()?;
+    let provider = state
+        .prepare_translation_provider(config, Some(&app))
+        .await?;
     state.replace_translation_provider(provider);
     tracing::info!(
         provider = provider_id,
@@ -773,7 +782,10 @@ pub async fn set_provider_credentials(
 
     let config = state.load_config()?;
     if config.translation.provider == provider_id {
-        let provider = state.prepare_translation_provider(config).await?;
+        let app = state.app_handle()?;
+        let provider = state
+            .prepare_translation_provider(config, Some(&app))
+            .await?;
         state.replace_translation_provider(provider);
     }
     tracing::info!(provider = provider_id, "provider credentials updated");
