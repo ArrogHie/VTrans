@@ -14,8 +14,11 @@ use vtrans_core::{OcrOptions, PipelineMode, PipelineStatus, ScreenRegion, Transl
 use vtrans_models::ModelManager;
 use vtrans_ocr::PaddleOcrProvider;
 use vtrans_pipeline::{Pipeline, PipelineConfig, PipelineDeps};
-use vtrans_security::CredentialManager;
-use vtrans_translation::{ApiTranslationProvider, LocalTranslationProvider};
+use vtrans_security::{CredentialManager, CredentialTarget};
+use vtrans_translation::{
+    AzureTranslatorProvider, BaiduProvider, DeepLProvider, GoogleV2Provider,
+    LocalTranslationProvider, OpenAiProvider,
+};
 
 use crate::error::AppError;
 
@@ -35,11 +38,12 @@ pub struct AppStatus {
     /// Stable identifier of the configured OCR provider.
     pub ocr_provider: String,
     /// Runtime implementation id of the configured translation provider
-    /// (`"api"` or `"local-onnx"`).
+    /// (`"openai"`, `"deepl"`, `"google"`, `"azure"`, `"baidu"`, or
+    /// `"local-onnx"`).
     ///
-    /// This differs from the configuration identifier domain (`"api"` /
-    /// `"local"`) accepted by `set_translation_provider_id`; the frontend
-    /// maps it back via `normalizeProviderId`.
+    /// Cloud providers use the same identifier in both domains; only the
+    /// local provider differs (`"local-onnx"` at runtime vs `"local"` in
+    /// configuration). The frontend maps it back via `normalizeProviderId`.
     pub translation_provider: String,
     /// Last selected region, when one has been selected.
     pub selected_region: Option<ScreenRegion>,
@@ -117,8 +121,8 @@ impl AppState {
         let capture_source = Arc::new(WindowsCaptureSource::new()?);
         let ocr_provider =
             Arc::new(PaddleOcrProvider::from_manager(&model_manager)?) as Arc<dyn OcrProvider>;
-        let api_key = load_api_key(&credentials, &config)?;
-        let translation_provider = build_translation_provider(&config, &api_key, &model_manager)?;
+        let translation_provider =
+            build_translation_provider(&config, &credentials, &model_manager)?;
         info!(
             ocr_provider = ocr_provider.id(),
             translation_provider = translation_provider.id(),
@@ -294,13 +298,13 @@ impl AppState {
         &self,
         config: AppConfig,
     ) -> Result<Arc<dyn TranslationProvider>, AppError> {
-        let api_key = load_api_key(&self.credentials, &config)?;
+        let credentials = Arc::clone(&self.credentials);
         let model_manager = Arc::clone(&self.model_manager);
         // Loading a local provider verifies SHA-256 hashes, parses the
         // tokenizer, and creates an ONNX session; run it on the blocking
         // pool so the Tokio workers never stall while switching providers.
         tokio::task::spawn_blocking(move || {
-            build_translation_provider(&config, &api_key, &model_manager)
+            build_translation_provider(&config, &credentials, &model_manager)
         })
         .await
         .map_err(|error| {
@@ -456,35 +460,108 @@ impl TranslationProvider for SharedTranslationProvider {
     }
 }
 
+/// Assembles the translation provider configured by `config`.
+///
+/// Cloud provider credentials are read from the credential vault through
+/// `credentials` (never from configuration or logs): `OpenAI`, `DeepL`,
+/// `Google`, and `Azure` use a single API key target; `Baidu` reads
+/// `baidu_app_id` and `baidu_secret` as two independent targets. The local
+/// provider loads its ONNX session through `model_manager`.
+///
+/// Provider construction performs no network I/O, so this function is safe
+/// to unit-test with an in-memory credential store.
+///
+/// # Errors
+///
+/// Returns an application error when the configured provider id is
+/// unsupported, the vault cannot be read, or the local provider cannot be
+/// assembled from `model_manager`.
 fn build_translation_provider(
     config: &AppConfig,
-    api_key: &str,
+    credentials: &CredentialManager,
     model_manager: &ModelManager,
 ) -> Result<Arc<dyn TranslationProvider>, AppError> {
     validate_translation_provider_id(&config.translation.provider)?;
-    if config.translation.provider == "api" {
-        Ok(Arc::new(ApiTranslationProvider::new(
+    if config.translation.provider == "local" {
+        return Ok(Arc::new(LocalTranslationProvider::from_manager(
+            model_manager,
+        )?));
+    }
+    build_cloud_translation_provider(config, credentials)
+}
+
+/// Assembles one of the cloud translation providers (`openai`, `deepl`,
+/// `google`, `azure`, or `baidu`) from the configuration snapshot.
+///
+/// Credentials are read from the vault (a single key target for the first
+/// four, `baidu_app_id` + `baidu_secret` for Baidu). Provider construction
+/// performs no network I/O, so this function is unit-testable with an
+/// in-memory credential store and no model files.
+///
+/// # Errors
+///
+/// Returns an application error when the provider id is not a cloud
+/// provider or the vault cannot be read.
+fn build_cloud_translation_provider(
+    config: &AppConfig,
+    credentials: &CredentialManager,
+) -> Result<Arc<dyn TranslationProvider>, AppError> {
+    let provider = config.translation.provider.as_str();
+    let credentials = load_provider_credentials(credentials, config)?;
+    let timeout = std::time::Duration::from_secs(u64::from(config.translation.timeout_seconds));
+    let max_retries = config.translation.max_retries;
+    let provider: Arc<dyn TranslationProvider> = match provider {
+        "openai" => Arc::new(OpenAiProvider::new(
             &config.translation.api_endpoint,
             &config.translation.api_model,
-            api_key,
-            std::time::Duration::from_secs(u64::from(config.translation.timeout_seconds)),
-            config.translation.max_retries,
-        )))
-    } else {
-        Ok(Arc::new(LocalTranslationProvider::from_manager(
-            model_manager,
-        )?))
-    }
+            &credentials.api_key,
+            timeout,
+            max_retries,
+        )),
+        "deepl" => Arc::new(DeepLProvider::new(
+            &config.translation.api_endpoint,
+            &credentials.api_key,
+            timeout,
+            max_retries,
+        )),
+        "google" => Arc::new(GoogleV2Provider::new(
+            &config.translation.api_endpoint,
+            &credentials.api_key,
+            timeout,
+            max_retries,
+        )),
+        "azure" => Arc::new(AzureTranslatorProvider::new(
+            &config.translation.api_endpoint,
+            config.translation.region.as_deref().unwrap_or(""),
+            &credentials.api_key,
+            timeout,
+            max_retries,
+        )),
+        "baidu" => Arc::new(BaiduProvider::new(
+            &config.translation.api_endpoint,
+            &credentials.app_id,
+            &credentials.secret,
+            timeout,
+            max_retries,
+        )),
+        _ => unreachable!("provider id was validated above"),
+    };
+    Ok(provider)
 }
 
 /// Validates a translation provider identifier against the stable
-/// application-level domain (`"api"` or `"local"`).
+/// application-level configuration domain.
 ///
-/// The same domain is accepted by the `set_translation_provider` command and
-/// enforced by `vtrans-config` validation, so configuration snapshots and
-/// runtime provider selection can never disagree.
-fn validate_translation_provider_id(provider_id: &str) -> Result<(), AppError> {
-    if matches!(provider_id, "api" | "local") {
+/// The domain is `"openai"`, `"deepl"`, `"google"`, `"azure"`, `"baidu"`,
+/// and `"local"` — the same whitelist enforced by `vtrans-config`
+/// validation, so configuration snapshots and runtime provider selection
+/// can never disagree. The legacy `"api"` id is intentionally rejected:
+/// `OpenAI` is identified as `"openai"` since the cloud-provider refactor.
+pub(crate) fn validate_translation_provider_id(provider_id: &str) -> Result<(), AppError> {
+    if matches!(
+        provider_id,
+        "openai" | "deepl" | "google" | "azure" | "baidu" | "local"
+    ) {
         Ok(())
     } else {
         warn!(provider = provider_id, "unsupported translation provider");
@@ -509,37 +586,161 @@ fn update_translation_provider_config(
     Ok(())
 }
 
-/// Loads the API credential from secure storage for the API provider.
+/// Credentials for one cloud translation provider, loaded from the vault.
 ///
-/// The vault is only touched when the configured provider is `"api"`; other
-/// providers return an empty key. The key is returned to the caller and never
-/// logged or persisted.
-fn load_api_key(credentials: &CredentialManager, config: &AppConfig) -> Result<String, AppError> {
-    if config.translation.provider != "api" {
-        return Ok(String::new());
-    }
-    Ok(credentials.load("translation")?.unwrap_or_else(|| {
-        warn!("translation API credential is not configured");
-        String::new()
-    }))
+/// Only the fields used by the configured provider are populated; the value
+/// lives in memory for the lifetime of the assembled provider and never
+/// enters configuration, events, or logs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ProviderCredentials {
+    /// Single API key for OpenAI/DeepL/Google/Azure.
+    api_key: String,
+    /// Baidu APP ID (non-secret, but stored in the vault for a single
+    /// credential lifecycle).
+    app_id: String,
+    /// Baidu secret key used for request signing.
+    secret: String,
 }
 
-/// Stores the translation API key in the OS credential vault.
+/// Returns the single credential target for a provider, or `None` for
+/// providers that need no key (`"local"`) or two targets (`"baidu"`).
+pub(crate) fn provider_credential_target(provider_id: &str) -> Option<CredentialTarget> {
+    match provider_id {
+        "openai" => Some(CredentialTarget::OpenAI),
+        "deepl" => Some(CredentialTarget::DeepL),
+        "google" => Some(CredentialTarget::Google),
+        "azure" => Some(CredentialTarget::Azure),
+        _ => None,
+    }
+}
+
+/// Loads the credentials required by the configured provider from the vault.
 ///
-/// The logical target must match [`load_api_key`] (`"translation"`) so keys
-/// written by `set_api_key` are read by provider construction. The key is
-/// never logged.
+/// Missing credentials are tolerated with a warning and become empty
+/// strings, matching the legacy behavior where an unconfigured key produced
+/// an unauthenticated request that the provider maps to 401/403. Credential
+/// values are returned to the caller and never logged.
+///
+/// # Errors
+///
+/// Returns `AppError::Security` when the vault cannot be read, or
+/// `AppError::ProviderCredential` for an unsupported provider.
+fn load_provider_credentials(
+    credentials: &CredentialManager,
+    config: &AppConfig,
+) -> Result<ProviderCredentials, AppError> {
+    let provider = config.translation.provider.as_str();
+    if let Some(target) = provider_credential_target(provider) {
+        let api_key = credentials.load_for_provider(target)?.unwrap_or_else(|| {
+            warn!(provider, "translation credential is not configured");
+            String::new()
+        });
+        return Ok(ProviderCredentials {
+            api_key,
+            ..ProviderCredentials::default()
+        });
+    }
+    match provider {
+        "baidu" => {
+            let app_id = credentials
+                .load_for_provider(CredentialTarget::BaiduAppId)?
+                .unwrap_or_else(|| {
+                    warn!("baidu app id is not configured");
+                    String::new()
+                });
+            let secret = credentials
+                .load_for_provider(CredentialTarget::BaiduSecret)?
+                .unwrap_or_else(|| {
+                    warn!("baidu secret is not configured");
+                    String::new()
+                });
+            Ok(ProviderCredentials {
+                app_id,
+                secret,
+                ..ProviderCredentials::default()
+            })
+        }
+        "local" => Ok(ProviderCredentials::default()),
+        other => Err(AppError::ProviderCredential(format!(
+            "provider {other:?} has no credential targets"
+        ))),
+    }
+}
+
+/// Stores a single API key for a cloud provider in the OS credential vault.
+///
+/// The logical target is derived from `provider_id` (`openai`, `deepl`,
+/// `google`, `azure`); Baidu stores the value under `baidu_secret` (its APP
+/// ID lives in the separate `baidu_app_id` target, see
+/// [`store_provider_credentials`]). The `local` provider and unknown ids are
+/// rejected. The key is never logged.
 ///
 /// # Errors
 ///
 /// Returns `AppError::Security` when the underlying store cannot persist the
-/// key.
+/// key, or `AppError::ProviderCredential` when the provider does not accept
+/// a single API key.
 pub(crate) fn store_api_key(
     credentials: &CredentialManager,
+    provider_id: &str,
     api_key: &str,
 ) -> Result<(), AppError> {
+    let target = if provider_id == "baidu" {
+        CredentialTarget::BaiduSecret
+    } else {
+        provider_credential_target(provider_id).ok_or_else(|| {
+            AppError::ProviderCredential(format!(
+                "provider {provider_id:?} does not accept an API key"
+            ))
+        })?
+    };
     credentials
-        .store("translation", api_key)
+        .store_for_provider(target, api_key)
+        .map_err(AppError::from)
+}
+
+/// Stores the complete credential set for one cloud provider in the vault.
+///
+/// OpenAI/DeepL/Google/Azure store `api_key` under their single target;
+/// Baidu stores `app_id` and `secret` under the two independent
+/// `baidu_app_id` / `baidu_secret` targets, matching how provider assembly
+/// reads them. Credential values are never logged.
+///
+/// # Errors
+///
+/// Returns `AppError::ProviderCredential` when a required value is missing
+/// or the provider is not credential-backed, and `AppError::Security` when
+/// the vault cannot persist a value.
+pub(crate) fn store_provider_credentials(
+    credentials: &CredentialManager,
+    provider_id: &str,
+    api_key: Option<&str>,
+    app_id: Option<&str>,
+    secret: Option<&str>,
+) -> Result<(), AppError> {
+    if provider_id == "baidu" {
+        let app_id = app_id
+            .ok_or_else(|| AppError::ProviderCredential("baidu requires an app id".to_string()))?;
+        let secret = secret.ok_or_else(|| {
+            AppError::ProviderCredential("baidu requires a secret key".to_string())
+        })?;
+        credentials
+            .store_for_provider(CredentialTarget::BaiduAppId, app_id)
+            .map_err(AppError::from)?;
+        return credentials
+            .store_for_provider(CredentialTarget::BaiduSecret, secret)
+            .map_err(AppError::from);
+    }
+    let Some(target) = provider_credential_target(provider_id) else {
+        return Err(AppError::ProviderCredential(format!(
+            "provider {provider_id:?} does not accept credentials"
+        )));
+    };
+    let api_key = api_key.ok_or_else(|| {
+        AppError::ProviderCredential(format!("provider {provider_id:?} requires an api key"))
+    })?;
+    credentials
+        .store_for_provider(target, api_key)
         .map_err(AppError::from)
 }
 
@@ -551,7 +752,17 @@ fn poison_inner<T>(poisoned: std::sync::PoisonError<T>) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vtrans_security::InMemoryCredentialStore;
+    use vtrans_security::credential_store::InMemoryCredentialStore;
+
+    fn memory_credentials() -> CredentialManager {
+        CredentialManager::with_store(Arc::new(InMemoryCredentialStore::new()))
+    }
+
+    fn cloud_config(provider: &str) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.translation.provider = provider.to_string();
+        config
+    }
 
     #[test]
     fn status_snapshot_contract_is_serializable() {
@@ -559,7 +770,7 @@ mod tests {
             mode: PipelineMode::SingleCapture,
             pipeline_status: PipelineStatus::Idle,
             ocr_provider: "mock-ocr".to_string(),
-            translation_provider: "mock-translation".to_string(),
+            translation_provider: "openai".to_string(),
             selected_region: None,
             live_running: false,
             model_progress: None,
@@ -569,21 +780,31 @@ mod tests {
         assert!(json.contains(r#""mode":"single""#));
         assert!(json.contains("pipeline_status"));
         assert!(json.contains("mock-ocr"));
+        assert!(json.contains(r#""translation_provider":"openai""#));
         assert!(json.contains(r#""debug_mode":false"#));
     }
 
     #[test]
     fn translation_provider_validation_accepts_known_ids() {
-        assert!(validate_translation_provider_id("api").is_ok());
-        assert!(validate_translation_provider_id("local").is_ok());
+        for provider in ["openai", "deepl", "google", "azure", "baidu", "local"] {
+            assert!(
+                validate_translation_provider_id(provider).is_ok(),
+                "provider {provider:?} must validate"
+            );
+        }
     }
 
     #[test]
     fn translation_provider_validation_rejects_unknown_ids() {
-        let error = validate_translation_provider_id("local-onnx").unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unsupported translation provider"));
+        for provider in ["api", "local-onnx", "deepseek", ""] {
+            let error = validate_translation_provider_id(provider).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported translation provider"),
+                "provider {provider:?}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -602,8 +823,8 @@ mod tests {
     fn provider_config_update_rejects_unknown_id_without_mutation() {
         let mut config = AppConfig::default();
         assert!(
-            update_translation_provider_config(&mut config, "local-onnx").is_err(),
-            "runtime provider ids must not be accepted as configuration identifiers"
+            update_translation_provider_config(&mut config, "api").is_err(),
+            "the legacy api id must not be accepted as a configuration identifier"
         );
         assert_eq!(
             config.translation.provider,
@@ -612,25 +833,229 @@ mod tests {
     }
 
     #[test]
-    fn store_api_key_writes_to_the_translation_target() {
-        let store = Arc::new(InMemoryCredentialStore::new());
-        let manager = CredentialManager::with_store(store);
-        store_api_key(&manager, "sk-test-1234").unwrap();
+    fn provider_credential_target_mapping_covers_single_key_providers() {
         assert_eq!(
-            manager.load("translation").unwrap().as_deref(),
+            provider_credential_target("openai"),
+            Some(CredentialTarget::OpenAI)
+        );
+        assert_eq!(
+            provider_credential_target("deepl"),
+            Some(CredentialTarget::DeepL)
+        );
+        assert_eq!(
+            provider_credential_target("google"),
+            Some(CredentialTarget::Google)
+        );
+        assert_eq!(
+            provider_credential_target("azure"),
+            Some(CredentialTarget::Azure)
+        );
+        assert_eq!(provider_credential_target("baidu"), None);
+        assert_eq!(provider_credential_target("local"), None);
+    }
+
+    #[test]
+    fn store_api_key_writes_to_the_matching_provider_target() {
+        let manager = memory_credentials();
+        store_api_key(&manager, "openai", "sk-test-1234").unwrap();
+        assert_eq!(
+            manager
+                .load_for_provider(CredentialTarget::OpenAI)
+                .unwrap()
+                .as_deref(),
             Some("sk-test-1234")
         );
     }
 
     #[test]
     fn store_api_key_overwrites_a_previous_key() {
-        let store = Arc::new(InMemoryCredentialStore::new());
-        let manager = CredentialManager::with_store(store);
-        store_api_key(&manager, "sk-old").unwrap();
-        store_api_key(&manager, "sk-new").unwrap();
+        let manager = memory_credentials();
+        store_api_key(&manager, "azure", "sk-old").unwrap();
+        store_api_key(&manager, "azure", "sk-new").unwrap();
         assert_eq!(
-            manager.load("translation").unwrap().as_deref(),
+            manager
+                .load_for_provider(CredentialTarget::Azure)
+                .unwrap()
+                .as_deref(),
             Some("sk-new")
         );
+    }
+
+    #[test]
+    fn store_api_key_rejects_providers_without_a_key_target() {
+        for provider in ["local", "api", "deepseek"] {
+            let manager = memory_credentials();
+            let error = store_api_key(&manager, provider, "sk-test").unwrap_err();
+            assert!(
+                matches!(error, AppError::ProviderCredential(_)),
+                "provider {provider:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn store_api_key_writes_baidu_secret_target() {
+        let manager = memory_credentials();
+        store_api_key(&manager, "baidu", "sk-baidu-secret").unwrap();
+        assert_eq!(
+            manager
+                .load_for_provider(CredentialTarget::BaiduSecret)
+                .unwrap()
+                .as_deref(),
+            Some("sk-baidu-secret")
+        );
+    }
+
+    #[test]
+    fn store_provider_credentials_writes_baidu_app_id_and_secret() {
+        let manager = memory_credentials();
+        store_provider_credentials(
+            &manager,
+            "baidu",
+            None,
+            Some("app-2024"),
+            Some("secret-1234"),
+        )
+        .unwrap();
+        assert_eq!(
+            manager
+                .load_for_provider(CredentialTarget::BaiduAppId)
+                .unwrap()
+                .as_deref(),
+            Some("app-2024")
+        );
+        assert_eq!(
+            manager
+                .load_for_provider(CredentialTarget::BaiduSecret)
+                .unwrap()
+                .as_deref(),
+            Some("secret-1234")
+        );
+    }
+
+    #[test]
+    fn store_provider_credentials_rejects_incomplete_baidu_values() {
+        let manager = memory_credentials();
+        let error =
+            store_provider_credentials(&manager, "baidu", None, None, Some("secret")).unwrap_err();
+        assert!(matches!(error, AppError::ProviderCredential(_)));
+        let error =
+            store_provider_credentials(&manager, "baidu", None, Some("app"), None).unwrap_err();
+        assert!(matches!(error, AppError::ProviderCredential(_)));
+        // Nothing was written by the failed calls.
+        assert!(manager
+            .load_for_provider(CredentialTarget::BaiduAppId)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn store_provider_credentials_writes_single_key_targets() {
+        let manager = memory_credentials();
+        store_provider_credentials(&manager, "deepl", Some("sk-deepl"), None, None).unwrap();
+        assert_eq!(
+            manager
+                .load_for_provider(CredentialTarget::DeepL)
+                .unwrap()
+                .as_deref(),
+            Some("sk-deepl")
+        );
+    }
+
+    #[test]
+    fn store_provider_credentials_rejects_local_and_unknown_providers() {
+        for provider in ["local", "api", "deepseek"] {
+            let manager = memory_credentials();
+            let error = store_provider_credentials(&manager, provider, Some("sk-test"), None, None)
+                .unwrap_err();
+            assert!(
+                matches!(error, AppError::ProviderCredential(_)),
+                "provider {provider:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_provider_credentials_reads_single_key_targets() {
+        for (provider, target) in [
+            ("openai", CredentialTarget::OpenAI),
+            ("deepl", CredentialTarget::DeepL),
+            ("google", CredentialTarget::Google),
+            ("azure", CredentialTarget::Azure),
+        ] {
+            let manager = memory_credentials();
+            manager.store_for_provider(target, "sk-configured").unwrap();
+            let loaded = load_provider_credentials(&manager, &cloud_config(provider)).unwrap();
+            assert_eq!(loaded.api_key, "sk-configured", "provider {provider:?}");
+            assert!(loaded.app_id.is_empty());
+            assert!(loaded.secret.is_empty());
+        }
+    }
+
+    #[test]
+    fn load_provider_credentials_reads_baidu_targets_separately() {
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::BaiduAppId, "app-2024")
+            .unwrap();
+        manager
+            .store_for_provider(CredentialTarget::BaiduSecret, "secret-5678")
+            .unwrap();
+        let loaded = load_provider_credentials(&manager, &cloud_config("baidu")).unwrap();
+        assert_eq!(loaded.app_id, "app-2024");
+        assert_eq!(loaded.secret, "secret-5678");
+        assert!(loaded.api_key.is_empty());
+    }
+
+    #[test]
+    fn load_provider_credentials_tolerates_missing_values() {
+        let manager = memory_credentials();
+        let loaded = load_provider_credentials(&manager, &cloud_config("openai")).unwrap();
+        assert!(loaded.api_key.is_empty());
+        let loaded = load_provider_credentials(&manager, &cloud_config("baidu")).unwrap();
+        assert!(loaded.app_id.is_empty());
+        assert!(loaded.secret.is_empty());
+    }
+
+    #[test]
+    fn build_cloud_translation_provider_assembles_all_five_providers() {
+        for provider in ["openai", "deepl", "google", "azure", "baidu"] {
+            let manager = memory_credentials();
+            match provider {
+                "baidu" => {
+                    manager
+                        .store_for_provider(CredentialTarget::BaiduAppId, "app")
+                        .unwrap();
+                    manager
+                        .store_for_provider(CredentialTarget::BaiduSecret, "secret")
+                        .unwrap();
+                }
+                _ => manager
+                    .store_for_provider(
+                        provider_credential_target(provider).unwrap(),
+                        "sk-configured",
+                    )
+                    .unwrap(),
+            }
+            let built =
+                build_cloud_translation_provider(&cloud_config(provider), &manager).unwrap();
+            assert_eq!(
+                built.id(),
+                provider,
+                "runtime provider id must match the configuration id"
+            );
+        }
+    }
+
+    #[test]
+    fn build_cloud_translation_provider_uses_azure_region_from_config() {
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::Azure, "sk-azure")
+            .unwrap();
+        let mut config = cloud_config("azure");
+        config.translation.region = Some("eastasia".to_string());
+        let built = build_cloud_translation_provider(&config, &manager).unwrap();
+        assert_eq!(built.id(), "azure");
     }
 }
