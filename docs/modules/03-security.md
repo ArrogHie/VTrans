@@ -123,14 +123,14 @@ crates/vtrans-security/
 
 ## 验收标准
 
-- [ ] API Key 不出现在任何明文文件中
-- [ ] 日志中只出现掩码后的 Key
-- [ ] store/load/delete 功能正常
-- [ ] `store_for_provider` / `load_for_provider` / `delete_for_provider` 功能正常
-- [ ] 多目标凭据存取通过测试（含命名空间隔离）
-- [ ] 百度 APP ID + Secret 两个独立目标已实现并测试
-- [ ] 单元测试通过（掩码逻辑）
-- [ ] README.md 完整
+- [x] API Key 不出现在任何明文文件中
+- [x] 日志中只出现掩码后的 Key
+- [x] store/load/delete 功能正常
+- [x] `store_for_provider` / `load_for_provider` / `delete_for_provider` 功能正常
+- [x] 多目标凭据存取通过测试（含命名空间隔离）
+- [x] 百度 APP ID + Secret 两个独立目标已实现并测试
+- [x] 单元测试通过（掩码逻辑）
+- [x] README.md 完整
 
 ## 开发注意事项
 
