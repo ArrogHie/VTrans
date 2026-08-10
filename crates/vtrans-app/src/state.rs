@@ -507,38 +507,39 @@ fn build_cloud_translation_provider(
     credentials: &CredentialManager,
 ) -> Result<Arc<dyn TranslationProvider>, AppError> {
     let provider = config.translation.provider.as_str();
+    let api_endpoint = effective_translation_endpoint(provider, &config.translation.api_endpoint);
     let credentials = load_provider_credentials(credentials, config)?;
     let timeout = std::time::Duration::from_secs(u64::from(config.translation.timeout_seconds));
     let max_retries = config.translation.max_retries;
     let provider: Arc<dyn TranslationProvider> = match provider {
         "openai" => Arc::new(OpenAiProvider::new(
-            &config.translation.api_endpoint,
+            &api_endpoint,
             &config.translation.api_model,
             &credentials.api_key,
             timeout,
             max_retries,
         )),
         "deepl" => Arc::new(DeepLProvider::new(
-            &config.translation.api_endpoint,
+            &api_endpoint,
             &credentials.api_key,
             timeout,
             max_retries,
         )),
         "google" => Arc::new(GoogleV2Provider::new(
-            &config.translation.api_endpoint,
+            &api_endpoint,
             &credentials.api_key,
             timeout,
             max_retries,
         )),
         "azure" => Arc::new(AzureTranslatorProvider::new(
-            &config.translation.api_endpoint,
+            &api_endpoint,
             config.translation.region.as_deref().unwrap_or(""),
             &credentials.api_key,
             timeout,
             max_retries,
         )),
         "baidu" => Arc::new(BaiduProvider::new(
-            &config.translation.api_endpoint,
+            &api_endpoint,
             &credentials.app_id,
             &credentials.secret,
             timeout,
@@ -583,7 +584,44 @@ fn update_translation_provider_config(
 ) -> Result<(), AppError> {
     validate_translation_provider_id(provider_id)?;
     config.translation.provider = provider_id.to_string();
+    if let Some(endpoint) = provider_default_endpoint(provider_id) {
+        config.translation.api_endpoint = endpoint.to_string();
+    }
     Ok(())
+}
+
+/// Canonical HTTP endpoint for each remote translation provider.
+fn provider_default_endpoint(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "openai" => Some("https://api.openai.com/v1/chat/completions"),
+        "deepl" => Some("https://api-free.deepl.com/v2/translate"),
+        "google" => Some("https://translation.googleapis.com/language/translate/v2"),
+        "azure" => Some("https://api.cognitive.microsofttranslator.com/translate"),
+        "baidu" => Some("https://fanyi-api.baidu.com/api/trans/vip/translate"),
+        "local" => None,
+        _ => None,
+    }
+}
+
+/// Repairs a stale built-in endpoint left by an earlier provider selection.
+///
+/// Custom endpoints remain untouched.
+fn effective_translation_endpoint(provider_id: &str, configured: &str) -> String {
+    let Some(default_endpoint) = provider_default_endpoint(provider_id) else {
+        return configured.to_string();
+    };
+    let configured = configured.trim();
+    let stale_builtin_endpoint = ["openai", "deepl", "google", "azure", "baidu"]
+        .iter()
+        .filter(|candidate| **candidate != provider_id)
+        .filter_map(|candidate| provider_default_endpoint(candidate))
+        .any(|endpoint| endpoint == configured);
+
+    if configured.is_empty() || stale_builtin_endpoint {
+        default_endpoint.to_string()
+    } else {
+        configured.to_string()
+    }
 }
 
 /// Credentials for one cloud translation provider, loaded from the vault.
@@ -812,10 +850,42 @@ mod tests {
         let mut config = AppConfig::default();
         update_translation_provider_config(&mut config, "local").unwrap();
         assert_eq!(config.translation.provider, "local");
+        assert_eq!(
+            config.translation.api_endpoint,
+            AppConfig::default().translation.api_endpoint
+        );
         assert_eq!(config.ocr.language, AppConfig::default().ocr.language);
         assert_eq!(
             config.hotkeys.live_translate,
             AppConfig::default().hotkeys.live_translate
+        );
+    }
+
+    #[test]
+    fn provider_config_update_switches_to_provider_endpoint() {
+        let mut config = AppConfig::default();
+        update_translation_provider_config(&mut config, "deepl").unwrap();
+        assert_eq!(
+            config.translation.api_endpoint,
+            "https://api-free.deepl.com/v2/translate"
+        );
+
+        update_translation_provider_config(&mut config, "baidu").unwrap();
+        assert_eq!(
+            config.translation.api_endpoint,
+            "https://fanyi-api.baidu.com/api/trans/vip/translate"
+        );
+    }
+
+    #[test]
+    fn stale_builtin_endpoint_is_repaired_without_overwriting_custom_endpoint() {
+        assert_eq!(
+            effective_translation_endpoint("deepl", "https://api.openai.com/v1/chat/completions"),
+            "https://api-free.deepl.com/v2/translate"
+        );
+        assert_eq!(
+            effective_translation_endpoint("baidu", "https://custom.example.test/translate"),
+            "https://custom.example.test/translate"
         );
     }
 

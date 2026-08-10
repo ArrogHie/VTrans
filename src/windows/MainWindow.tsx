@@ -3,7 +3,7 @@ import { FolderCheck, MousePointer2, Pause, Play, RefreshCw, Settings2, Square }
 import { DebugPanel } from "../components/DebugPanel";
 import { LanguageSelector } from "../components/LanguageSelector";
 import { ModeToggle } from "../components/ModeToggle";
-import { ProviderToggle } from "../components/ProviderToggle";
+import { PROVIDER_OPTIONS } from "../components/ProviderToggle";
 import { ResultCard } from "../components/ResultCard";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { StatusBar } from "../components/StatusBar";
@@ -262,7 +262,21 @@ export function MainWindow() {
             <LanguageSelector label="识别语言" value={config.ocr.language} options={OCR_LANGUAGES} onChange={(value) => void changeOcrLanguage(value)} />
             <LanguageSelector label="目标语言" value={config.translation.target_language} options={TARGET_LANGUAGES} onChange={(value) => void changeTargetLanguage(value)} />
           </div>
-          <div className="mt-4"><ProviderToggle value={config.translation.provider} onChange={(value) => void changeProvider(value)} /></div>
+          <label className="mt-4 flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-slate-500">翻译引擎</span>
+            <select
+              value={config.translation.provider}
+              onChange={(event) => void changeProvider(event.target.value as ProviderId)}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none ring-indigo-200 transition focus:ring-2"
+              aria-label="翻译引擎"
+            >
+              {PROVIDER_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
           {config.translation.provider === "local" && !isLocalPairSupported(config) && (
             <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
               本地模型目前仅支持 en → zh-CN，且不能自动判断源语言；其它源语言请切换到云端 Provider。

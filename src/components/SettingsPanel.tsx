@@ -306,10 +306,14 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
         <fieldset className="rounded-lg border border-slate-100 p-3">
           <legend className="px-1 text-xs font-semibold text-slate-400">翻译引擎</legend>
           <div className="space-y-3">
-            <ProviderToggle value={draft.translation.provider} onChange={changeProvider} />
+            <ProviderToggle
+              value={draft.translation.provider}
+              onChange={changeProvider}
+              includeLocal={false}
+            />
             {draft.translation.provider === "local" ? (
               <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-400">
-                本地 ONNX 模型不使用云端 API 参数；翻译质量由本地模型配置控制。
+                本地 ONNX 模型不使用云端 API 参数；当前为本地模型，切换请在主界面的下拉列表完成。
               </p>
             ) : (
               <div className="space-y-3">

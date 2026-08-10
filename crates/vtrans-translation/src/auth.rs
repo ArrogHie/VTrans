@@ -20,14 +20,17 @@
 /// let mut headers = std::collections::BTreeMap::new();
 /// AuthStrategy::AuthorizationScheme("DeepL-Auth-Key")
 ///     .apply("fancy-secret", &mut headers);
-/// assert_eq!(headers.get("DeepL-Auth-Key").unwrap(), "fancy-secret");
+/// assert_eq!(
+///     headers.get("Authorization").unwrap(),
+///     "DeepL-Auth-Key fancy-secret"
+/// );
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthStrategy {
     /// `Authorization: Bearer <key>`.
     Bearer,
-    /// A dedicated authorization header whose name is the scheme, e.g.
-    /// `DeepL-Auth-Key: <key>`.
+    /// The `Authorization` header with a custom scheme, e.g.
+    /// `Authorization: DeepL-Auth-Key <key>`.
     AuthorizationScheme(&'static str),
     /// A fixed header with the key as its value, e.g.
     /// `Ocp-Apim-Subscription-Key: <key>`.
@@ -58,7 +61,7 @@ impl AuthStrategy {
                 headers.insert("Authorization".to_string(), format!("Bearer {key}"));
             }
             Self::AuthorizationScheme(scheme) => {
-                headers.insert(scheme.to_string(), key.to_string());
+                headers.insert("Authorization".to_string(), format!("{scheme} {key}"));
             }
             Self::Header(header) => {
                 headers.insert(header.to_string(), key.to_string());
@@ -173,11 +176,14 @@ mod tests {
     }
 
     #[test]
-    fn scheme_sets_dedicated_header() {
+    fn scheme_sets_authorization_header() {
         let mut headers = std::collections::BTreeMap::new();
         AuthStrategy::AuthorizationScheme("DeepL-Auth-Key").apply("sk-1234", &mut headers);
-        assert_eq!(headers.get("DeepL-Auth-Key").unwrap(), "sk-1234");
-        assert!(!headers.contains_key("Authorization"));
+        assert_eq!(
+            headers.get("Authorization").unwrap(),
+            "DeepL-Auth-Key sk-1234"
+        );
+        assert!(!headers.contains_key("DeepL-Auth-Key"));
     }
 
     #[test]

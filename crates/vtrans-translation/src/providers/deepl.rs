@@ -26,7 +26,8 @@ use super::language::{map_deepl, provider_error};
 /// `DeepL` translation provider.
 ///
 /// Sends a form-encoded POST to `DeepL`'s v2 `/translate` endpoint with the
-/// `DeepL-Auth-Key` header. The stable runtime id is `"deepl"`.
+/// `Authorization: DeepL-Auth-Key <key>` header. The stable runtime id is
+/// `"deepl"`.
 ///
 /// # Example
 ///
@@ -82,6 +83,9 @@ pub struct DeepLAdapter {
     api_key: String,
 }
 
+const DEEPL_FREE_ENDPOINT: &str = "https://api-free.deepl.com/v2/translate";
+const DEEPL_PRO_ENDPOINT: &str = "https://api.deepl.com/v2/translate";
+
 impl fmt::Debug for DeepLAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DeepLAdapter")
@@ -103,7 +107,7 @@ impl DeepLProvider {
     pub fn new(endpoint: &str, api_key: &str, timeout: Duration, max_retries: u32) -> Self {
         Self {
             adapter: DeepLAdapter {
-                endpoint: endpoint.to_string(),
+                endpoint: effective_deepl_endpoint(endpoint, api_key),
                 api_key: api_key.to_string(),
             },
             client: reqwest::Client::new(),
@@ -313,10 +317,10 @@ mod tests {
         let outgoing = adapter().build_request(&request).unwrap();
         assert_eq!(outgoing.method, "POST");
         assert_eq!(
-            outgoing.headers.get("DeepL-Auth-Key").unwrap(),
-            "deepl-secret"
+            outgoing.headers.get("Authorization").unwrap(),
+            "DeepL-Auth-Key deepl-secret"
         );
-        assert!(!outgoing.headers.contains_key("Authorization"));
+        assert!(!outgoing.headers.contains_key("DeepL-Auth-Key"));
         let form = outgoing.form.unwrap();
         assert!(form.contains("target_lang=JA"));
         assert!(form.contains("source_lang=EN-US"));
@@ -388,5 +392,37 @@ mod tests {
                 .retry_decision(StatusCode::from_u16(456).unwrap(), "", None)
                 .retry
         );
+    }
+
+    #[test]
+    fn free_key_uses_free_endpoint() {
+        let provider =
+            DeepLProvider::new(DEEPL_PRO_ENDPOINT, "test-key:fx", Duration::from_secs(1), 0);
+        assert_eq!(provider.adapter.endpoint, DEEPL_FREE_ENDPOINT);
+    }
+
+    #[test]
+    fn pro_key_preserves_pro_endpoint() {
+        let provider =
+            DeepLProvider::new(DEEPL_PRO_ENDPOINT, "test-key", Duration::from_secs(1), 0);
+        assert_eq!(provider.adapter.endpoint, DEEPL_PRO_ENDPOINT);
+    }
+}
+
+/// Select the endpoint compatible with the key type while preserving custom
+/// endpoints.
+fn effective_deepl_endpoint(endpoint: &str, api_key: &str) -> String {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return if api_key.trim().ends_with(":fx") {
+            DEEPL_FREE_ENDPOINT.to_string()
+        } else {
+            DEEPL_PRO_ENDPOINT.to_string()
+        };
+    }
+    if api_key.trim().ends_with(":fx") && endpoint == DEEPL_PRO_ENDPOINT {
+        DEEPL_FREE_ENDPOINT.to_string()
+    } else {
+        endpoint.to_string()
     }
 }

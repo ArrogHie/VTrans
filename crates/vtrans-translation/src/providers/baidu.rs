@@ -241,18 +241,7 @@ impl TranslationProviderAdapter for BaiduAdapter {
     fn map_error(&self, status: StatusCode, body: &str) -> TranslationError {
         // Baidu reports errors in the JSON body with an `error_code`.
         if let Some(code) = extract_baidu_error_code(body) {
-            return match code {
-                52003 | 54001 => TranslationError::Unauthorized,
-                54003 | 54005 => TranslationError::RateLimited,
-                54004 => {
-                    TranslationError::ApiRequest("baidu insufficient balance (54004)".to_string())
-                }
-                58001 => TranslationError::UnsupportedPair {
-                    src: Language::Auto,
-                    target: Language::Auto,
-                },
-                _ => TranslationError::ApiRequest(format!("baidu error {code}")),
-            };
+            return map_baidu_error_code(code);
         }
         match status.as_u16() {
             401 => TranslationError::Unauthorized,
@@ -293,7 +282,23 @@ fn random_salt() -> String {
 /// Extract a Baidu `error_code` from a response body, if present.
 fn extract_baidu_error_code(body: &str) -> Option<i64> {
     let value: Value = serde_json::from_str(body).ok()?;
-    value.get("error_code").and_then(Value::as_i64)
+    let code = value.get("error_code")?;
+    code.as_i64()
+        .or_else(|| code.as_str()?.trim().parse::<i64>().ok())
+}
+
+/// Map a Baidu provider error code to the shared translation error domain.
+fn map_baidu_error_code(code: i64) -> TranslationError {
+    match code {
+        52003 | 54001 => TranslationError::Unauthorized,
+        54003 | 54005 => TranslationError::RateLimited,
+        54004 => TranslationError::ApiRequest("baidu insufficient balance (54004)".to_string()),
+        58001 => TranslationError::UnsupportedPair {
+            src: Language::Auto,
+            target: Language::Auto,
+        },
+        _ => TranslationError::ApiRequest(format!("baidu error {code}")),
+    }
 }
 
 /// Parse a Baidu response into translated segments.
@@ -308,8 +313,8 @@ pub fn parse_baidu_response(body: &str) -> Result<ParsedTranslation, Translation
     }
     let value: Value = serde_json::from_str(body)
         .map_err(|error| TranslationError::ParseResponse(error.to_string()))?;
-    if let Some(code) = value.get("error_code").and_then(Value::as_i64) {
-        return Err(TranslationError::ApiRequest(format!("baidu error {code}")));
+    if let Some(code) = extract_baidu_error_code(body) {
+        return Err(map_baidu_error_code(code));
     }
     let results = value
         .get("trans_result")
@@ -443,6 +448,18 @@ mod tests {
                 .retry_decision(StatusCode::OK, r#"{"error_code":52003}"#, None)
                 .retry
         );
+    }
+
+    #[test]
+    fn baidu_string_error_code_maps() {
+        assert!(matches!(
+            adapter().map_error(StatusCode::OK, r#"{"error_code":"52003"}"#),
+            TranslationError::Unauthorized
+        ));
+        assert!(matches!(
+            parse_baidu_response(r#"{"error_code":"54005"}"#),
+            Err(TranslationError::RateLimited)
+        ));
     }
 
     #[test]

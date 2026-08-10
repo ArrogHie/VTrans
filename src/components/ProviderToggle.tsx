@@ -14,12 +14,18 @@ export const PROVIDER_OPTIONS: readonly { value: ProviderId; label: string }[] =
 interface ProviderToggleProps {
   value: ProviderId;
   onChange: (value: ProviderId) => void;
+  /** Settings hides local-model selection because it is available on the main window. */
+  includeLocal?: boolean;
 }
 
-export function ProviderToggle({ value, onChange }: ProviderToggleProps) {
+export function ProviderToggle({ value, onChange, includeLocal = true }: ProviderToggleProps) {
+  const options = includeLocal
+    ? PROVIDER_OPTIONS
+    : PROVIDER_OPTIONS.filter((option) => option.value !== "local");
+
   return (
     <div className="grid grid-cols-3 gap-2">
-      {PROVIDER_OPTIONS.map((option) => (
+      {options.map((option) => (
         <button
           key={option.value}
           type="button"
