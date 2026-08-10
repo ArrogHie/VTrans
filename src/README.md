@@ -180,6 +180,12 @@ interface AppState {
 `updateLanguage("target", …)` 行为不变。`setOcrLanguage` / `setSourceLanguage` 的
 `tauri.ts` 封装签名不变，跨 IPC 序列化契约不变。
 
+`providerSwitching` 与 `setProviderSwitching` 标记翻译引擎切换期间的状态：
+主窗口 `changeProvider` 在 `await setTranslationProvider` 期间置位，禁用引擎
+下拉框并显示进度反馈（spinner + `model_loading_progress` 事件驱动的百分比），
+`finally` 中复位；失败走既有 `setStatus({ error })` 路径并恢复可用态。
+切换开始时清空 `modelProgress`，避免命中缓存时闪烁上次残留的百分比。
+
 ## 构建与测试
 
 在仓库根目录执行：
@@ -234,6 +240,9 @@ pnpm tauri dev
 - 设置面板范围校验：背景透明度 0.3–1.0、字号 12–24 整数，拒绝越界与非整数。
 - provider id 映射：`"local-onnx" -> "local"`，五个云端 id 原样透传，
   未知 id 与已废弃的 `"api"` 回退到默认 `"openai"`。
+- 引擎切换反馈：`providerSwitching` 状态切换、`model_loading_progress` 驱动
+  `modelProgress`、ProviderSelect 切换期间下拉框禁用 + spinner/百分比、
+  完成/失败后恢复。
 - 设置面板按 provider 条件渲染：OpenAI（端点 + 必填模型）、DeepL（Free/Pro/
   自定义端点）、Google（端点 + 可选模型）、Azure（端点 + 区域）、百度
   （APP ID + Secret 双输入，经 `set_provider_credentials` 提交）、本地
@@ -314,3 +323,8 @@ pnpm tauri dev
     需要自定义端点的用户应先选 provider 再修改端点。Google 的模型名在表单中为可选
     项（后端校验对非 OpenAI provider 不强制模型名），若后端实现对空字符串仍报错，
     前端会在错误信息中透出并提示补填。
+13. 主窗口引擎切换的进度反馈依赖 `vtrans-app` 在 `set_translation_provider`
+    路径补发 `model_loading_progress` 事件（分配单 1 的后端修复）。前端在事件
+    到达前显示「正在切换翻译引擎…」spinner；命中缓存时进度近瞬时跳到 100%。
+    若后端版本未补发事件，切换期间仅显示 spinner，完成后直接生效，不影响功能。
+    切换完成/失败后 `providerSwitching` 复位，下拉框恢复可用。

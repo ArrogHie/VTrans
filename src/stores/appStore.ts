@@ -32,6 +32,8 @@ interface AppState {
   setSelectedRegion: (region: ScreenRegion | null) => void;
   setError: (error: string | null) => void;
   setModelProgress: (progress: number | null) => void;
+  providerSwitching: boolean;
+  setProviderSwitching: (switching: boolean) => void;
   setConfig: (config: AppConfig) => void;
   setLiveConfig: (config: PipelineConfig | null) => void;
   setLivePaused: (paused: boolean) => void;
@@ -49,6 +51,7 @@ export const useAppStore = create<AppState>((set) => ({
   selectedRegion: null,
   error: null,
   modelProgress: null,
+  providerSwitching: false,
   config: structuredClone(DEFAULT_CONFIG),
   hydrated: false,
   liveConfig: null,
@@ -60,6 +63,7 @@ export const useAppStore = create<AppState>((set) => ({
   setSelectedRegion: (selectedRegion) => set({ selectedRegion }),
   setError: (error) => set({ error, status: error ? { error } : "idle" }),
   setModelProgress: (modelProgress) => set({ modelProgress }),
+  setProviderSwitching: (switching) => set({ providerSwitching: switching }),
   setConfig: (config) => set({ config, hydrated: true }),
   setLiveConfig: (liveConfig) => set({ liveConfig }),
   setLivePaused: (livePaused) => set({ livePaused }),
