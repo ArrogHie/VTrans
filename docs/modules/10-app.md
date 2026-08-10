@@ -33,10 +33,37 @@ t::generate_handler![
     update_result_window_appearance, // (opacity, fontSizePx)
     update_floating_ball_appearance, // (opacity, sizePx)
     set_api_key,
+    set_provider_credentials, // (providerId, apiKey?, appId?, secret?)
     get_app_config,
     get_app_status,
 ]
 ```
+
+### 翻译 Provider 组装与凭据目标
+
+`state.rs` 的 `build_translation_provider(config, credentials, model_manager)`
+按 `config.translation.provider` 分支组装，凭据只经 `CredentialManager`
+读取（不落内存副本到日志）：
+
+| 配置 id | 运行时实现 id | 凭据目标 |
+|---------|---------------|----------|
+| `openai`（默认） | `openai` | `openai` |
+| `deepl` | `deepl` | `deepl` |
+| `google` | `google` | `google` |
+| `azure` | `azure` | `azure`（区域取 `translation.region`） |
+| `baidu` | `baidu` | `baidu_app_id` + `baidu_secret`（两个独立目标） |
+| `local` | `local-onnx` | 无（ONNX 模型走 ModelManager） |
+
+配置域白名单 `["openai","deepl","google","azure","baidu","local"]` 与
+vtrans-config 校验一致；旧 id `"api"` 已废弃（v4→v5 迁移重命名为
+`"openai"`，应用层校验拒绝）。切换 provider（`set_translation_provider` /
+`save_settings`）即时重建并更新配置；live 会话运行中切换仍返回
+`PipelineError::AlreadyRunning`。
+
+`set_api_key` 按当前配置的 provider 写入对应凭据目标（baidu 写
+`baidu_secret`），`set_provider_credentials` 泛化写入完整凭据集（baidu
+需要 `appId` + `secret` 两个值）；写入后若目标 provider 为当前 provider
+立即重建。日志引用 Key 只用 `mask_sensitive` / `mask_key` 掩码。
 
 `update_result_window_appearance(opacity, font_size_px)` 与
 `update_floating_ball_appearance(opacity, size_px)` 只持久化对应窗口的两个
@@ -199,6 +226,8 @@ pub enum AppError {
     Translation(#[from] TranslationError),
     #[error("invalid api key: {0}")]
     InvalidApiKey(String),
+    #[error("provider credential error: {0}")]
+    ProviderCredential(String),
     #[error("tauri error: {0}")]
     Tauri(String),
     #[error("hotkey registration failed: {0}")]
@@ -228,8 +257,9 @@ crates/vtrans-app/
 | AppState 初始化 | 手工验证 | 依赖 Windows Graphics Capture、Credential Manager 和模型文件，无头环境不可自动化；验证步骤见 crate README「手工验证项」第 1 条 |
 | save_settings | 手工验证 + 单元 | 全链路（IPC → 持久化 → 重启生效）手工验证（README 第 2 条）；配置校验与原子持久化由 vtrans-config 单测覆盖 |
 | get_app_status | 手工验证 + 单元 | 全链路手工验证（README 第 3 条）；`AppStatus` 序列化契约有单测 |
-| Provider 切换 | 手工验证 + 单元 | 全链路手工验证（README 第 4 条）；`validate_translation_provider_id` / `update_translation_provider_config` 有单测 |
-| set_api_key | 手工验证 + 单元 | 全链路手工验证（README 第 7 条）；key 校验与凭据存储有单测，IPC 参数契约见 contracts.rs |
+| Provider 切换 | 手工验证 + 单元 | 全链路手工验证（README 第 4 条）；6 个配置 id 白名单、`update_translation_provider_config`、5 个云 Provider 组装分支有单测 |
+| Provider 凭据 | 单元 | 凭据目标映射、`store_api_key` / `store_provider_credentials` 目标读写、百度双目标、缺失凭据容忍（state.rs tests）✅；IPC 参数契约见 contracts.rs |
+| set_api_key / set_provider_credentials | 手工验证 + 单元 | 全链路手工验证（README 第 7 条）；key 校验与凭据存储有单测，IPC 参数契约见 contracts.rs |
 | get_app_config | 手工验证 + 单元 | 前端水合手工验证（README 第 8 条）；AppConfig 序列化字段契约见 contracts.rs |
 | 快捷键注册 | 手工验证 | 依赖真实全局快捷键注册环境（README 第 5 条）；动作分派枚举有单测 |
 | 托盘与窗口生命周期 | 手工验证 | 依赖系统托盘与真实窗口环境（README 第 9 条）；菜单 id 与事件名有单测 |
@@ -247,19 +277,21 @@ crates/vtrans-app/
 
 ### Provider id 契约
 
-`AppStatus.translation_provider` 返回运行时 Provider 的实现 id（当前为
-`"api"` / `"local-onnx"`），而 `set_translation_provider` 与配置 schema 使用
-配置标识符（`"api"` / `"local"`）。两端映射：
+`AppStatus.translation_provider` 返回运行时 Provider 的实现 id。云端
+Provider 与配置 id 一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
+`"baidu"`），仅本地不同（实现 `"local-onnx"` ↔ 配置 `"local"`）。两端映射：
 
-- 后端：`validate_translation_provider_id` 维护配置标识符白名单；
-- 前端：`normalizeProviderId` 把实现 id 映射回配置标识符。
+- 后端：`validate_translation_provider_id` 维护配置标识符白名单
+  （`["openai","deepl","google","azure","baidu","local"]`）；
+- 前端：`normalizeProviderId` 把 `"local-onnx"` 映射回 `"local"`，其余
+  实现 id 原样透传。
 
 **新增翻译 Provider 时**，必须同步更新后端白名单与前端 `normalizeProviderId`
 映射，并在 `crates/vtrans-app/README.md` 登记，否则状态水合会显示错误引擎。
 
 ## 验收标准
 
-- [x] 所有 Commands 可被前端调用（`invoke_handler` 注册 15 个命令，前端
+- [x] 所有 Commands 可被前端调用（`invoke_handler` 注册 16 个命令，前端
       `src/services/tauri.ts` 全部按 Tauri 2 camelCase 参数契约调用）
 - [x] 所有 Events 正确推送到前端（`events.rs` 单测 + `tests/contracts.rs`
       固化了事件名与 payload 形状）
@@ -271,6 +303,23 @@ crates/vtrans-app/
 - [x] Release 构建关闭不必要 capability（Debug 面板采用主窗口内嵌方案，
       不新增窗口/权限；capability 归属见「capability 归属」一节）
 - [x] README.md 完整
+
+### 多 Provider 验收（本任务）
+
+- [x] `build_translation_provider` 按 `openai`/`deepl`/`google`/`azure`/
+      `baidu`/`local` 六分支组装，凭据从 CredentialManager 对应目标读取
+      （5 个云分支有单测，local 依赖真实模型文件登记手工验证）
+- [x] OpenAI 配置 id 为 `openai`（默认 provider），旧 `"api"` 被校验拒绝
+- [x] `set_api_key` 泛化为按当前 provider 写对应目标（baidu 写
+      `baidu_secret`），写入后立即重建当前 provider
+- [x] `set_provider_credentials` 支持 baidu 双目标（`app_id` + `secret`），
+      IPC 参数契约（`{ providerId, apiKey?, appId?, secret? }`）已固化
+- [x] 切换 provider 即时重建并更新配置；live 会话运行中切换仍拒绝
+- [x] `AppStatus.translation_provider` 运行时 id 与前端映射对齐
+      （`openai`/`deepl`/`google`/`azure`/`baidu`/`local-onnx`）
+- [x] 凭据只经 CredentialManager 读写，日志仅掩码形式；百度 APP ID 与
+      Secret 两个独立目标
+- [x] 未修改 vtrans-core 与其它 crate；README 与本文档同步
 
 ### Debug 模式验收（本任务）
 
@@ -374,3 +423,10 @@ crates/vtrans-app/
   `SettingsPanel` 已按 `{ apiKey }`（Tauri 2 默认 camelCase）参数名约定等待
   这两个命令落地；新增 command 不得添加 `rename_all = "snake_case"`，否则
   需同步修改前端 `src/services/tauri.ts` 与 `src/test/ipc.test.ts`。
+- 多 Provider 前端同步（模块 11）：`AppStatus.translation_provider` 现在
+  返回 `"openai"`/`"deepl"`/`"google"`/`"azure"`/`"baidu"`/`"local-onnx"`。
+  前端需把 `normalizeProviderId` 中的 `"api" -> "api"` 映射改为
+  `"openai" -> "openai"`（并删除 `"api"` 分支）、扩展 `ProviderId` 类型与
+  凭据表单（baidu 需要 APP ID + Secret 两个输入，通过
+  `set_provider_credentials` 提交）；`set_api_key` 仍按当前 provider 写
+  对应目标，单 key 输入流程可保留。

@@ -90,6 +90,7 @@ save_settings(settings: AppConfig) -> Result<(), AppError>
 update_result_window_appearance(opacity: f64, font_size_px: u32) -> Result<(), AppError>
 update_floating_ball_appearance(opacity: f64, size_px: u32) -> Result<(), AppError>
 set_api_key(api_key: String) -> Result<(), AppError>
+set_provider_credentials(provider_id: String, api_key: Option<String>, app_id: Option<String>, secret: Option<String>) -> Result<(), AppError>
 get_app_config() -> Result<AppConfig, AppError>
 get_app_status() -> Result<AppStatus, AppError>
 ~~~
@@ -108,13 +109,20 @@ get_app_status() -> Result<AppStatus, AppError>
 `set_ocr_language` 与 `set_source_language` 各自同时写入两个字段，任一命令
 执行后两字段恒相等，`ConfigManager::save` 的校验不会因联动不一致而拒绝。
 
-`set_api_key` 把翻译 API Key 写入 Windows Credential Manager（target 固定为
-`"translation"`，与 `load_api_key` 读取的 target 一致），Key 不进入
-`config.json`、前端 store、事件或日志。写入通过 `spawn_blocking` 在阻塞池
-执行；当 `config.translation.provider == "api"` 时，保存后用新 Key 重建 API
-provider，无需重启即生效。空串/纯空白或超过 4096 字符的 Key 返回
-`AppError::InvalidApiKey`。前端参数名为 `{ apiKey }`（Tauri 2 默认
-camelCase，命令未加 `rename_all`）。
+`set_api_key` 把 API Key 写入 Windows Credential Manager 中**当前配置
+provider** 对应的凭据目标（openai/deepl/google/azure 各一个目标；baidu
+写 `baidu_secret`，APP ID 由 `set_provider_credentials` 单独写入），Key
+不进入 `config.json`、前端 store、事件或日志。写入通过 `spawn_blocking`
+在阻塞池执行；写入成功后立即用新凭据重建当前 provider，无需重启即生效。
+空串/纯空白或超过 4096 字符的 Key 返回 `AppError::InvalidApiKey`；`local`
+provider 不接受凭据，返回 `AppError::ProviderCredential`。前端参数名为
+`{ apiKey }`（Tauri 2 默认 camelCase，命令未加 `rename_all`）。
+
+`set_provider_credentials` 泛化地写入一个云端 provider 的完整凭据集：
+OpenAI/DeepL/Google/Azure 传 `apiKey`；Baidu 必须同时传 `appId` 与
+`secret`（分别写入 `baidu_app_id` / `baidu_secret` 两个独立目标）。写入后
+若目标 provider 就是当前配置的 provider，立即重建。前端参数名为
+`{ providerId, apiKey?, appId?, secret? }`（契约见 `tests/contracts.rs`）。
 
 `get_app_config` 返回当前配置的完整快照（clone，不长时间持有锁），前端
 挂载时用它水合设置面板，避免整包 `save_settings` 用前端默认值覆盖后端
@@ -133,9 +141,34 @@ camelCase，命令未加 `rename_all`）。
 
 LiveTranslationConfig 包含 region、capture_interval_ms 和 difference_threshold，字段可直接由前端 JSON 反序列化。
 
-`AppStatus.translation_provider` 返回运行时 Provider 的实现 id（`"api"` /
-`"local-onnx"`），与 `set_translation_provider` 接受的配置标识符（`"api"` /
-`"local"`）值域不同；前端 `normalizeProviderId` 负责把实现 id 映射回配置标识符。
+`AppStatus.translation_provider` 返回运行时 Provider 的实现 id：云端
+Provider 与配置域一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
+`"baidu"`），本地 Provider 为 `"local-onnx"`（配置域 `"local"`）。前端
+`normalizeProviderId` 只需把 `"local-onnx"` 映射回 `"local"`，其余 id
+原样透传。
+
+### 翻译 Provider 组装与凭据目标
+
+`state.rs` 的 `build_translation_provider` 按 `config.translation.provider`
+分支组装：
+
+| 配置 id | 运行时实现 | 凭据目标（CredentialManager） |
+|---------|------------|-------------------------------|
+| `openai`（默认） | `OpenAiProvider` | `openai` |
+| `deepl` | `DeepLProvider` | `deepl` |
+| `google` | `GoogleV2Provider` | `google` |
+| `azure` | `AzureTranslatorProvider` | `azure`（区域取 `translation.region`） |
+| `baidu` | `BaiduProvider` | `baidu_app_id` + `baidu_secret`（两个独立目标） |
+| `local` | `LocalTranslationProvider` | 无（ONNX 模型走 ModelManager） |
+
+配置域白名单为 `["openai","deepl","google","azure","baidu","local"]`（与
+vtrans-config 校验一致），默认 `openai`。旧 id `"api"` 已废弃：迁移
+（v4→v5）会将其重命名为 `"openai"`，应用层校验拒绝 `"api"`。
+
+凭据只经 `CredentialManager` 读写，不落内存副本到日志；日志引用 Key 时
+只用 `vtrans_core::mask_sensitive` / `vtrans_security::mask_key` 掩码值。
+切换 provider（`set_translation_provider` / `save_settings`）立即重建并在
+配置持久化后生效；live 会话运行中切换仍返回 `PipelineError::AlreadyRunning`。
 
 ### Events
 
@@ -300,10 +333,11 @@ cargo check -p vtrans
 - 日志在 setup::init_app 中初始化；若 tracing 已被宿主或测试环境初始化，
   初始化失败会降级为不记录滚动文件，应用仍可启动。
 - 错误路径记录 warn! 或 error!，正常生命周期记录 info!。
-- API key 通过 `set_api_key` 写入 CredentialManager（target `"translation"`），
-  从 CredentialManager 读取，不写入 config、事件或日志；日志引用 Key 时仅
-  记录 `vtrans_core::mask_sensitive` 掩码值；翻译 Provider 的 upstream crate
-  负责 bearer token 注入。
+- 凭据通过 `set_api_key` / `set_provider_credentials` 写入 CredentialManager
+  的 provider 目标（openai/deepl/google/azure/baidu_app_id/baidu_secret），
+  组装时从同一目标读取，不写入 config、事件或日志；日志引用 Key 时仅记录
+  `vtrans_core::mask_sensitive` / `vtrans_security::mask_key` 掩码值；
+  翻译 Provider 的 upstream crate 负责鉴权注入。
 - 前端事件不传递 CapturedImage，避免截图通过 JSON/Base64 跨越 IPC。
 
 ## 手工验证项
@@ -317,19 +351,20 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
    API 提供者需先在凭据管理器配置 key。
 3. **get_app_status 全链路**：启动后前端状态栏显示正确的 Provider、区域和
    pipeline 状态；启动/停止实时会话后轮询结果同步变化。
-4. **Provider 切换全链路**：切换 api/local 后调用 `get_app_status`，确认
-   `translation_provider` 返回对应实现 id（`"api"`/`"local-onnx"`），重启后
-   前端引擎开关仍显示正确。
+4. **Provider 切换全链路**：依次切换 openai/deepl/google/azure/baidu/local
+   后调用 `get_app_status`，确认 `translation_provider` 返回对应实现 id
+   （云端与配置 id 一致，本地为 `"local-onnx"`）；重启后前端引擎开关仍
+   显示正确。
 5. **快捷键注册与触发**：依次按 Alt+Shift+A（选区）、Alt+Shift+R（实时）、
    Alt+Shift+S（停止），确认动作触发且日志无 `HotkeyFailed`；通过
    `save_settings` 修改热键后重启应用生效。
 6. **源/目标语言切换**：在设置面板切换源语言（含 auto）与目标语言
    （zh-CN/ja/en），确认立即生效且 `get_app_status` 后状态正常；实时会话
    运行中切换应返回 `AlreadyRunning` 错误；重启应用确认配置持久化。
-7. **set_api_key 全链路**：在设置面板输入 API Key 保存，确认日志只有掩码
-   形式（`sk-****1234`）；重启应用后 Key 仍在（Credential Manager），且
-   provider 为 `"api"` 时翻译请求携带新 Key 生效；输入空串/超长 Key 确认
-   前端展示校验错误且不写入凭据。
+7. **凭据全链路**：在设置面板为 openai/deepl/google/azure 输入 API Key、
+   为 baidu 输入 APP ID + Secret 保存，确认日志只有掩码形式
+   （`sk-****1234`）；重启应用后凭据仍在（Credential Manager），翻译请求
+   携带新凭据生效；输入空串/超长值确认前端展示校验错误且不写入凭据。
 8. **get_app_config 水合**：在设置面板保存配置后修改配置文件中其它字段
    （如 OCR 语言），重启应用打开设置面板，确认显示后端真实值而非前端默认
    值；整包保存后其它字段不被覆盖。
@@ -363,11 +398,11 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
 `AppStatus` 序列化契约、语言配置更新与目标语言校验、错误映射与事件转换。
 
-`AppStatus.translation_provider` 与 `set_translation_provider` 使用不同的
-标识符域（实现 id `"api"`/`"local-onnx"` ↔ 配置 id `"api"`/`"local"`）。
-**新增翻译 Provider 时**，必须同步更新后端 `validate_translation_provider_id`
-白名单与前端 `normalizeProviderId` 映射，否则重启后前端引擎开关会错误回退
-显示为 API。
+云端 Provider 的运行时 id 与配置 id 一致（`"openai"`/`"deepl"`/
+`"google"`/`"azure"`/`"baidu"`）；仅本地不同（实现 `"local-onnx"` ↔ 配置
+`"local"`）。**新增翻译 Provider 时**，必须同步更新后端
+`validate_translation_provider_id` 白名单、凭据目标映射与前端
+`normalizeProviderId` 映射，否则重启后前端引擎开关会错误回退。
 
 ## 已知限制
 
