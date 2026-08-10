@@ -34,7 +34,7 @@ async fn read_request(socket: &mut TcpStream) -> Option<Vec<u8>> {
 }
 
 /// Write a minimal HTTP response.
-async fn write_response(socket: &mut TcpStream, status: u16, body: &str) {
+async fn write_response(socket: &mut TcpStream, status: u16, extra_headers: &str, body: &str) {
     let reason = match status {
         200 => "OK",
         401 => "Unauthorized",
@@ -42,7 +42,7 @@ async fn write_response(socket: &mut TcpStream, status: u16, body: &str) {
         _ => "Internal Server Error",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     let _ = socket.write_all(response.as_bytes()).await;
@@ -69,7 +69,7 @@ async fn spawn_server(
                 let mut queue = queue_for_server.lock().unwrap();
                 queue.pop_front().unwrap_or((500, "{}".to_string()))
             };
-            write_response(&mut socket, status, &body).await;
+            write_response(&mut socket, status, "", &body).await;
         }
     });
 
@@ -134,7 +134,7 @@ async fn success_response_returns_translation() {
         .await
         .unwrap();
     assert_eq!(result.translated_text, "こんにちは");
-    assert_eq!(result.provider_id, "api");
+    assert_eq!(result.provider_id, "openai");
     assert!(queue.lock().unwrap().is_empty());
     server.abort();
 }
@@ -252,4 +252,52 @@ async fn cancellation_returns_cancelled_when_body_stalled() {
     let error = handle.await.unwrap().unwrap_err();
     assert!(matches!(error, vtrans_core::TranslationError::Cancelled));
     server.abort();
+}
+
+#[tokio::test]
+async fn retry_after_header_is_honored() {
+    // Server returns 429 + Retry-After: 1, then 200. With a zero local
+    // backoff, the shared sender must still wait at least the Retry-After
+    // duration before retrying.
+    let (endpoint, server) = spawn_ratelimit_then_success().await;
+    let started = std::time::Instant::now();
+    let result = retry_provider(&endpoint, 1)
+        .translate(&request(), CancellationToken::new())
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(result.translated_text, "こんにちは");
+    assert!(elapsed >= Duration::from_secs(1));
+    server.abort();
+}
+
+/// Spawn a server that returns `429` with `Retry-After: 1`, then `200`.
+async fn spawn_ratelimit_then_success() -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = Arc::new(Mutex::new(0_u32));
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            if read_request(&mut socket).await.is_none() {
+                continue;
+            }
+            let is_first = {
+                let mut state = state.lock().unwrap();
+                *state += 1;
+                *state == 1
+            };
+            if is_first {
+                let headers = "Retry-After: 1\r\n";
+                write_response(&mut socket, 429, headers, "{}").await;
+            } else {
+                let body = r#"{"choices":[{"message":{"content":"こんにちは"}}]}"#;
+                write_response(&mut socket, 200, "", body).await;
+            }
+        }
+    });
+    (format!("http://{address}"), handle)
 }

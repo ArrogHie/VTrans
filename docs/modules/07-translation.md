@@ -3,7 +3,7 @@
 | 属性 | 值 |
 |------|-----|
 | Crate | `vtrans-translation` |
-| 分支 | `feat/07-translation` |
+| 分支 | `feat/07-cloud-providers` |
 | 上游依赖 | `vtrans-core`, `vtrans-models` |
 | 层级 | 2 |
 | 复杂度 | 高 |
@@ -15,13 +15,13 @@
 
 ## 公开 API
 
-实现 `vtrans_core::TranslationProvider` trait。
+实现 `vtrans_core::TranslationProvider` trait，提供 5 种云端 Provider 与本地 ONNX Provider。
 
 ```rust
-/// 通用 HTTP/JSON API 翻译器
-pub struct ApiTranslationProvider { /* ... */ }
+/// OpenAI-compatible chat completion 翻译器（id `"openai"`）
+pub struct OpenAiProvider { /* ... */ }
 
-impl ApiTranslationProvider {
+impl OpenAiProvider {
     pub fn new(
         endpoint: &str,
         model: &str,
@@ -29,6 +29,34 @@ impl ApiTranslationProvider {
         timeout: Duration,
         max_retries: u32,
     ) -> Self;
+}
+
+/// DeepL v2 翻译器（id `"deepl"`）
+pub struct DeepLProvider { /* ... */ }
+
+impl DeepLProvider {
+    pub fn new(endpoint: &str, api_key: &str, timeout: Duration, max_retries: u32) -> Self;
+}
+
+/// Google Cloud Translation v2 翻译器（id `"google"`）
+pub struct GoogleV2Provider { /* ... */ }
+
+impl GoogleV2Provider {
+    pub fn new(endpoint: &str, api_key: &str, timeout: Duration, max_retries: u32) -> Self;
+}
+
+/// Azure Translator 翻译器（id `"azure"`）
+pub struct AzureTranslatorProvider { /* ... */ }
+
+impl AzureTranslatorProvider {
+    pub fn new(endpoint: &str, region: &str, api_key: &str, timeout: Duration, max_retries: u32) -> Self;
+}
+
+/// 百度通用翻译器（id `"baidu"`）
+pub struct BaiduProvider { /* ... */ }
+
+impl BaiduProvider {
+    pub fn new(endpoint: &str, app_id: &str, secret: &str, timeout: Duration, max_retries: u32) -> Self;
 }
 
 /// 本地 ONNX 翻译器
@@ -44,7 +72,35 @@ pub fn validate_language_pair(
     target: Language,
     supported: &[(Language, Language)],
 ) -> Result<(), TranslationError>;
+
+/// 多 Provider 抽象层
+pub trait TranslationProviderAdapter {
+    fn id(&self) -> &'static str;
+    fn map_source_language(&self, language: Language) -> Option<String>;
+    fn map_target_language(&self, language: Language) -> Option<String>;
+    fn build_request(&self, request: &TranslationRequest) -> Result<OutgoingRequest, TranslationError>;
+    fn parse_response(&self, body: &str) -> Result<ParsedTranslation, TranslationError>;
+    fn map_error(&self, status: StatusCode, body: &str) -> TranslationError;
+    fn retry_decision(&self, status: StatusCode, body: &str, retry_after: Option<Duration>) -> RetryDecision;
+}
+
+/// 鉴权策略
+pub enum AuthStrategy {
+    Bearer,
+    AuthorizationScheme(&'static str),
+    Header(&'static str),
+    Query(&'static str),
+    BaiduMd5,
+}
+
+/// 解析后的多段译文中间结构
+pub struct ParsedTranslation {
+    pub segments: Vec<String>,
+    pub detected_source: Option<Language>,
+}
 ```
+
+`ApiTranslationProvider` 作为 `OpenAiProvider` 的向后兼容别名保留，运行时 id 为 `"openai"`（不再用 `"api"`）。
 
 ## 错误类型
 
@@ -82,7 +138,17 @@ crates/vtrans-translation/
 ├── README.md
 ├── src/
 │   ├── lib.rs              # re-export
-│   ├── api.rs               # ApiTranslationProvider
+│   ├── api.rs              # 兼容别名 + parse_response 兼容入口
+│   ├── adapter.rs          # TranslationProviderAdapter / 共享发送与重试
+│   ├── auth.rs             # AuthStrategy 鉴权抽象
+│   ├── providers/
+│   │   ├── mod.rs           # 5 个 Provider 汇总
+│   │   ├── openai.rs        # OpenAiProvider
+│   │   ├── deepl.rs         # DeepLProvider
+│   │   ├── google.rs        # GoogleV2Provider
+│   │   ├── azure.rs         # AzureTranslatorProvider
+│   │   ├── baidu.rs         # BaiduProvider
+│   │   └── language.rs      # 语言代码映射
 │   ├── local_onnx.rs        # LocalTranslationProvider
 │   ├── prompt.rs            # Prompt 模板构建
 │   ├── retry.rs             # 重试逻辑
@@ -102,8 +168,13 @@ crates/vtrans-translation/
 | 401 映射 | 单元 | HTTP 401 返回 Unauthorized |
 | 429 映射 | 单元 | HTTP 429 返回 RateLimited |
 | 重试逻辑 | 单元 | max_retries 次后放弃 |
+| Retry-After | 集成 | 服务器 `Retry-After` 被遵守（`sleep(max(retry_after, local_backoff))`） |
 | 取消传播 | 单元 | CancellationToken 触发后返回 Cancelled |
 | 响应解析 | 单元 | JSON 响应提取译文 |
+| 多段响应 | 单元 | DeepL/Google/Azure/百度 多段响应对齐拼接不丢段 |
+| 百度 MD5 签名 | 单元 | `MD5(appid+q+salt+secret)` 与官方示例一致 |
+| `auto` 源省略 | 单元 | DeepL/Google/Azure 在 auto 时省略源语言字段 |
+| 错误码映射 | 单元 | 各 Provider 的 HTTP/业务错误码映射（401/403/429/500/529/百度 error_code） |
 | 验证 CLI | 手动 | examples/translation_verify 对测试文本翻译 |
 
 ## 验收标准
@@ -120,13 +191,55 @@ crates/vtrans-translation/
 
 ## 开发注意事项
 
-- API Provider 使用 reqwest，默认 rustls-tls
+- 云端 Provider 使用 reqwest，默认 rustls-tls
 - 请求超时用 tokio::time::timeout 包装
 - CancellationToken 用 tokio_util::sync::CancellationToken
-- 重试使用指数退避（1s, 2s, 4s），429 不立即重试
+- 重试使用指数退避（1/2/4/8s），若 provider 给 `Retry-After` 则 `sleep(max(retry_after, local_backoff))`；限流错误按 provider 分类决定是否重试
 - Local Provider 使用 ort crate，与 OCR 共用 runtime
 - Prompt 模板：固定前缀 + 原文，明确要求"只输出译文"
 - 日志记录 provider_id、elapsed_ms、source/target（不记录完整原文和译文）
+
+## 多 Provider 架构
+
+云端翻译通过 [`TranslationProviderAdapter`] 抽象，把 Provider 差异（鉴权、请求体、响应解析、错误分类、语言映射）封装在各自适配器中。共享发送器 `send_with_adapter` 负责超时、取消、重试与 `Retry-After` 处理，不包含任何 `if provider == ...` 分支。
+
+### 鉴权
+
+`AuthStrategy` 枚举覆盖：
+
+| 策略 | 说明 | 使用方 |
+|------|------|--------|
+| `Bearer` | `Authorization: Bearer <key>` | OpenAI |
+| `AuthorizationScheme` | `DeepL-Auth-Key: <key>` | DeepL |
+| `Header` | `Ocp-Apim-Subscription-Key: <key>` | Azure |
+| `Query` | `?key=<key>` | Google v2 |
+| `BaiduMd5` | `appid + q + salt + secret` MD5 签名 | 百度（在 Provider `build_request` 内完成） |
+
+### 语言代码映射
+
+| Provider | auto | zh-CN | ja | en |
+|----------|------|-------|----|----|
+| OpenAI | prompt 层 | 语言名 | 语言名 | 语言名 |
+| DeepL | 省略 source | `ZH` | `JA` | `EN-US` |
+| Google | 省略 source | `zh-CN` | `ja` | `en` |
+| Azure | 省略 from | `zh-Hans` | `ja` | `en` |
+| 百度 | `auto` | `zh` | `jp` | `en` |
+
+### 错误分类与重试
+
+| Provider | 不重试 | 可重试 |
+|----------|--------|--------|
+| OpenAI | 401 | 429/500/503 |
+| DeepL | 403/456 | 429/500/529 |
+| Google | 401、非限流 403 | 429/500/503、限流 403（body 含 `RATE_LIMIT`/`dailyLimitExceeded`） |
+| Azure | 401/403 | 429/500/503 |
+| 百度 | 52003/54001/58001 | 54003/54005（限流） |
+
+百度业务错误由 200 响应体中的 `error_code` 判定（`52003`/`54001` 鉴权 → `Unauthorized`，`54003`/`54005` 限流 → `RateLimited`，`58001` 不支持方向 → `UnsupportedPair`）。
+
+### `ParsedTranslation` 多段拼接
+
+DeepL/Google/Azure/百度 的多段响应被解析为 `ParsedTranslation.segments`，由共享发送器以 `\n` 拼接为最终译文，保证多段不丢。`detected_source` 在 API 报告检测语言时填充。
 
 ## 本地 ONNX 接口契约
 
