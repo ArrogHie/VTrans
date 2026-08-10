@@ -15,7 +15,6 @@ import {
   getIpcErrorMessage,
   loadLocalModels,
   setOcrLanguage,
-  setSourceLanguage,
   setTargetLanguage,
   setTranslationProvider,
 } from "../services/tauri";
@@ -38,7 +37,6 @@ const OCR_LANGUAGES = [
   { value: "en", label: "英语" },
   { value: "zh-CN", label: "简体中文" },
 ] as const;
-const SOURCE_LANGUAGES = OCR_LANGUAGES;
 const TARGET_LANGUAGES = [
   { value: "zh-CN", label: "中文" },
   { value: "ja", label: "日语" },
@@ -142,15 +140,6 @@ export function MainWindow() {
     try {
       await setOcrLanguage(language);
       updateLanguage("ocr", language);
-    } catch (ipcError) {
-      setStatus({ error: getIpcErrorMessage(ipcError) });
-    }
-  };
-  const changeSourceLanguage = async (value: string) => {
-    const language = value as LanguageCode;
-    try {
-      await setSourceLanguage(language);
-      updateLanguage("source", language);
     } catch (ipcError) {
       setStatus({ error: getIpcErrorMessage(ipcError) });
     }
@@ -269,8 +258,8 @@ export function MainWindow() {
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-sm font-semibold">语言与引擎</h2>
           <div className="flex gap-2">
-            <LanguageSelector label="OCR 语言" value={config.ocr.language} options={OCR_LANGUAGES} onChange={(value) => void changeOcrLanguage(value)} />
-            <LanguageSelector label="源语言" value={config.translation.source_language} options={SOURCE_LANGUAGES} onChange={(value) => void changeSourceLanguage(value)} />
+            {/* OCR 识别语言与翻译源语言经后端联动恒相等，合并为单一选择器。 */}
+            <LanguageSelector label="识别语言" value={config.ocr.language} options={OCR_LANGUAGES} onChange={(value) => void changeOcrLanguage(value)} />
             <LanguageSelector label="目标语言" value={config.translation.target_language} options={TARGET_LANGUAGES} onChange={(value) => void changeTargetLanguage(value)} />
           </div>
           <div className="mt-4"><ProviderToggle value={config.translation.provider} onChange={(value) => void changeProvider(value)} /></div>
@@ -304,7 +293,7 @@ export function MainWindow() {
           </div>
           {modelMessage && <p className="mt-2 text-xs text-slate-500">{modelMessage}</p>}
         </section>
-        <div className="flex items-center justify-center gap-2 px-2 text-center text-xs text-slate-400"><RefreshCw size={14} />OCR 语言与翻译引擎即时保存；API 参数在设置面板保存；API Key 管理待后端支持。</div>
+        <div className="flex items-center justify-center gap-2 px-2 text-center text-xs text-slate-400"><RefreshCw size={14} />识别语言与翻译引擎即时保存；API 参数在设置面板保存；API Key 管理待后端支持。</div>
       </div>
     </main>
   );
