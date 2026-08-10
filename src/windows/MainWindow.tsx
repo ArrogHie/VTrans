@@ -29,7 +29,7 @@ import { useAppStore } from "../stores/appStore";
 import { regionPreviewBox } from "../utils/regionPreview";
 import { shouldRestoreOverlay } from "../utils/overlayVisibility";
 import { isLocalPairSupported } from "../types";
-import type { LanguageCode, Mode } from "../types";
+import type { LanguageCode, Mode, ProviderId } from "../types";
 
 const OCR_LANGUAGES = [
   { value: "auto", label: "自动检测" },
@@ -153,7 +153,7 @@ export function MainWindow() {
       setStatus({ error: getIpcErrorMessage(ipcError) });
     }
   };
-  const changeProvider = async (provider: "api" | "local") => {
+  const changeProvider = async (provider: ProviderId) => {
     try {
       await setTranslationProvider(provider);
       setProvider(provider);
@@ -265,7 +265,7 @@ export function MainWindow() {
           <div className="mt-4"><ProviderToggle value={config.translation.provider} onChange={(value) => void changeProvider(value)} /></div>
           {config.translation.provider === "local" && !isLocalPairSupported(config) && (
             <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
-              本地模型目前仅支持 en → zh-CN，且不能自动判断源语言；其它源语言请切换到云端 API。
+              本地模型目前仅支持 en → zh-CN，且不能自动判断源语言；其它源语言请切换到云端 Provider。
             </p>
           )}
         </section>
@@ -293,7 +293,7 @@ export function MainWindow() {
           </div>
           {modelMessage && <p className="mt-2 text-xs text-slate-500">{modelMessage}</p>}
         </section>
-        <div className="flex items-center justify-center gap-2 px-2 text-center text-xs text-slate-400"><RefreshCw size={14} />识别语言与翻译引擎即时保存；API 参数在设置面板保存；API Key 管理待后端支持。</div>
+        <div className="flex items-center justify-center gap-2 px-2 text-center text-xs text-slate-400"><RefreshCw size={14} />识别语言与翻译引擎即时保存；API 参数与凭据在设置面板保存（凭据仅存入系统凭据）。</div>
       </div>
     </main>
   );

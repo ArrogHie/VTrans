@@ -119,7 +119,7 @@ describe("appStore", () => {
     expect(useAppStore.getState().config.translation.provider).toBe("local");
   });
 
-  it("maps unknown provider ids back to the api default", () => {
+  it("maps unknown provider ids back to the openai default", () => {
     useAppStore.getState().applyStatus({
       mode: "single",
       pipeline_status: "idle",
@@ -130,7 +130,23 @@ describe("appStore", () => {
       model_progress: null,
       debug_mode: false,
     });
-    expect(useAppStore.getState().config.translation.provider).toBe("api");
+    expect(useAppStore.getState().config.translation.provider).toBe("openai");
+  });
+
+  it("passes cloud provider runtime ids through unchanged", () => {
+    for (const provider of ["openai", "deepl", "google", "azure", "baidu"]) {
+      useAppStore.getState().applyStatus({
+        mode: "single",
+        pipeline_status: "idle",
+        ocr_provider: "pp-ocr",
+        translation_provider: provider,
+        selected_region: null,
+        live_running: false,
+        model_progress: null,
+        debug_mode: false,
+      });
+      expect(useAppStore.getState().config.translation.provider).toBe(provider);
+    }
   });
 
   it("constructs a live config fallback for hotkey-started sessions", () => {
@@ -138,7 +154,7 @@ describe("appStore", () => {
       mode: "live",
       pipeline_status: "capturing",
       ocr_provider: "pp-ocr",
-      translation_provider: "api",
+      translation_provider: "openai",
       selected_region: region,
       live_running: true,
       model_progress: null,
@@ -159,7 +175,7 @@ describe("appStore", () => {
       mode: "live",
       pipeline_status: "capturing",
       ocr_provider: "pp-ocr",
-      translation_provider: "api",
+      translation_provider: "openai",
       selected_region: null,
       live_running: true,
       model_progress: null,
@@ -179,7 +195,7 @@ describe("appStore", () => {
       mode: "live",
       pipeline_status: "capturing",
       ocr_provider: "pp-ocr",
-      translation_provider: "api",
+      translation_provider: "openai",
       selected_region: region,
       live_running: true,
       model_progress: null,
@@ -200,7 +216,7 @@ describe("appStore", () => {
       mode: "live",
       pipeline_status: "capturing",
       ocr_provider: "pp-ocr",
-      translation_provider: "api",
+      translation_provider: "openai",
       selected_region: region,
       live_running: true,
       model_progress: null,
@@ -222,7 +238,7 @@ describe("appStore", () => {
       mode: "live",
       pipeline_status: "idle",
       ocr_provider: "pp-ocr",
-      translation_provider: "api",
+      translation_provider: "openai",
       selected_region: region,
       live_running: false,
       model_progress: null,
@@ -237,7 +253,7 @@ describe("appStore", () => {
       mode: "single",
       pipeline_status: "idle",
       ocr_provider: "pp-ocr",
-      translation_provider: "api",
+      translation_provider: "openai",
       selected_region: null,
       live_running: false,
       model_progress: null,
@@ -251,7 +267,7 @@ describe("appStore", () => {
       mode: "live",
       pipeline_status: "idle",
       ocr_provider: "pp-ocr",
-      translation_provider: "api",
+      translation_provider: "openai",
       selected_region: region,
       live_running: false,
       model_progress: null,
