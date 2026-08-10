@@ -10,7 +10,11 @@
 //! - [`CredentialManager`] is the application-facing entry point. It owns the
 //!   `VTrans:` target namespace and maps logical targets (e.g. `openai`) to
 //!   namespaced ones (`VTrans:openai`) so credentials never collide with other
-//!   applications.
+//!   applications. Cloud provider credentials use the typed
+//!   [`CredentialTarget`] enum through
+//!   [`store_for_provider`](CredentialManager::store_for_provider) and
+//!   [`load_for_provider`](CredentialManager::load_for_provider); the legacy
+//!   string-based methods remain for backward compatibility.
 //! - [`CredentialStore`] is a small trait that decouples the manager from the
 //!   concrete backend. [`WindowsCredentialStore`] is the production backend
 //!   backed by the Windows Credential Manager; [`InMemoryCredentialStore`]
@@ -21,10 +25,12 @@
 pub mod credential_store;
 pub mod manager;
 pub mod mask;
+pub mod target;
 
 pub use credential_store::{CredentialStore, InMemoryCredentialStore, WindowsCredentialStore};
 pub use manager::CredentialManager;
 pub use mask::mask_key;
+pub use target::CredentialTarget;
 
 use thiserror::Error;
 
