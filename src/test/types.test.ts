@@ -12,6 +12,10 @@ describe("frontend contracts", () => {
     expect(DEFAULT_CONFIG.translation.api_endpoint).toMatch(/^https:\/\//);
     expect(DEFAULT_CONFIG.translation.api_model).not.toHaveLength(0);
     expect(DEFAULT_CONFIG.translation.max_retries).toBe(3);
+    expect(DEFAULT_CONFIG.translation.provider).toBe("openai");
+    expect(DEFAULT_CONFIG.translation.region).toBeNull();
+    expect(DEFAULT_CONFIG.translation.app_id).toBeNull();
+    expect(DEFAULT_CONFIG.translation.quality).toBe("fast");
     expect(DEFAULT_CONFIG.hotkeys.live_translate).toBe("Alt+Shift+R");
   });
 
@@ -28,10 +32,10 @@ describe("frontend contracts", () => {
   });
 
   it("matches the backend config schema version", () => {
-    // 与 vtrans-config 的 CURRENT_CONFIG_VERSION（3）保持一致：任何
+    // 与 vtrans-config 的 CURRENT_CONFIG_VERSION（5）保持一致：任何
     // “未水合即保存”路径都必须携带后端接受的版本，否则 save_settings
     // 会被校验拒绝。
-    expect(DEFAULT_CONFIG.version).toBe(3);
+    expect(DEFAULT_CONFIG.version).toBe(5);
   });
 
   it("matches the model verification report shape", () => {
@@ -58,20 +62,32 @@ describe("normalizeProviderId", () => {
     expect(normalizeProviderId("local-onnx")).toBe("local");
   });
 
-  it("keeps the api runtime id unchanged", () => {
-    expect(normalizeProviderId("api")).toBe("api");
+  it("passes every cloud provider runtime id through unchanged", () => {
+    expect(normalizeProviderId("openai")).toBe("openai");
+    expect(normalizeProviderId("deepl")).toBe("deepl");
+    expect(normalizeProviderId("google")).toBe("google");
+    expect(normalizeProviderId("azure")).toBe("azure");
+    expect(normalizeProviderId("baidu")).toBe("baidu");
   });
 
-  it("falls back to api for unknown runtime ids", () => {
-    expect(normalizeProviderId("unknown-provider")).toBe("api");
+  it("falls back to the openai default for unknown runtime ids", () => {
+    expect(normalizeProviderId("unknown-provider")).toBe("openai");
+    expect(normalizeProviderId("api")).toBe("openai");
+    expect(normalizeProviderId("")).toBe("openai");
   });
 });
 
 describe("isLocalPairSupported", () => {
-  it("allows any pair on the api provider", () => {
+  it("allows any pair on cloud providers", () => {
     const config = structuredClone(DEFAULT_CONFIG);
     config.translation.source_language = "ja";
     expect(isLocalPairSupported(config)).toBe(true);
+
+    for (const provider of ["openai", "deepl", "google", "azure", "baidu"] as const) {
+      config.translation.provider = provider;
+      config.translation.source_language = "ja";
+      expect(isLocalPairSupported(config)).toBe(true);
+    }
   });
 
   it("allows en -> zh-CN on the local provider", () => {

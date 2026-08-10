@@ -146,6 +146,32 @@ export function setApiKey(apiKey: string): Promise<void> {
   return call<void>("set_api_key", { apiKey });
 }
 
+/** Credential fields accepted by `set_provider_credentials`. */
+export interface ProviderCredentials {
+  apiKey?: string;
+  appId?: string;
+  secret?: string;
+}
+
+/**
+ * Stores the complete credential set of one cloud translation provider.
+ *
+ * OpenAI/DeepL/Google/Azure use `apiKey`; Baidu requires both `appId` and
+ * `secret` (two independent vault targets). Only the provided fields are
+ * sent, so the wire payload matches the backend contract
+ * `{ providerId, apiKey?, appId?, secret? }` (Tauri 2 camelCase mapping).
+ */
+export function setProviderCredentials(
+  providerId: AppConfig["translation"]["provider"],
+  credentials: ProviderCredentials,
+): Promise<void> {
+  const args: Record<string, string> = { providerId };
+  if (credentials.apiKey !== undefined) args.apiKey = credentials.apiKey;
+  if (credentials.appId !== undefined) args.appId = credentials.appId;
+  if (credentials.secret !== undefined) args.secret = credentials.secret;
+  return call<void>("set_provider_credentials", args);
+}
+
 /** Returns the complete persisted application configuration. */
 export function getAppConfig(): Promise<AppConfig> {
   return call<AppConfig>("get_app_config");

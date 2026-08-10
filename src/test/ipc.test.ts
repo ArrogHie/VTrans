@@ -9,6 +9,7 @@ const {
   getAppConfig,
   setApiKey,
   setOcrLanguage,
+  setProviderCredentials,
   setTranslationProvider,
   setSourceLanguage,
   setTargetLanguage,
@@ -81,6 +82,30 @@ describe("tauri IPC service", () => {
     await setApiKey("sk-test-1234");
     // 后端参数名为 `api_key`，Tauri 2 默认映射为 camelCase `apiKey`。
     expect(invoke).toHaveBeenCalledWith("set_api_key", { apiKey: "sk-test-1234" });
+  });
+
+  it("passes provider credentials with only the provided fields", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setProviderCredentials("openai", { apiKey: "sk-test-1234" });
+    // 后端参数为 `provider_id` / `api_key` / `app_id` / `secret`，Tauri 2
+    // 默认映射为 camelCase；未提供的可选字段不出现在载荷中。
+    expect(invoke).toHaveBeenCalledWith("set_provider_credentials", {
+      providerId: "openai",
+      apiKey: "sk-test-1234",
+    });
+  });
+
+  it("passes the baidu app id and secret as two credential fields", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setProviderCredentials("baidu", {
+      appId: "2026081000000000",
+      secret: "sk-secret",
+    });
+    expect(invoke).toHaveBeenCalledWith("set_provider_credentials", {
+      providerId: "baidu",
+      appId: "2026081000000000",
+      secret: "sk-secret",
+    });
   });
 
   it("requests the full application configuration without arguments", async () => {
