@@ -14,7 +14,7 @@ use vtrans_core::Language;
 ///
 /// Bump this constant when the schema changes and add a corresponding
 /// migration step in [`crate::migration`].
-pub const CURRENT_CONFIG_VERSION: u32 = 4;
+pub const CURRENT_CONFIG_VERSION: u32 = 5;
 
 /// Root application configuration.
 ///
@@ -100,9 +100,22 @@ pub struct OcrConfig {
 /// Translation engine settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranslationConfig {
-    /// Provider identifier: `"api"` or `"local"`.
+    /// Provider identifier: `"openai"`, `"deepl"`, `"google"`, `"azure"`,
+    /// `"baidu"`, or `"local"`.
     #[serde(default = "crate::defaults::default_provider")]
     pub provider: String,
+
+    /// Azure Translator region (e.g. `"eastasia"`), used only by the
+    /// `"azure"` provider. Not sensitive; `None` means the provider omits
+    /// the region header.
+    #[serde(default = "crate::defaults::default_region")]
+    pub region: Option<String>,
+
+    /// Baidu Translate APP ID, used only by the `"baidu"` provider. Not
+    /// sensitive (the matching Secret lives in the credential store, see
+    /// `vtrans-security`); `None` means the provider cannot authenticate.
+    #[serde(default = "crate::defaults::default_app_id")]
+    pub app_id: Option<String>,
 
     /// Translation quality preset: `"fast"` or `"balanced"`. Defaults to
     /// `"fast"`. The value is consumed by the local translation provider
@@ -122,11 +135,13 @@ pub struct TranslationConfig {
     #[serde(default = "crate::defaults::default_timeout_seconds")]
     pub timeout_seconds: u32,
 
-    /// Chat-completions endpoint used by the `"api"` provider.
+    /// HTTP(S) endpoint used by the remote providers (`"openai"`,
+    /// `"deepl"`, `"google"`, `"azure"`, `"baidu"`).
     #[serde(default = "crate::defaults::default_api_endpoint")]
     pub api_endpoint: String,
 
-    /// Model identifier used by the `"api"` provider.
+    /// Model identifier used by the `"openai"` provider; optional for
+    /// `"deepl"` / `"google"` and ignored by `"azure"` / `"baidu"`.
     #[serde(default = "crate::defaults::default_api_model")]
     pub api_model: String,
 
@@ -198,7 +213,7 @@ mod tests {
 
     #[test]
     fn missing_sections_are_filled_with_defaults() {
-        let json = r#"{"version":4}"#;
+        let json = r#"{"version":5}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config, AppConfig::default());
     }
@@ -212,14 +227,14 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_ignored() {
-        let json = r#"{"version":4,"unknown_field":123}"#;
+        let json = r#"{"version":5,"unknown_field":123}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config, AppConfig::default());
     }
 
     #[test]
     fn partial_section_keeps_present_fields() {
-        let json = r#"{"capture":{"interval_ms":1000},"version":4}"#;
+        let json = r#"{"capture":{"interval_ms":1000},"version":5}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.capture.interval_ms, 1000);
         assert!((config.capture.difference_threshold - 0.03).abs() < f32::EPSILON);
@@ -242,7 +257,7 @@ mod tests {
 
     #[test]
     fn invalid_language_code_is_rejected() {
-        let json = r#"{"ocr":{"language":"klingon"},"version":4}"#;
+        let json = r#"{"ocr":{"language":"klingon"},"version":5}"#;
         assert!(serde_json::from_str::<AppConfig>(json).is_err());
     }
 
@@ -262,20 +277,22 @@ mod tests {
         let json = r#"{
             "capture": {"difference_threshold": 0.5},
             "translation": {"target_language": "en"},
-            "version": 4
+            "version": 5
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.capture.interval_ms, 500);
         assert!((config.capture.difference_threshold - 0.5).abs() < f32::EPSILON);
         assert_eq!(config.translation.target_language, Language::English);
         assert_eq!(config.translation.quality, "fast");
-        assert_eq!(config.translation.provider, "api");
+        assert_eq!(config.translation.provider, "openai");
+        assert_eq!(config.translation.region, None);
+        assert_eq!(config.translation.app_id, None);
         assert_eq!(config.hotkeys.select_and_translate, "Alt+Shift+A");
     }
 
     #[test]
     fn translation_quality_defaults_to_fast() {
-        let json = r#"{"version":4,"translation":{"provider":"local"}}"#;
+        let json = r#"{"version":5,"translation":{"provider":"local"}}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.translation.quality, "fast");
     }
@@ -293,6 +310,32 @@ mod tests {
         assert!(json.contains(r#""quality":"balanced""#));
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.translation.quality, "balanced");
+    }
+
+    #[test]
+    fn region_and_app_id_default_to_none() {
+        let json = r#"{"version":5}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.translation.region, None);
+        assert_eq!(config.translation.app_id, None);
+    }
+
+    #[test]
+    fn region_and_app_id_round_trip() {
+        let config = AppConfig {
+            translation: TranslationConfig {
+                region: Some("eastasia".to_string()),
+                app_id: Some("2026081000000000".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains(r#""region":"eastasia""#));
+        assert!(json.contains(r#""app_id":"2026081000000000""#));
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.translation.region.as_deref(), Some("eastasia"));
+        assert_eq!(back.translation.app_id.as_deref(), Some("2026081000000000"));
     }
 
     #[test]
@@ -330,7 +373,7 @@ mod tests {
 
     #[test]
     fn missing_result_window_fields_are_filled_with_defaults() {
-        let json = r#"{"result_window":{"always_on_top":false},"version":4}"#;
+        let json = r#"{"result_window":{"always_on_top":false},"version":5}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(!config.result_window.always_on_top);
         assert!((config.result_window.opacity - 0.95).abs() < f64::EPSILON);
@@ -340,7 +383,7 @@ mod tests {
 
     #[test]
     fn missing_floating_ball_fields_are_filled_with_defaults() {
-        let json = r#"{"floating_ball":{"enabled":true},"version":4}"#;
+        let json = r#"{"floating_ball":{"enabled":true},"version":5}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(config.floating_ball.enabled);
         assert!((config.floating_ball.opacity - 1.0).abs() < f64::EPSILON);
