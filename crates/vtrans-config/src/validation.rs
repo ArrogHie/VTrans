@@ -12,7 +12,11 @@ use crate::ConfigError;
 const LOG_LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error", "off"];
 
 /// Allowed translation provider identifiers.
-const TRANSLATION_PROVIDERS: &[&str] = &["api", "local"];
+const TRANSLATION_PROVIDERS: &[&str] = &["openai", "deepl", "google", "azure", "baidu", "local"];
+
+/// Providers that call a remote HTTP(S) API and therefore require a valid
+/// `api_endpoint`.
+const REMOTE_TRANSLATION_PROVIDERS: &[&str] = &["openai", "deepl", "google", "azure", "baidu"];
 
 /// Allowed translation quality presets.
 const TRANSLATION_QUALITIES: &[&str] = &["fast", "balanced"];
@@ -125,19 +129,49 @@ impl AppConfig {
             )));
         }
 
-        // Endpoint and model only matter for the remote "api" provider.
-        if provider == "api" {
+        // Every remote provider needs an HTTP(S) endpoint; the local
+        // provider ignores all of endpoint/model/region/app_id.
+        if REMOTE_TRANSLATION_PROVIDERS.contains(&provider) {
             let endpoint = &self.translation.api_endpoint;
             if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
                 return Err(ConfigError::Validation(format!(
                     "translation.api_endpoint must start with http:// or https://, got {endpoint:?}"
                 )));
             }
-            if self.translation.api_model.trim().is_empty() {
-                return Err(ConfigError::Validation(
-                    "translation.api_model must not be empty".to_string(),
-                ));
+        }
+
+        // Only OpenAI requires a model id; DeepL and Google treat it as
+        // optional and Azure/Baidu ignore it entirely.
+        if provider == "openai" && self.translation.api_model.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "translation.api_model must not be empty when provider is \"openai\"".to_string(),
+            ));
+        }
+
+        // Azure region: optional, but a present value must be non-empty.
+        // Other providers ignore the field entirely.
+        if provider == "azure" {
+            if let Some(region) = &self.translation.region {
+                if region.trim().is_empty() {
+                    return Err(ConfigError::Validation(
+                        "translation.region must not be empty when present".to_string(),
+                    ));
+                }
             }
+        }
+
+        // Baidu authenticates with APP ID + Secret; the APP ID lives in the
+        // config (non-sensitive) and is required for the "baidu" provider.
+        if provider == "baidu"
+            && self
+                .translation
+                .app_id
+                .as_deref()
+                .map_or(true, |app_id| app_id.trim().is_empty())
+        {
+            return Err(ConfigError::Validation(
+                "translation.app_id must not be empty when provider is \"baidu\"".to_string(),
+            ));
         }
         Ok(())
     }
@@ -354,6 +388,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_whitelist_accepts_known_providers() {
+        for provider in ["openai", "deepl", "google", "azure", "baidu", "local"] {
+            let config = config_with(|c| {
+                c.translation.provider = provider.to_string();
+                // "baidu" also needs an app_id; other providers validate as-is.
+                if provider == "baidu" {
+                    c.translation.app_id = Some("2026081000000000".to_string());
+                }
+            });
+            assert!(
+                config.validate().is_ok(),
+                "provider {provider:?} must validate"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_api_provider_is_rejected() {
+        // "api" is no longer a valid config-domain id; v4 files are renamed
+        // to "openai" by migration before validation sees them.
+        let config = config_with(|c| c.translation.provider = "api".to_string());
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation(ref msg)) if msg.contains("translation.provider")
+        ));
+    }
+
+    #[test]
     fn quality_fast_and_balanced_are_accepted() {
         assert!(config_with(|c| c.translation.quality = "fast".to_string())
             .validate()
@@ -449,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn api_provider_requires_http_endpoint() {
+    fn openai_provider_requires_http_endpoint() {
         let config = config_with(|c| c.translation.api_endpoint = "ftp://example.com".to_string());
         assert!(matches!(
             config.validate(),
@@ -458,12 +520,16 @@ mod tests {
     }
 
     #[test]
-    fn api_provider_requires_model_name() {
+    fn openai_provider_requires_model_name() {
         let config = config_with(|c| c.translation.api_model = "  ".to_string());
-        assert!(matches!(
-            config.validate(),
-            Err(ConfigError::Validation(ref msg)) if msg.contains("api_model")
-        ));
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => {
+                assert!(msg.contains("api_model"), "message: {msg}");
+                assert!(msg.contains("openai"), "message: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
     }
 
     #[test]
@@ -472,6 +538,80 @@ mod tests {
             c.translation.provider = "local".to_string();
             c.translation.api_endpoint = String::new();
             c.translation.api_model = String::new();
+            c.translation.region = Some("  ".to_string());
+            c.translation.app_id = None;
+        });
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn deepl_and_google_allow_empty_model() {
+        for provider in ["deepl", "google"] {
+            let config = config_with(|c| {
+                c.translation.provider = provider.to_string();
+                c.translation.api_model = String::new();
+            });
+            assert!(
+                config.validate().is_ok(),
+                "provider {provider:?} with empty model must validate"
+            );
+        }
+    }
+
+    #[test]
+    fn azure_ignores_model_and_accepts_optional_region() {
+        let config = config_with(|c| {
+            c.translation.provider = "azure".to_string();
+            c.translation.api_model = String::new();
+            c.translation.region = Some("eastasia".to_string());
+        });
+        assert!(config.validate().is_ok());
+
+        let config = config_with(|c| {
+            c.translation.provider = "azure".to_string();
+            c.translation.api_model = String::new();
+            c.translation.region = None;
+        });
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn empty_region_is_rejected_when_present() {
+        let config = config_with(|c| {
+            c.translation.provider = "azure".to_string();
+            c.translation.region = Some("   ".to_string());
+        });
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => assert!(msg.contains("translation.region")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn baidu_requires_app_id() {
+        let config = config_with(|c| c.translation.provider = "baidu".to_string());
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => {
+                assert!(msg.contains("translation.app_id"), "message: {msg}");
+                assert!(msg.contains("baidu"), "message: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+
+        let config = config_with(|c| {
+            c.translation.provider = "baidu".to_string();
+            c.translation.app_id = Some("   ".to_string());
+        });
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Validation(ref msg)) if msg.contains("translation.app_id")
+        ));
+
+        let config = config_with(|c| {
+            c.translation.provider = "baidu".to_string();
+            c.translation.app_id = Some("2026081000000000".to_string());
         });
         assert!(config.validate().is_ok());
     }
@@ -505,7 +645,7 @@ mod tests {
 
     #[test]
     fn invalid_version_is_rejected() {
-        let config = config_with(|c| c.version = 5);
+        let config = config_with(|c| c.version = 6);
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Validation(ref msg)) if msg.contains("version")

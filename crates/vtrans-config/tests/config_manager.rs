@@ -56,6 +56,8 @@ fn save_and_load_round_trip_preserves_all_sections() {
     config.translation.provider = "local".to_string();
     config.translation.source_language = Language::Japanese;
     config.translation.target_language = Language::English;
+    config.translation.region = Some("eastasia".to_string());
+    config.translation.app_id = Some("2026081000000000".to_string());
     config.translation.timeout_seconds = 45;
     config.result_window.always_on_top = false;
     config.result_window.opacity = 0.8;
@@ -103,7 +105,7 @@ fn update_on_missing_file_returns_not_found() {
 #[test]
 fn invalid_range_is_rejected_on_load() {
     let dir = tempdir().unwrap();
-    write_config(dir.path(), r#"{"capture":{"interval_ms":10},"version":4}"#);
+    write_config(dir.path(), r#"{"capture":{"interval_ms":10},"version":5}"#);
     let manager = ConfigManager::new(dir.path()).unwrap();
 
     let err = manager.load().unwrap_err();
@@ -182,9 +184,9 @@ fn update_migrates_v0_file_before_applying_mutation() {
 #[test]
 fn load_does_not_rewrite_current_version_file() {
     let dir = tempdir().unwrap();
-    // Compact v4 JSON: loading must not touch the file when it is already
+    // Compact v5 JSON: loading must not touch the file when it is already
     // at the current version (no pretty-printing, no field expansion).
-    let raw = r#"{"version":4,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
+    let raw = r#"{"version":5,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
     write_config(dir.path(), raw);
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -233,7 +235,7 @@ fn invalid_opacity_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":4,"result_window":{"opacity":0.2}}"#,
+        r#"{"version":5,"result_window":{"opacity":0.2}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -249,7 +251,7 @@ fn invalid_font_size_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":4,"result_window":{"font_size_px":30}}"#,
+        r#"{"version":5,"result_window":{"font_size_px":30}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -308,7 +310,7 @@ fn invalid_floating_ball_opacity_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":4,"floating_ball":{"opacity":0.2}}"#,
+        r#"{"version":5,"floating_ball":{"opacity":0.2}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -324,7 +326,7 @@ fn invalid_floating_ball_size_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":4,"floating_ball":{"size_px":80}}"#,
+        r#"{"version":5,"floating_ball":{"size_px":80}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -365,11 +367,99 @@ fn v3_config_with_inconsistent_languages_is_migrated_and_persisted() {
 }
 
 #[test]
+fn v4_config_with_api_provider_is_migrated_and_persisted() {
+    let dir = tempdir().unwrap();
+    let fixture = fs::read_to_string(Path::new(FIXTURES_DIR).join("config_v4.json")).unwrap();
+    write_config(dir.path(), &fixture);
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let config = manager.load().unwrap();
+
+    // The legacy "api" id is renamed to "openai"; quality and language
+    // linkage survive; the new fields default to None.
+    assert_eq!(config.translation.provider, "openai");
+    assert_eq!(config.translation.quality, "balanced");
+    assert_eq!(config.translation.region, None);
+    assert_eq!(config.translation.app_id, None);
+    assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+
+    // The migration result is persisted.
+    let persisted = read_raw(dir.path());
+    assert_eq!(
+        persisted["version"].as_u64(),
+        Some(u64::from(CURRENT_CONFIG_VERSION))
+    );
+    assert_eq!(
+        persisted["translation"]["provider"].as_str(),
+        Some("openai")
+    );
+}
+
+#[test]
+fn cloud_provider_config_round_trips_through_manager() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let mut config = AppConfig::default();
+    config.translation.provider = "azure".to_string();
+    config.translation.region = Some("eastasia".to_string());
+    config.translation.api_model = String::new();
+    manager.save(&config).unwrap();
+
+    let loaded = manager.load().unwrap();
+    assert_eq!(loaded.translation.provider, "azure");
+    assert_eq!(loaded.translation.region.as_deref(), Some("eastasia"));
+    assert!(loaded.translation.api_model.is_empty());
+}
+
+#[test]
+fn baidu_provider_without_app_id_is_rejected_on_save() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let mut config = AppConfig::default();
+    config.translation.provider = "baidu".to_string();
+    let err = manager.save(&config).unwrap_err();
+    match err {
+        ConfigError::Validation(msg) => assert!(msg.contains("translation.app_id")),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert!(!manager.config_path().exists());
+}
+
+#[test]
+fn legacy_api_provider_is_rejected_at_current_version() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let mut config = AppConfig::default();
+    config.translation.provider = "api".to_string();
+    let err = manager.save(&config).unwrap_err();
+    match err {
+        ConfigError::Validation(msg) => assert!(msg.contains("translation.provider")),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[test]
+fn deepl_provider_with_empty_model_is_accepted() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let mut config = AppConfig::default();
+    config.translation.provider = "deepl".to_string();
+    config.translation.api_model = String::new();
+    manager.save(&config).unwrap();
+
+    assert!(manager.load().unwrap().translation.api_model.is_empty());
+}
+
+#[test]
 fn mismatched_languages_at_current_version_are_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":4,"ocr":{"language":"ja"},"translation":{"source_language":"en"}}"#,
+        r#"{"version":5,"ocr":{"language":"ja"},"translation":{"source_language":"en"}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
