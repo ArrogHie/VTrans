@@ -77,6 +77,12 @@ describe("tauri IPC service", () => {
     expect(invoke).toHaveBeenCalledWith("set_translation_provider", { providerId: "local" });
   });
 
+  it("passes cloud provider ids under the same Tauri camelCase argument name", async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    await setTranslationProvider("deepl");
+    expect(invoke).toHaveBeenCalledWith("set_translation_provider", { providerId: "deepl" });
+  });
+
   it("passes the API key under the Tauri camelCase argument name", async () => {
     invoke.mockResolvedValueOnce(undefined);
     await setApiKey("sk-test-1234");

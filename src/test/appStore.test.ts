@@ -11,6 +11,7 @@ beforeEach(() => {
     selectedRegion: null,
     error: null,
     modelProgress: null,
+    providerSwitching: false,
     config: structuredClone(DEFAULT_CONFIG),
     hydrated: false,
     liveConfig: null,
@@ -105,6 +106,25 @@ describe("appStore", () => {
     expect(useAppStore.getState().error).toBe("后端不可用");
     expect(useAppStore.getState().status).toEqual({ error: "后端不可用" });
   });
+
+  it("tracks provider switching state for busy UI feedback", () => {
+    expect(useAppStore.getState().providerSwitching).toBe(false);
+    useAppStore.getState().setProviderSwitching(true);
+    expect(useAppStore.getState().providerSwitching).toBe(true);
+    useAppStore.getState().setProviderSwitching(false);
+    expect(useAppStore.getState().providerSwitching).toBe(false);
+  });
+
+  it("stores model loading progress driven by backend events", () => {
+    useAppStore.getState().setModelProgress(0.35);
+    expect(useAppStore.getState().modelProgress).toBe(0.35);
+    useAppStore.getState().setModelProgress(1);
+    expect(useAppStore.getState().modelProgress).toBe(1);
+    // 切换完成/失败后清空，避免下次切换闪烁旧百分比。
+    useAppStore.getState().setModelProgress(null);
+    expect(useAppStore.getState().modelProgress).toBeNull();
+  });
+
   it("hydrates the selected translation provider from backend status", () => {
     useAppStore.getState().applyStatus({
       mode: "single",
