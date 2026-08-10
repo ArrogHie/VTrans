@@ -1,6 +1,7 @@
 //! Tauri command handlers for the `VTrans` frontend.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -18,7 +19,9 @@ use crate::overlay::{
     OverlayIntent, StopKind,
 };
 use crate::state::AppStatus;
-use crate::state::{store_api_key, AppState};
+use crate::state::{
+    store_api_key, store_provider_credentials, validate_translation_provider_id, AppState,
+};
 
 /// Input accepted by `start_live_translation`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -658,13 +661,18 @@ fn apply_floating_ball_appearance(config: &mut AppConfig, opacity: f64, size_px:
     config.floating_ball.size_px = size_px;
 }
 
-/// Stores the translation API key in the OS credential vault.
+/// Stores an API key for the **currently configured** translation provider
+/// in the OS credential vault.
 ///
-/// The key is written to the Windows Credential Manager through
-/// `CredentialManager` and never enters `config.json`, the frontend store,
-/// or any log. When the configured provider is `"api"`, the running API
-/// provider is rebuilt with the new key immediately so the change applies
-/// without a restart.
+/// The key is written to the provider-specific credential target (`openai`,
+/// `deepl`, `google`, `azure`, or `baidu_secret` for Baidu) and never
+/// enters `config.json`, the frontend store, or any log. When the provider
+/// is credential-backed, the running provider is rebuilt with the new key
+/// immediately so the change applies without a restart. The `local`
+/// provider does not accept credentials and is rejected.
+///
+/// For Baidu, this command stores only the secret key; use
+/// [`set_provider_credentials`] to set both the APP ID and the secret.
 ///
 /// The frontend passes the key as `{ apiKey }` (Tauri 2 maps the Rust
 /// `api_key` parameter to camelCase by default).
@@ -673,7 +681,8 @@ fn apply_floating_ball_appearance(config: &mut AppConfig, opacity: f64, size_px:
 ///
 /// Returns an application error when the key is empty after trimming, exceeds
 /// [`MAX_API_KEY_LEN`] characters, the credential vault write fails, a live
-/// task is running, or the API provider cannot be rebuilt.
+/// task is running, the configured provider does not accept credentials, or
+/// the provider cannot be rebuilt.
 #[tauri::command]
 #[tracing::instrument(skip(state, api_key))]
 pub async fn set_api_key(api_key: String, state: State<'_, AppState>) -> Result<(), AppError> {
@@ -682,21 +691,92 @@ pub async fn set_api_key(api_key: String, state: State<'_, AppState>) -> Result<
         return Err(PipelineError::AlreadyRunning.into());
     }
     let api_key = validate_api_key(&api_key)?;
+    let config = state.load_config()?;
+    let provider_id = config.translation.provider.clone();
     let masked_key = vtrans_core::mask_sensitive(&api_key);
-    let credentials = std::sync::Arc::clone(&state.credentials);
-    tokio::task::spawn_blocking(move || store_api_key(&credentials, &api_key))
+    let credentials = Arc::clone(&state.credentials);
+    let store_provider_id = provider_id.clone();
+    tokio::task::spawn_blocking(move || store_api_key(&credentials, &store_provider_id, &api_key))
         .await
-        .map_err(|error| AppError::Tauri(format!("api key store task failed: {error}")))??;
+        .map_err(|error| AppError::Tauri(format!("credential store task failed: {error}")))??;
+
+    let provider = state.prepare_translation_provider(config).await?;
+    state.replace_translation_provider(provider);
+    tracing::info!(
+        provider = provider_id,
+        masked_key = %masked_key,
+        "translation credential updated"
+    );
+    Ok(())
+}
+
+/// Stores the complete credential set for a cloud translation provider in
+/// the OS credential vault.
+///
+/// OpenAI/DeepL/Google/Azure accept `api_key`; Baidu requires both `app_id`
+/// and `secret` (stored under the independent `baidu_app_id` /
+/// `baidu_secret` targets). The `local` provider does not accept
+/// credentials. When the stored provider matches the currently configured
+/// provider, the running provider is rebuilt immediately so the change
+/// applies without a restart.
+///
+/// The frontend passes the arguments as `{ providerId, apiKey, appId,
+/// secret }` (Tauri 2 maps Rust `snake_case` parameters to camelCase by
+/// default).
+///
+/// # Errors
+///
+/// Returns an application error when the provider id is unsupported, a
+/// required credential value is missing or invalid, a live task is running,
+/// the vault write fails, or the provider cannot be rebuilt.
+#[tauri::command]
+#[tracing::instrument(skip(state, api_key, app_id, secret), fields(provider_id))]
+pub async fn set_provider_credentials(
+    provider_id: String,
+    api_key: Option<String>,
+    app_id: Option<String>,
+    secret: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let _lifecycle = state.live_lifecycle.lock().await;
+    if state.live_task_is_running().await {
+        return Err(PipelineError::AlreadyRunning.into());
+    }
+    validate_translation_provider_id(&provider_id)?;
+    if provider_id == "local" {
+        return Err(AppError::ProviderCredential(format!(
+            "provider {provider_id:?} does not accept credentials"
+        )));
+    }
+    let api_key = api_key
+        .map(|value| validate_credential_value(&value, "api key"))
+        .transpose()?;
+    let app_id = app_id
+        .map(|value| validate_credential_value(&value, "app id"))
+        .transpose()?;
+    let secret = secret
+        .map(|value| validate_credential_value(&value, "secret"))
+        .transpose()?;
+    let credentials = Arc::clone(&state.credentials);
+    let store_provider_id = provider_id.clone();
+    tokio::task::spawn_blocking(move || {
+        store_provider_credentials(
+            &credentials,
+            &store_provider_id,
+            api_key.as_deref(),
+            app_id.as_deref(),
+            secret.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| AppError::Tauri(format!("credential store task failed: {error}")))??;
 
     let config = state.load_config()?;
-    if config.translation.provider == "api" {
+    if config.translation.provider == provider_id {
         let provider = state.prepare_translation_provider(config).await?;
         state.replace_translation_provider(provider);
     }
-    tracing::info!(
-        masked_key = %masked_key,
-        "translation API key updated"
-    );
+    tracing::info!(provider = provider_id, "provider credentials updated");
     Ok(())
 }
 
@@ -718,6 +798,31 @@ fn validate_api_key(api_key: &str) -> Result<String, AppError> {
     if trimmed.chars().count() > MAX_API_KEY_LEN {
         return Err(AppError::InvalidApiKey(format!(
             "key exceeds {MAX_API_KEY_LEN} characters"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Validates and normalizes a provider credential value (APP ID or secret)
+/// before storage.
+///
+/// Kept as a pure function so the validation performed by
+/// [`set_provider_credentials`] is unit-testable without a Tauri runtime.
+///
+/// # Errors
+///
+/// Returns `AppError::ProviderCredential` when the value is empty after
+/// trimming or exceeds [`MAX_API_KEY_LEN`] characters.
+fn validate_credential_value(value: &str, label: &str) -> Result<String, AppError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::ProviderCredential(format!(
+            "{label} must not be empty"
+        )));
+    }
+    if trimmed.chars().count() > MAX_API_KEY_LEN {
+        return Err(AppError::ProviderCredential(format!(
+            "{label} exceeds {MAX_API_KEY_LEN} characters"
         )));
     }
     Ok(trimmed.to_string())
@@ -769,6 +874,7 @@ pub fn invoke_handler<R: tauri::Runtime>(
         update_result_window_appearance,
         update_floating_ball_appearance,
         set_api_key,
+        set_provider_credentials,
         get_app_config,
         get_app_status,
     ]
@@ -1059,6 +1165,23 @@ mod tests {
     fn api_key_validation_rejects_oversized_keys() {
         let error = validate_api_key(&"a".repeat(MAX_API_KEY_LEN + 1)).unwrap_err();
         assert!(matches!(error, AppError::InvalidApiKey(_)));
+    }
+
+    #[test]
+    fn credential_value_validation_trims_and_accepts_normal_values() {
+        assert_eq!(
+            validate_credential_value("  app-2024  ", "app id").unwrap(),
+            "app-2024"
+        );
+    }
+
+    #[test]
+    fn credential_value_validation_rejects_empty_and_oversized_values() {
+        let error = validate_credential_value("   ", "app id").unwrap_err();
+        assert!(matches!(error, AppError::ProviderCredential(_)));
+        let error =
+            validate_credential_value(&"s".repeat(MAX_API_KEY_LEN + 1), "secret").unwrap_err();
+        assert!(matches!(error, AppError::ProviderCredential(_)));
     }
 
     fn ocr_result(text: &str) -> OcrResult {

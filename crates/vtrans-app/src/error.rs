@@ -60,6 +60,11 @@ pub enum AppError {
     #[error("invalid api key: {0}")]
     InvalidApiKey(String),
 
+    /// A provider credential could not be validated, stored, or matched to
+    /// a credential target.
+    #[error("provider credential error: {0}")]
+    ProviderCredential(String),
+
     /// A Tauri operation failed.
     #[error("tauri error: {0}")]
     Tauri(String),
@@ -154,6 +159,11 @@ mod tests {
         assert!(AppError::InvalidApiKey("key must not be empty".into())
             .to_string()
             .contains("invalid api key"));
+        assert!(
+            AppError::ProviderCredential("baidu needs two credentials".into())
+                .to_string()
+                .contains("provider credential error")
+        );
         assert!(AppError::Tauri("boom".into())
             .to_string()
             .contains("tauri error"));

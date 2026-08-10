@@ -14,6 +14,7 @@ use vtrans_pipeline::PipelineError;
 // attributes). The frontend therefore sends:
 //
 //   set_api_key               -> { apiKey }
+//   set_provider_credentials  -> { providerId, apiKey?, appId?, secret? }
 //   set_translation_provider  -> { providerId }
 //   set_source_language       -> { language }
 //   set_target_language       -> { language }
@@ -82,7 +83,7 @@ fn public_ipc_contracts_round_trip_through_json() {
         mode: PipelineMode::SingleCapture,
         pipeline_status: PipelineStatus::Idle,
         ocr_provider: "pp-ocr".to_string(),
-        translation_provider: "api".to_string(),
+        translation_provider: "openai".to_string(),
         selected_region: Some(decoded.region),
         live_running: false,
         model_progress: None,
@@ -91,6 +92,41 @@ fn public_ipc_contracts_round_trip_through_json() {
     let json = serde_json::to_string(&status).unwrap();
     assert!(json.contains("pp-ocr"));
     assert!(json.contains(r#""mode":"single""#));
+    assert!(json.contains(r#""translation_provider":"openai""#));
+}
+
+/// Mirrors the wire shape of `set_provider_credentials` arguments.
+///
+/// Tauri 2 maps the Rust `provider_id` / `api_key` / `app_id` parameters to
+/// camelCase by default, so the frontend must send `{ providerId, apiKey,
+/// appId, secret }` with only the fields required by the provider.
+#[derive(serde::Deserialize)]
+struct ProviderCredentialsArgs {
+    #[serde(rename = "providerId")]
+    provider_id: String,
+    #[serde(rename = "apiKey")]
+    api_key: Option<String>,
+    #[serde(rename = "appId")]
+    app_id: Option<String>,
+    secret: Option<String>,
+}
+
+#[test]
+fn set_provider_credentials_args_use_camel_case_with_optional_values() {
+    let args: ProviderCredentialsArgs =
+        serde_json::from_str(r#"{"providerId":"baidu","appId":"app-2024","secret":"sk-secret"}"#)
+            .unwrap();
+    assert_eq!(args.provider_id, "baidu");
+    assert_eq!(args.api_key, None);
+    assert_eq!(args.app_id.as_deref(), Some("app-2024"));
+    assert_eq!(args.secret.as_deref(), Some("sk-secret"));
+
+    let args: ProviderCredentialsArgs =
+        serde_json::from_str(r#"{"providerId":"openai","apiKey":"sk-1234"}"#).unwrap();
+    assert_eq!(args.provider_id, "openai");
+    assert_eq!(args.api_key.as_deref(), Some("sk-1234"));
+    assert_eq!(args.app_id, None);
+    assert_eq!(args.secret, None);
 }
 
 #[test]
