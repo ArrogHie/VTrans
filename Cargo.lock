@@ -5798,6 +5798,7 @@ dependencies = [
  "mockall",
  "thiserror 1.0.69",
  "tracing",
+ "tracing-subscriber",
  "vtrans-core",
  "windows 0.58.0",
 ]
