@@ -30,7 +30,9 @@
 - 操作按钮：选择区域、开始、暂停、停止
 - 识别语言选择：自动、日语、英语、简体中文（同时作为 OCR 识别语言与翻译源语言，二者经后端联动恒相等）
 - 目标语言选择：中文、日语、英语
-- 翻译引擎切换：API / 本地
+- 翻译引擎切换：OpenAI / DeepL / Google / Azure / 百度 / 本地（切换即经
+  `set_translation_provider` 保存；`AppStatus.translation_provider` 返回的运行时
+  id 经 `normalizeProviderId` 映射到前端配置标识符域）
 - 当前状态与简要错误信息
 - 设置入口
 
@@ -76,6 +78,18 @@
 - 悬浮球开关即时生效（`frontend_floater_enabled` 纯前端事件）
 - 悬浮球透明度/大小滑块：即时保存（`update_floating_ball_appearance`），
   不走整包 `save_settings`；范围校验与后端一致
+- 翻译引擎表单按 provider 条件渲染：
+  - OpenAI：API 端点 + 必填模型名
+  - DeepL：Free / Pro / 自定义端点三档选择
+  - Google：API 端点 + 可选模型名
+  - Azure：API 端点 + 区域（`region`，可空）
+  - 百度：APP ID（随 `save_settings` 保存到配置）+ Secret（经
+    `set_provider_credentials` 写入系统凭据，不落配置）
+  - 本地：隐藏全部云端字段，提示本地模型不受云端参数影响
+- 凭据保存：非百度 provider 用 `set_provider_credentials(providerId, { apiKey })`
+  并显式携带草稿 provider id；百度用 `{ appId, secret }` 双字段
+- 校验规则与 `vtrans-config` 对齐：本地忽略端点/模型/区域；远程端点必须
+  http(s)；OpenAI 模型名必填；Azure 区域非空即校验；百度 APP ID 必填
 
 ## 公开 API（前端内部）
 
@@ -90,6 +104,10 @@ export async function saveSettings(settings: AppConfig): Promise<void>;
 export async function updateResultWindowAppearance(opacity: number, fontSizePx: number): Promise<void>;
 export async function updateFloatingBallAppearance(opacity: number, sizePx: number): Promise<void>;
 export async function getAppStatus(): Promise<AppStatus>;
+export function setProviderCredentials(
+  providerId: ProviderId,
+  credentials: { apiKey?: string; appId?: string; secret?: string },
+): Promise<void>;
 
 // translateActions.ts：主窗口与悬浮球共用的翻译状态机
 export function selectAndTranslateOnce(): Promise<TranslateActionResult>;
@@ -117,6 +135,31 @@ export function onPipelineError(cb: (msg: string) => void): Unlisten;
 
 浮球显隐事件为纯前端内部事件 `frontend_floater_enabled`（payload `{ enabled }`），
 主窗口设置面板切换开关时 `emit`，不经过 Rust。
+
+### 类型与映射 (types/)
+
+```typescript
+export type ProviderId = 'openai' | 'deepl' | 'google' | 'azure' | 'baidu' | 'local';
+export type TranslationQuality = 'fast' | 'balanced';
+
+export interface TranslationConfig {
+  provider: ProviderId;
+  region: string | null;  // Azure Translator 区域，仅 azure provider 使用
+  app_id: string | null;  // 百度 APP ID（Secret 只存系统凭据）
+  quality: TranslationQuality;
+  // ...其余字段不变
+}
+
+// local-onnx -> local；openai/deepl/google/azure/baidu 原样透传；
+// 未知值（含已废弃的 "api"）回退默认 provider "openai"
+export function normalizeProviderId(raw: string): ProviderId;
+```
+
+`AppStatus.translation_provider` 由 `vtrans-app` 返回 provider 运行时实现 id，
+云端 provider 与其配置 id 相同，仅本地 ONNX provider 报告 `"local-onnx"`，因此
+前端只做这一个映射，其余原样透传。`TranslationConfig` 的 `region` / `app_id`
+随整包 `save_settings` 持久化；Secret 与 API Key 一律不进入前端 store、配置、
+事件或日志。
 
 ### Stores (stores/)
 
@@ -148,8 +191,13 @@ src/
     ModeToggle.tsx
     LanguageSelector.tsx
     ProviderToggle.tsx
+    SettingsPanel.tsx
+    DebugPanel.tsx
+    ErrorBanner.tsx
     StatusBar.tsx
     ResultCard.tsx
+  hooks/
+    useDebugFrame.ts
   stores/
     appStore.ts
   services/
@@ -182,11 +230,16 @@ src/
 | 浮球位置 | 单元 | clamp 到显示器、localStorage 记忆往返 |
 | 窗口路由 | 单元 | `floater` label 渲染 FloatingBall |
 | 设置范围校验 | 单元 | 弹窗透明度 0.3–1.0、字号 12–24 整数；浮球透明度 0.3–1.0、直径 32–72 整数 |
+| Provider 映射 | 单元 | `normalizeProviderId`：`local-onnx -> local`、五云端 id 透传、未知/废弃 `api` 回退 `openai` |
+| Provider 切换表单 | 单元 | 设置面板按 provider 条件渲染端点/模型/区域/APP ID/Secret 字段；本地隐藏云端字段 |
+| 凭据 IPC | 单元 | `set_provider_credentials` 只发送提供的字段；百度 `appId` + `secret` 双字段载荷 |
+| ProviderToggle | 单元 | 六个选项、标签、选中态与 `aria-pressed` |
 | 选区交互 | 手动 | 拖动生成矩形，Esc 取消，Enter 确认 |
 | 结果展示 | 手动 | OCR/翻译结果正确显示 |
 | 状态同步 | 手动 | 后端事件正确更新前端状态 |
 | 悬浮球外观滑块 | 手动 | 菜单与主窗口设置面板滑块即时生效、重启保持、无滚动条 |
 | 迷你条拖动/关闭 | 手动 | 无边框顶栏整体拖动、关闭按钮悬停反馈 |
+| Provider 表单与凭据 | 手动 | 五个云端 provider 表单逐一切换并保存凭据，凭据只进 Windows 凭据管理器 |
 
 ## 验收标准
 
@@ -199,6 +252,11 @@ src/
 - [ ] 迷你条无边框适配：顶栏整体拖动、关闭按钮样式、圆角壳
 - [ ] 悬浮球：默认关闭、拖动、位置记忆、四项菜单动作 + 外观滑杆
 - [ ] 悬浮球外观：透明度/直径 CSS 变量即时生效并持久化，折叠/展开无滚动条
+- [ ] 五种云端 Provider（OpenAI/DeepL/Google/Azure/百度）+ 本地表单条件渲染正确
+- [ ] OpenAI 配置 id 为 `openai`（非 `api`），`normalizeProviderId` 仅映射
+      `local-onnx -> local`，未知/废弃 id 回退 `openai`
+- [ ] 凭据（API Key/Secret）只经 `set_provider_credentials` 写入系统凭据，
+      不存前端 store/配置/日志；百度为 APP ID + Secret 双字段
 - [ ] 后端事件正确更新前端状态
 - [ ] 窗口可置顶、拖动、缩放
 - [ ] 图标使用 Lucide React
@@ -216,3 +274,9 @@ src/
 - Zustand store 不可变更新
 - 组件保持小而专注，避免巨型组件
 - 窗口标签通过 Tauri label 区分
+- 多 Provider 同步（模块 10）：`AppStatus.translation_provider` 返回运行时实现 id
+  （`openai`/`deepl`/`google`/`azure`/`baidu`/`local-onnx`）。前端
+  `normalizeProviderId` 只把 `"local-onnx"` 映射为 `"local"`，云端 id 原样透传，
+  已删除旧 `"api"` 分支；`ProviderId` 类型与凭据表单已扩展，百度凭据用
+  `set_provider_credentials` 提交 APP ID + Secret。新增 provider 时必须同步更新
+  后端白名单与本映射，否则状态水合会显示错误引擎。

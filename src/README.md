@@ -14,6 +14,10 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
 - 通过拖动框选生成物理像素坐标的 `ScreenRegion`。
 - 监听后端 pipeline/model 事件，并在多个 Tauri WebView 间同步结果和实时会话状态。
 - 展示 OCR 原文和翻译结果，支持重新翻译、暂停/继续、置顶和窗口拖动。
+- 设置面板支持选择五种云端翻译 Provider（OpenAI/DeepL/Google/Azure/百度）
+  与本地 ONNX 模型，并按所选 Provider 条件渲染端点/模型/区域/APP ID 表单；
+  API Key/Secret 只经 `set_provider_credentials` 写入系统凭据，不进配置、
+  store、事件或日志。
 - 常驻选区方框仅实时会话显示：单次翻译不显示方框，翻译完成后也不残留。
 - 提供只读设置面板（捕获间隔、差异阈值、超时、重试、快捷键、置顶），显示当前后端配置。
 - Debug 模式下实时显示进入 OCR 前的捕获帧缩略图（仅显示、不保存、不持久化）。
@@ -49,11 +53,33 @@ export function saveSettings(settings: AppConfig): Promise<void>;
 export function updateResultWindowAppearance(opacity: number, fontSizePx: number): Promise<void>;
 export function updateFloatingBallAppearance(opacity: number, sizePx: number): Promise<void>;
 export function getAppStatus(): Promise<AppStatus>;
+export function setProviderCredentials(
+  providerId: ProviderId,
+  credentials: { apiKey?: string; appId?: string; secret?: string },
+): Promise<void>;
 ```
 
-其余命令封装包括 `cancelRegionSelection`、`updateLiveRegion`、`setOcrLanguage`、`setTranslationProvider` 和 `loadLocalModels`。
+其余命令封装包括 `cancelRegionSelection`、`updateLiveRegion`、`setOcrLanguage`、
+`setTranslationProvider`、`setApiKey` 和 `loadLocalModels`。`setApiKey` 保持
+原有签名（按当前已保存 provider 写入），设置面板统一改用
+`setProviderCredentials`（显式传入草稿 provider id，只发送提供的字段；
+百度凭据为 `appId` + `secret` 两个独立目标）。
 两个外观命令只持久化对应字段，不获取实时会话锁、不重建翻译 provider，
 实时运行中也可以保存（替代整包 `save_settings` 路径）。
+
+### 类型与映射
+
+```ts
+export type ProviderId = "openai" | "deepl" | "google" | "azure" | "baidu" | "local";
+export function normalizeProviderId(raw: string): ProviderId;
+export function isCloudProvider(provider: ProviderId): boolean;
+```
+
+`normalizeProviderId` 把后端运行时实现 id 映射到前端配置标识符域：仅
+`"local-onnx" -> "local"` 需要映射，OpenAI/DeepL/Google/Azure/百度原样透传，
+未知值（含已废弃的 `"api"`）回退到默认 provider `"openai"`。
+`TranslationConfig` 新增 `region`（Azure 区域）与 `app_id`（百度 APP ID）两个
+可空字段；百度 Secret 与各 provider 的 API Key 一样只进系统凭据，不落配置。
 
 ### Event service
 
@@ -206,7 +232,15 @@ pnpm tauri dev
   菜单动作（框选翻译/实时启停/暂停继续/外观滑杆）经 mock IPC 覆盖。
 - 浮球路由与折叠态渲染、窗口路由（`floater` label → FloatingBall）。
 - 设置面板范围校验：背景透明度 0.3–1.0、字号 12–24 整数，拒绝越界与非整数。
-- 后端 provider id（`"api"` / `"local-onnx"`）到前端配置标识符的映射与未知值回退。
+- provider id 映射：`"local-onnx" -> "local"`，五个云端 id 原样透传，
+  未知 id 与已废弃的 `"api"` 回退到默认 `"openai"`。
+- 设置面板按 provider 条件渲染：OpenAI（端点 + 必填模型）、DeepL（Free/Pro/
+  自定义端点）、Google（端点 + 可选模型）、Azure（端点 + 区域）、百度
+  （APP ID + Secret 双输入，经 `set_provider_credentials` 提交）、本地
+  （隐藏全部云端字段）。
+- ProviderToggle：六个 provider 选项的标签、选中态与 `aria-pressed`。
+- 凭据 IPC：`set_provider_credentials` 只发送提供的字段，百度 `appId` + `secret`
+  双字段载荷与后端契约一致。
 - 模式切换控件在实时会话运行期间的禁用行为。
 
 ### 手工验证项
@@ -237,11 +271,16 @@ pnpm tauri dev
 | 浮球外观 | 展开浮球菜单调节透明度/大小，或在主窗口设置面板拖动同款滑块 | 球背景立即变半透明、直径即时变化，展开/收起均无滚动条；保存后重启仍生效 |
 | Debug 帧显示 | 以 `--debug` 或 `VTRANS_DEBUG=1` 启动，开启实时翻译或单次翻译 | 主窗口出现「Debug 模式 · 仅显示不保存」面板，缩略图随捕获帧实时更新；正常启动时主窗口无该区块 |
 | Debug 退出清理 | Debug 模式下停止翻译并退出应用 | 面板帧数据随窗口销毁释放，不落盘、不写入日志、不进入结果窗口 |
+| Provider 表单 | 打开设置面板，依次选择 OpenAI/DeepL/Google/Azure/百度/本地 | 各 provider 只显示对应字段；切换 provider 自动套用默认端点，再手动改自定义端点 |
+| 凭据保存 | 在百度表单输入 APP ID 与 Secret 并保存，或为非百度 provider 保存 API Key | 保存成功提示；凭据只进入 Windows 凭据管理器，`config.json` 与日志不含 Key/Secret |
 
 ## 已知限制
 
 1. 当前 `vtrans-app::capture_once` 公开命令返回 OCR 结果；单次翻译的译文依赖后续 app 层命令契约完善，前端不会伪造译文。
 2. 设置面板可编辑采集参数、API 端点/模型/超时/重试、快捷键与结果窗口置顶，通过 `save_settings` 整包保存。由于 app 层暂未提供完整配置读取命令（缺 `get_app_config`），OCR 语言、日志级别等未在表单中的字段沿用前端当前值保存，可能覆盖后端其它配置；建议 vtrans-app 补充配置读取或局部更新命令。API Key 管理依赖 vtrans-app 新增 `set_api_key` 命令（vtrans-security 的 Credential Manager 已具备写入能力），前端暂未开放 API Key 输入。
+   （更新：`get_app_config` 已提供，各 WebView 挂载时自行水合；设置面板已开放
+   凭据输入——API Key 经 `set_provider_credentials` 写入系统凭据，百度为
+   APP ID + Secret 双字段，配置文件中仅存百度 APP ID，Secret 不落盘。）
 3. 结果窗口初始可见性、透明选区和窗口尺寸由 `src-tauri/tauri.conf.json` 管理；前端只负责运行时显示、隐藏和置顶。
 4. `model_dir` 是 Rust 配置中的 `PathBuf`，前端仅回传字符串或 `null`，不会读取模型文件。
 5. 事件监听在每个 webview 中安装，窗口销毁时统一清理；事件到达前关闭的窗口不会补发历史结果。
@@ -263,7 +302,7 @@ pnpm tauri dev
     （不再整包 `save_settings`），滑块改动防抖 350ms，实时会话运行期间也可保存。
     每个 WebView 的 Zustand store 相互隔离：result/floater 均在挂载时自行
     `get_app_config` 水合（ResultWindow 应用外观、FloatingBall 控制显隐与外观），
-    不依赖主窗口；`DEFAULT_CONFIG.version` 与后端 `CURRENT_CONFIG_VERSION`（3）
+    不依赖主窗口；`DEFAULT_CONFIG.version` 与后端 `CURRENT_CONFIG_VERSION`（5）
     保持一致，避免未水合即保存被后端校验拒绝。
 11. 悬浮球默认关闭（`floating_ball.enabled`），直径与透明度（`size_px` 32–72、
     `opacity` 0.3–1.0）由 CSS 变量 `--floater-size` / `--floater-opacity` 驱动，
@@ -271,3 +310,7 @@ pnpm tauri dev
     `overflow-hidden`，无滚动条。位置记忆存于 localStorage（`vtrans.floater.position`），
     显示器拓扑变化时按首个可用显示器兜底。浮球窗口 `focus: false`，展开菜单通过
     编程式放大窗口实现，菜单为四项动作 + 外观小控制。
+12. 设置面板切换 provider 时会套用该 provider 的规范端点并覆盖草稿中的自定义端点；
+    需要自定义端点的用户应先选 provider 再修改端点。Google 的模型名在表单中为可选
+    项（后端校验对非 OpenAI provider 不强制模型名），若后端实现对空字符串仍报错，
+    前端会在错误信息中透出并提示补填。
