@@ -1,7 +1,8 @@
 /** Shared JSON contracts exchanged with vtrans-app over Tauri IPC. */
 
 export type Mode = "single" | "live";
-export type ProviderId = "api" | "local";
+export type ProviderId = "openai" | "deepl" | "google" | "azure" | "baidu" | "local";
+export type TranslationQuality = "fast" | "balanced";
 export type LanguageCode = "auto" | "zh-CN" | "ja" | "en";
 export type PipelineStatus =
   | "idle"
@@ -89,6 +90,19 @@ export interface OcrConfig {
 
 export interface TranslationConfig {
   provider: ProviderId;
+  /**
+   * Azure Translator region (e.g. `"eastasia"`); only used by the `azure`
+   * provider. `null` omits the region header.
+   */
+  region: string | null;
+  /**
+   * Baidu Translate APP ID; only used by the `baidu` provider and required
+   * (non-empty) when that provider is selected. Not sensitive: the matching
+   * Secret lives in the OS credential store.
+   */
+  app_id: string | null;
+  /** Translation quality preset consumed by the local provider. */
+  quality: TranslationQuality;
   source_language: LanguageCode;
   target_language: Exclude<LanguageCode, "auto">;
   timeout_seconds: number;
@@ -171,7 +185,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   capture: { interval_ms: 500, difference_threshold: 0.03 },
   ocr: { language: "auto", min_confidence: 0.55 },
   translation: {
-    provider: "api",
+    provider: "openai",
+    region: null,
+    app_id: null,
+    quality: "fast",
     source_language: "auto",
     target_language: "zh-CN",
     timeout_seconds: 30,
@@ -188,7 +205,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   log_level: "info",
   model_dir: null,
-  version: 3,
+  version: 5,
 };
 
 /** Allowed range for the mini-bar background opacity. */
@@ -225,19 +242,36 @@ export function pipelineStatusLabel(status: PipelineStatus): string {
   )[status];
 }
 
+/** Cloud translation provider identifiers (excludes the local provider). */
+export const CLOUD_PROVIDER_IDS: readonly ProviderId[] = [
+  "openai",
+  "deepl",
+  "google",
+  "azure",
+  "baidu",
+];
+
+/** Reports whether the provider talks to a remote HTTP(S) API. */
+export function isCloudProvider(provider: ProviderId): boolean {
+  return provider !== "local";
+}
+
 /**
  * Normalizes a backend translation provider identifier to the frontend
  * provider value domain.
  *
- * `vtrans-app` reports `AppStatus.translation_provider` using the provider
- * implementation id: `"api"` for the API provider and `"local-onnx"` for the
- * local ONNX provider. The frontend stores and persists the configuration
- * identifier `"api" | "local"` only, so the runtime id must be mapped back.
- * Unknown values fall back to `"api"` to keep the UI in a valid state.
+ * `vtrans-app` reports `AppStatus.translation_provider` using the runtime
+ * implementation id: cloud providers use their configuration id
+ * (`"openai"` / `"deepl"` / `"google"` / `"azure"` / `"baidu"`), while the
+ * local ONNX provider reports `"local-onnx"` for the configuration value
+ * `"local"`. The frontend maps `"local-onnx"` back to `"local"` and passes
+ * the cloud ids through unchanged. Unknown values fall back to `"openai"`
+ * (the default provider) to keep the UI in a valid state.
  */
 export function normalizeProviderId(raw: string): ProviderId {
   if (raw === "local-onnx") return "local";
-  return "api";
+  if ((CLOUD_PROVIDER_IDS as readonly string[]).includes(raw)) return raw as ProviderId;
+  return "openai";
 }
 
 /**
@@ -246,9 +280,9 @@ export function normalizeProviderId(raw: string): ProviderId {
  *
  * The bundled manifest (`opus-mt-en-zh-int8`) currently declares a single
  * `en -> zh-CN` pair and cannot auto-detect the source language. Any other
- * source/target combination (including `auto`) must be served by the API
+ * source/target combination (including `auto`) must be served by a cloud
  * provider; the UI surfaces this constraint so translation never fails
- * silently.
+ * silently. Cloud providers always pass through.
  */
 export function isLocalPairSupported(
   config: Pick<AppConfig, "translation">,

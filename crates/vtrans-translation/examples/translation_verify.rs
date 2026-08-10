@@ -5,7 +5,7 @@
 //! ```text
 //! cargo run --example translation_verify -- \
 //!     --text "hello" --source en --target ja \
-//!     --api-endpoint https://api.example.com/v1/chat/completions \
+//!     --provider openai --api-endpoint https://api.example.com/v1/chat/completions \
 //!     --api-model translator --api-key sk-... [--timeout 30] [--retries 2]
 //!
 //! cargo run --example translation_verify -- \
@@ -21,19 +21,47 @@ use tokio_util::sync::CancellationToken;
 use vtrans_core::types::{Language, TranslationRequest};
 use vtrans_core::TranslationProvider;
 use vtrans_models::ModelManager;
-use vtrans_translation::{ApiTranslationProvider, LocalTranslationProvider};
+use vtrans_translation::{
+    AzureTranslatorProvider, BaiduProvider, DeepLProvider, GoogleV2Provider,
+    LocalTranslationProvider, OpenAiProvider,
+};
 
 enum Mode {
     Api {
+        provider: Provider,
         endpoint: String,
         model: String,
         api_key: String,
+        region: String,
+        app_id: String,
         timeout: Duration,
         retries: u32,
     },
     Local {
         models_dir: PathBuf,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Provider {
+    OpenAi,
+    DeepL,
+    Google,
+    Azure,
+    Baidu,
+}
+
+impl Provider {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "openai" => Ok(Self::OpenAi),
+            "deepl" => Ok(Self::DeepL),
+            "google" => Ok(Self::Google),
+            "azure" => Ok(Self::Azure),
+            "baidu" => Ok(Self::Baidu),
+            other => Err(format!("unsupported provider: {other}")),
+        }
+    }
 }
 
 struct CliArgs {
@@ -52,15 +80,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cancel = CancellationToken::new();
     let result = match &args.mode {
         Mode::Api {
+            provider,
             endpoint,
             model,
             api_key,
+            region,
+            app_id,
             timeout,
             retries,
         } => {
-            let provider =
-                ApiTranslationProvider::new(endpoint, model, api_key, *timeout, *retries);
-            provider.translate(&request, cancel).await?
+            let built: Box<dyn TranslationProvider> = match provider {
+                Provider::OpenAi => Box::new(OpenAiProvider::new(
+                    endpoint, model, api_key, *timeout, *retries,
+                )),
+                Provider::DeepL => {
+                    Box::new(DeepLProvider::new(endpoint, api_key, *timeout, *retries))
+                }
+                Provider::Google => {
+                    Box::new(GoogleV2Provider::new(endpoint, api_key, *timeout, *retries))
+                }
+                Provider::Azure => Box::new(AzureTranslatorProvider::new(
+                    endpoint, region, api_key, *timeout, *retries,
+                )),
+                Provider::Baidu => Box::new(BaiduProvider::new(
+                    endpoint, app_id, api_key, *timeout, *retries,
+                )),
+            };
+            built.translate(&request, cancel).await?
         }
         Mode::Local { models_dir } => {
             let manager = ModelManager::from_manifest_dir(models_dir)?;
@@ -77,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Parse command-line arguments.
+#[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut text = None;
     let mut source = Language::Auto;
@@ -87,6 +134,10 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut timeout = Duration::from_secs(30);
     let mut retries = 2;
     let mut models_dir = None;
+    let mut provider = Provider::OpenAi;
+    let mut provider_explicit = false;
+    let mut region = String::new();
+    let mut app_id = String::new();
 
     let mut index = 0;
     while index < args.len() {
@@ -107,6 +158,13 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             "--api-endpoint" => endpoint = Some(next_value(args, &mut index, "--api-endpoint")?),
             "--api-model" => model = Some(next_value(args, &mut index, "--api-model")?),
             "--api-key" => api_key = Some(next_value(args, &mut index, "--api-key")?),
+            "--provider" => {
+                let value = next_value(args, &mut index, "--provider")?;
+                provider = Provider::parse(&value)?;
+                provider_explicit = true;
+            }
+            "--region" => region = next_value(args, &mut index, "--region")?,
+            "--app-id" => app_id = next_value(args, &mut index, "--app-id")?,
             "--timeout" => {
                 let value = next_value(args, &mut index, "--timeout")?;
                 timeout = Duration::from_secs(
@@ -127,7 +185,9 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             "--help" | "-h" => {
                 println!(
                     "usage: translation_verify --text <text> --source <code> --target <code> \
-                     (--api-endpoint <url> --api-model <model> [--api-key <key>] [--timeout <secs>] [--retries <n>] \
+                     (--provider <openai|deepl|google|azure|baidu> --api-endpoint <url> \
+                     [--api-model <model>] [--api-key <key>] [--region <azure region>] \
+                     [--app-id <baidu app id>] [--timeout <secs>] [--retries <n>] \
                      | --models <dir>)"
                 );
                 std::process::exit(0);
@@ -141,27 +201,41 @@ fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let target = target.ok_or("missing required argument --target <code>")?;
 
     let mode = if let Some(models_dir) = models_dir {
-        if endpoint.is_some() || model.is_some() || api_key.is_some() {
+        if endpoint.is_some()
+            || model.is_some()
+            || api_key.is_some()
+            || provider_explicit
+            || !region.is_empty()
+            || !app_id.is_empty()
+        {
             return Err("--models cannot be combined with API arguments".to_string());
         }
         Mode::Local { models_dir }
     } else {
         let endpoint = endpoint.ok_or("missing required argument --api-endpoint <url>")?;
-        let model = model.ok_or("missing required argument --api-model <model>")?;
+        let model = match (provider, model) {
+            (_, Some(model)) => model,
+            (Provider::OpenAi, None) => {
+                return Err("missing required argument --api-model <model>".to_string())
+            }
+            (_, None) => String::new(),
+        };
         let api_key = match api_key {
             Some(key) => key,
             None => std::env::var("VTRANS_API_KEY")
                 .map_err(|_| "missing --api-key or VTRANS_API_KEY environment variable")?,
         };
         Mode::Api {
+            provider,
             endpoint,
             model,
             api_key,
+            region,
+            app_id,
             timeout,
             retries,
         }
     };
-
     Ok(CliArgs {
         mode,
         text,

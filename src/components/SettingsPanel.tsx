@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Save } from "lucide-react";
+import { ProviderToggle } from "./ProviderToggle";
 import { publishFrontendFloaterEnabled } from "../services/events";
-import { getIpcErrorMessage, saveSettings, setApiKey } from "../services/tauri";
+import { getIpcErrorMessage, saveSettings, setProviderCredentials } from "../services/tauri";
 import {
   clampFloaterOpacity,
   clampFloaterSizePx,
@@ -12,6 +13,7 @@ import type {
   CaptureConfig,
   FloatingBallConfig,
   HotkeyConfig,
+  ProviderId,
   ResultWindowConfig,
   TranslationConfig,
 } from "../types";
@@ -44,11 +46,24 @@ export function validateSettings(config: AppConfig): string | null {
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
     return "差异阈值必须在 0 到 1 之间";
   }
-  if (!/^https?:\/\/.+/.test(config.translation.api_endpoint)) {
+  // 本地 ONNX provider 忽略云端参数；远程 provider 需要合法的端点。
+  if (
+    config.translation.provider !== "local" &&
+    !/^https?:\/\/.+/.test(config.translation.api_endpoint)
+  ) {
     return "API 端点必须以 http:// 或 https:// 开头";
   }
-  if (config.translation.api_model.trim() === "") {
+  // 只有 OpenAI 强制要求模型名；DeepL/Google 视为可选，Azure/百度忽略。
+  if (config.translation.provider === "openai" && config.translation.api_model.trim() === "") {
     return "API 模型名不能为空";
+  }
+  // Azure 区域可选，但一旦填写必须非空（与 vtrans-config 校验一致）。
+  if (config.translation.provider === "azure" && config.translation.region?.trim() === "") {
+    return "Azure 区域不能为空";
+  }
+  // 百度 provider 必须配置 APP ID（与 vtrans-config 校验一致）。
+  if (config.translation.provider === "baidu" && !config.translation.app_id?.trim()) {
+    return "百度 APP ID 不能为空";
   }
   if (!Number.isInteger(config.translation.timeout_seconds) || config.translation.timeout_seconds <= 0) {
     return "API 超时必须是大于 0 的整数（秒）";
@@ -82,14 +97,32 @@ const inputClass =
   "w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-800 outline-none ring-indigo-200 transition focus:ring-2";
 const labelClass = "text-xs font-medium text-slate-500";
 
+/** Canonical endpoint applied when a cloud provider is selected. */
+const PROVIDER_DEFAULT_ENDPOINTS: Record<Exclude<ProviderId, "local">, string> = {
+  openai: "https://api.openai.com/v1/chat/completions",
+  deepl: "https://api-free.deepl.com/v2/translate",
+  google: "https://translation.googleapis.com/language/translate/v2",
+  azure: "https://api.cognitive.microsofttranslator.com/translate",
+  baidu: "https://fanyi-api.baidu.com/api/trans/vip/translate",
+};
+
+const DEEPL_FREE_ENDPOINT = "https://api-free.deepl.com/v2/translate";
+const DEEPL_PRO_ENDPOINT = "https://api.deepl.com/v2/translate";
+
+type DeepLMode = "free" | "pro" | "custom";
+
 export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) {
   const [draft, setDraft] = useState<AppConfig>(() => structuredClone(config));
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [apiKey, setApiKeyDraft] = useState("");
-  const [savingKey, setSavingKey] = useState(false);
-  const [keyMessage, setKeyMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const [secretDraft, setSecretDraft] = useState("");
+  const [savingCredentials, setSavingCredentials] = useState(false);
+  const [credentialMessage, setCredentialMessage] = useState<{
+    kind: "error" | "success";
+    text: string;
+  } | null>(null);
 
   const markDirty = () => {
     setSaveError(null);
@@ -99,12 +132,28 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
     markDirty();
     setDraft((current) => ({ ...current, capture: { ...current.capture, [key]: value } }));
   };
-  const setTranslation = (key: keyof TranslationConfig, value: string | number) => {
+  const setTranslation = (key: keyof TranslationConfig, value: string | number | null) => {
     markDirty();
     setDraft((current) => ({
       ...current,
       translation: { ...current.translation, [key]: value },
     }));
+  };
+  /** Switches the draft provider and applies its canonical endpoint. */
+  const changeProvider = (provider: ProviderId) => {
+    markDirty();
+    setDraft((current) => {
+      const translation = { ...current.translation, provider };
+      if (provider !== "local") {
+        translation.api_endpoint = PROVIDER_DEFAULT_ENDPOINTS[provider];
+      }
+      return { ...current, translation };
+    });
+  };
+  const changeDeepLMode = (mode: DeepLMode) => {
+    if (mode === "free") setTranslation("api_endpoint", DEEPL_FREE_ENDPOINT);
+    else if (mode === "pro") setTranslation("api_endpoint", DEEPL_PRO_ENDPOINT);
+    else markDirty();
   };
   const setHotkey = (key: keyof HotkeyConfig, value: string) => {
     markDirty();
@@ -168,22 +217,50 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
     }
   };
 
-  const saveKey = async () => {
-    const trimmed = apiKey.trim();
-    if (!trimmed) {
-      setKeyMessage({ kind: "error", text: "请输入 API Key" });
+  /** Saves credentials for the draft provider into the OS credential vault. */
+  const saveCredentials = async () => {
+    const provider = draft.translation.provider;
+    if (provider === "baidu") {
+      const appId = draft.translation.app_id?.trim() ?? "";
+      const secret = secretDraft.trim();
+      if (!appId) {
+        setCredentialMessage({ kind: "error", text: "请输入百度 APP ID" });
+        return;
+      }
+      if (!secret) {
+        setCredentialMessage({ kind: "error", text: "请输入百度 Secret" });
+        return;
+      }
+      setSavingCredentials(true);
+      setCredentialMessage(null);
+      try {
+        await setProviderCredentials("baidu", { appId, secret });
+        setSecretDraft("");
+        setCredentialMessage({ kind: "success", text: "百度凭据已保存到系统凭据" });
+      } catch (error) {
+        setCredentialMessage({ kind: "error", text: getIpcErrorMessage(error) });
+      } finally {
+        setSavingCredentials(false);
+      }
       return;
     }
-    setSavingKey(true);
-    setKeyMessage(null);
+    const trimmed = apiKey.trim();
+    if (!trimmed) {
+      setCredentialMessage({ kind: "error", text: "请输入 API Key" });
+      return;
+    }
+    setSavingCredentials(true);
+    setCredentialMessage(null);
     try {
-      await setApiKey(trimmed);
+      // 显式传入草稿 provider id，避免后端 set_api_key 写入当前已保存
+      // provider（草稿与已保存配置不一致时会把 Key 写到错误目标）。
+      await setProviderCredentials(provider, { apiKey: trimmed });
       setApiKeyDraft("");
-      setKeyMessage({ kind: "success", text: "API Key 已保存到系统凭据" });
+      setCredentialMessage({ kind: "success", text: "API Key 已保存到系统凭据" });
     } catch (error) {
-      setKeyMessage({ kind: "error", text: getIpcErrorMessage(error) });
+      setCredentialMessage({ kind: "error", text: getIpcErrorMessage(error) });
     } finally {
-      setSavingKey(false);
+      setSavingCredentials(false);
     }
   };
 
@@ -227,77 +304,208 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
         </fieldset>
 
         <fieldset className="rounded-lg border border-slate-100 p-3">
-          <legend className="px-1 text-xs font-semibold text-slate-400">云端 API</legend>
+          <legend className="px-1 text-xs font-semibold text-slate-400">翻译引擎</legend>
           <div className="space-y-3">
-            <label className="flex flex-col gap-1">
-              <span className={labelClass}>API 端点</span>
-              <input
-                type="url"
-                value={draft.translation.api_endpoint}
-                onChange={(event) => setTranslation("api_endpoint", event.target.value)}
-                className={inputClass}
-                placeholder="https://api.openai.com/v1/chat/completions"
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className={labelClass}>API 模型名</span>
-              <input
-                type="text"
-                value={draft.translation.api_model}
-                onChange={(event) => setTranslation("api_model", event.target.value)}
-                className={inputClass}
-                placeholder="gpt-4o-mini"
-              />
-            </label>
-            <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-2.5">
-              <label className="flex flex-col gap-1">
-                <span className={labelClass}>API Key（保存到 Windows 凭据，不写入配置文件）</span>
-                <div className="flex gap-2">
-                  <input
-                    type="password"
-                    value={apiKey}
-                    onChange={(event) => {
-                      setApiKeyDraft(event.target.value);
-                      setKeyMessage(null);
-                    }}
-                    className={inputClass}
-                    placeholder="sk-..."
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                  <button type="button" onClick={() => void saveKey()} disabled={savingKey} className="secondary-button shrink-0">
-                    {savingKey ? "保存中…" : "保存 Key"}
-                  </button>
+            <ProviderToggle
+              value={draft.translation.provider}
+              onChange={changeProvider}
+              includeLocal={false}
+            />
+            {draft.translation.provider === "local" ? (
+              <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-400">
+                本地 ONNX 模型不使用云端 API 参数；当前为本地模型，切换请在主界面的下拉列表完成。
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {(draft.translation.provider === "openai" ||
+                  draft.translation.provider === "google") && (
+                  <label className="flex flex-col gap-1">
+                    <span className={labelClass}>API 端点</span>
+                    <input
+                      type="url"
+                      value={draft.translation.api_endpoint}
+                      onChange={(event) => setTranslation("api_endpoint", event.target.value)}
+                      className={inputClass}
+                      placeholder={PROVIDER_DEFAULT_ENDPOINTS[draft.translation.provider]}
+                    />
+                  </label>
+                )}
+                {draft.translation.provider === "deepl" && (
+                  <>
+                    <label className="flex flex-col gap-1">
+                      <span className={labelClass}>DeepL 套餐</span>
+                      <select
+                        value={
+                          draft.translation.api_endpoint === DEEPL_FREE_ENDPOINT
+                            ? "free"
+                            : draft.translation.api_endpoint === DEEPL_PRO_ENDPOINT
+                              ? "pro"
+                              : "custom"
+                        }
+                        onChange={(event) => changeDeepLMode(event.target.value as DeepLMode)}
+                        className={inputClass}
+                      >
+                        <option value="free">DeepL Free</option>
+                        <option value="pro">DeepL Pro</option>
+                        <option value="custom">自定义端点</option>
+                      </select>
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className={labelClass}>API 端点</span>
+                      <input
+                        type="url"
+                        value={draft.translation.api_endpoint}
+                        onChange={(event) => setTranslation("api_endpoint", event.target.value)}
+                        className={inputClass}
+                        placeholder="https://api-free.deepl.com/v2/translate"
+                      />
+                    </label>
+                  </>
+                )}
+                {draft.translation.provider === "azure" && (
+                  <>
+                    <label className="flex flex-col gap-1">
+                      <span className={labelClass}>API 端点</span>
+                      <input
+                        type="url"
+                        value={draft.translation.api_endpoint}
+                        onChange={(event) => setTranslation("api_endpoint", event.target.value)}
+                        className={inputClass}
+                        placeholder="https://api.cognitive.microsofttranslator.com/translate"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className={labelClass}>区域（如 eastasia）</span>
+                      <input
+                        type="text"
+                        value={draft.translation.region ?? ""}
+                        onChange={(event) => setTranslation("region", event.target.value || null)}
+                        className={inputClass}
+                        placeholder="eastasia"
+                      />
+                    </label>
+                  </>
+                )}
+                {(draft.translation.provider === "openai" ||
+                  draft.translation.provider === "google") && (
+                  <label className="flex flex-col gap-1">
+                    <span className={labelClass}>
+                      {draft.translation.provider === "openai" ? "API 模型名" : "API 模型名（可选）"}
+                    </span>
+                    <input
+                      type="text"
+                      value={draft.translation.api_model}
+                      onChange={(event) => setTranslation("api_model", event.target.value)}
+                      className={inputClass}
+                      placeholder="gpt-4o-mini"
+                    />
+                  </label>
+                )}
+                {draft.translation.provider === "baidu" ? (
+                  <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-2.5">
+                    <div className="space-y-2.5">
+                      <label className="flex flex-col gap-1">
+                        <span className={labelClass}>百度 APP ID（保存到配置，随设置保存）</span>
+                        <input
+                          type="text"
+                          value={draft.translation.app_id ?? ""}
+                          onChange={(event) => setTranslation("app_id", event.target.value || null)}
+                          className={inputClass}
+                          placeholder="2026081000000000"
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <span className={labelClass}>百度 Secret（保存到 Windows 凭据，不写入配置文件）</span>
+                        <div className="flex gap-2">
+                          <input
+                            type="password"
+                            value={secretDraft}
+                            onChange={(event) => {
+                              setSecretDraft(event.target.value);
+                              setCredentialMessage(null);
+                            }}
+                            className={inputClass}
+                            placeholder="百度 Secret"
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void saveCredentials()}
+                            disabled={savingCredentials}
+                            className="secondary-button shrink-0"
+                          >
+                            {savingCredentials ? "保存中…" : "保存凭据"}
+                          </button>
+                        </div>
+                      </label>
+                    </div>
+                    {credentialMessage && (
+                      <p className={`mt-1.5 text-xs ${credentialMessage.kind === "error" ? "text-red-600" : "text-emerald-600"}`} role={credentialMessage.kind === "error" ? "alert" : "status"}>
+                        {credentialMessage.text}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-2.5">
+                    <label className="flex flex-col gap-1">
+                      <span className={labelClass}>API Key（保存到 Windows 凭据，不写入配置文件）</span>
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={apiKey}
+                          onChange={(event) => {
+                            setApiKeyDraft(event.target.value);
+                            setCredentialMessage(null);
+                          }}
+                          className={inputClass}
+                          placeholder="sk-..."
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => void saveCredentials()}
+                          disabled={savingCredentials}
+                          className="secondary-button shrink-0"
+                        >
+                          {savingCredentials ? "保存中…" : "保存 Key"}
+                        </button>
+                      </div>
+                    </label>
+                    {credentialMessage && (
+                      <p className={`mt-1.5 text-xs ${credentialMessage.kind === "error" ? "text-red-600" : "text-emerald-600"}`} role={credentialMessage.kind === "error" ? "alert" : "status"}>
+                        {credentialMessage.text}
+                      </p>
+                    )}
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1">
+                    <span className={labelClass}>超时 (秒)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={draft.translation.timeout_seconds}
+                      onChange={(event) => setTranslation("timeout_seconds", event.target.valueAsNumber || 0)}
+                      className={inputClass}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className={labelClass}>最大重试</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={draft.translation.max_retries}
+                      onChange={(event) => setTranslation("max_retries", event.target.valueAsNumber || 0)}
+                      className={inputClass}
+                    />
+                  </label>
                 </div>
-              </label>
-              {keyMessage && (
-                <p className={`mt-1.5 text-xs ${keyMessage.kind === "error" ? "text-red-600" : "text-emerald-600"}`} role={keyMessage.kind === "error" ? "alert" : "status"}>
-                  {keyMessage.text}
-                </p>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1">
-                <span className={labelClass}>超时 (秒)</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={draft.translation.timeout_seconds}
-                  onChange={(event) => setTranslation("timeout_seconds", event.target.valueAsNumber || 0)}
-                  className={inputClass}
-                />
-              </label>
-              <label className="flex flex-col gap-1">
-                <span className={labelClass}>最大重试</span>
-                <input
-                  type="number"
-                  min={0}
-                  value={draft.translation.max_retries}
-                  onChange={(event) => setTranslation("max_retries", event.target.valueAsNumber || 0)}
-                  className={inputClass}
-                />
-              </label>
-            </div>
+              </div>
+            )}
           </div>
         </fieldset>
 

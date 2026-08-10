@@ -32,7 +32,17 @@ pub(crate) const fn default_min_confidence() -> f32 {
 
 /// Default translation provider identifier.
 pub(crate) fn default_provider() -> String {
-    "api".to_string()
+    "openai".to_string()
+}
+
+/// Default Azure Translator region (`None` = omit the region header).
+pub(crate) const fn default_region() -> Option<String> {
+    None
+}
+
+/// Default Baidu Translate APP ID (`None` = not configured).
+pub(crate) const fn default_app_id() -> Option<String> {
+    None
 }
 
 /// Default translation quality preset.
@@ -157,6 +167,8 @@ impl Default for TranslationConfig {
     fn default() -> Self {
         Self {
             provider: default_provider(),
+            region: default_region(),
+            app_id: default_app_id(),
             quality: default_translation_quality(),
             source_language: default_source_language(),
             target_language: default_target_language(),
@@ -235,7 +247,9 @@ mod tests {
     #[test]
     fn translation_defaults() {
         let config = TranslationConfig::default();
-        assert_eq!(config.provider, "api");
+        assert_eq!(config.provider, "openai");
+        assert_eq!(config.region, None);
+        assert_eq!(config.app_id, None);
         assert_eq!(config.quality, "fast");
         assert_eq!(config.source_language, Language::Auto);
         assert_eq!(config.target_language, Language::ChineseSimplified);

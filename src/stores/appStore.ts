@@ -103,8 +103,9 @@ export const useAppStore = create<AppState>((set) => ({
     })),
   applyStatus: (status) =>
     set((state) => {
-      // 后端透传 provider 实现 id（"api" / "local-onnx"），映射到前端
-      // 配置标识符域（"api" / "local"）。
+      // 后端透传 provider 运行时实现 id（"openai" / "deepl" / "google" /
+      // "azure" / "baidu" / "local-onnx"），映射到前端配置标识符域
+      // （云端 id 原样透传，仅 "local-onnx" -> "local"）。
       const provider = normalizeProviderId(status.translation_provider);
       // Hotkey-started live sessions never publish `frontend_live_config`
       // (that is an app-module coordination item). When the backend reports

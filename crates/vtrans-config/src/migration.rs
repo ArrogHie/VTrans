@@ -5,9 +5,10 @@
 //! upgraded step by step to [`CURRENT_CONFIG_VERSION`]. Missing fields are
 //! filled with defaults during deserialization (see [`crate::defaults`]),
 //! so migrations only need to handle structural changes and version
-//! stamping — with the exception of `v3 -> v4`, which also re-synchronizes
-//! the OCR language and translation source language; see
-//! [`migrate_v3_to_v4`].
+//! stamping — with the exceptions of `v3 -> v4` (re-synchronizes the OCR
+//! language and the translation source language; see [`migrate_v3_to_v4`])
+//! and `v4 -> v5` (renames the old `"api"` provider to `"openai"`; see
+//! [`migrate_v4_to_v5`]).
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -46,6 +47,11 @@ const MIGRATIONS: &[Migration] = &[
         from: 3,
         to: 4,
         apply: migrate_v3_to_v4,
+    },
+    Migration {
+        from: 4,
+        to: 5,
+        apply: migrate_v4_to_v5,
     },
 ];
 
@@ -153,6 +159,24 @@ fn migrate_v3_to_v4(config: &mut AppConfig) {
     config.version = 4;
 }
 
+/// Migrates a version-`4` config to version `5`.
+///
+/// v5 renames the old `"api"` provider id to `"openai"` and adds
+/// `translation.region` / `translation.app_id`. The new fields are
+/// backfilled with `None` by `serde(default)` during deserialization (see
+/// [`crate::defaults`]); any explicit values present in the file are
+/// preserved because the current schema parses them.
+///
+/// The step is idempotent: an already-renamed provider and already-set
+/// `region` / `app_id` values are left untouched, so re-applying the step
+/// only ever bumps the version stamp.
+fn migrate_v4_to_v5(config: &mut AppConfig) {
+    if config.translation.provider == "api" {
+        config.translation.provider = "openai".to_string();
+    }
+    config.version = 5;
+}
+
 /// Minimal deserialization target used to read the `version` field.
 #[derive(Deserialize)]
 struct VersionProbe {
@@ -180,6 +204,7 @@ mod tests {
             config.translation.target_language,
             Language::ChineseSimplified
         );
+        assert_eq!(config.translation.provider, "openai");
         assert_eq!(config.log_level, "info");
     }
 
@@ -199,19 +224,19 @@ mod tests {
     #[test]
     fn current_version_passes_through() {
         let raw = serde_json::json!({
-            "version": 4,
+            "version": 5,
             "capture": { "interval_ms": 700 }
         });
         let config = migrate_value(raw).unwrap().config;
-        assert_eq!(config.version, 4);
+        assert_eq!(config.version, 5);
         assert_eq!(config.capture.interval_ms, 700);
     }
 
     #[test]
     fn newer_version_is_rejected() {
-        let raw = serde_json::json!({ "version": 5 });
+        let raw = serde_json::json!({ "version": 6 });
         let err = migrate_value(raw).unwrap_err();
-        assert!(matches!(err, ConfigError::UnsupportedVersion(5)));
+        assert!(matches!(err, ConfigError::UnsupportedVersion(6)));
     }
 
     #[test]
@@ -250,10 +275,10 @@ mod tests {
 
     #[test]
     fn migrated_flag_is_false_for_current_version() {
-        let raw = serde_json::json!({ "version": 4 });
+        let raw = serde_json::json!({ "version": 5 });
         let migrated = migrate_value(raw).unwrap();
         assert!(!migrated.migrated);
-        assert_eq!(migrated.from_version, 4);
+        assert_eq!(migrated.from_version, 5);
     }
 
     #[test]
@@ -340,6 +365,7 @@ mod tests {
             migrated.config.ocr.language,
             migrated.config.translation.source_language
         );
+        assert_eq!(migrated.config.translation.provider, "openai");
     }
 
     #[test]
@@ -406,27 +432,130 @@ mod tests {
     }
 
     #[test]
-    fn v4_config_re_migration_is_idempotent() {
-        // A v4 config passes through `migrate_value` untouched: no version
-        // bump, no language rewrite, no quality change.
+    fn v5_config_re_migration_is_idempotent() {
+        // A v5 config passes through `migrate_value` untouched: no version
+        // bump, no provider rename, no field changes.
         let raw = serde_json::json!({
-            "version": 4,
+            "version": 5,
             "ocr": { "language": "ja" },
             "translation": {
+                "provider": "openai",
                 "quality": "balanced",
+                "region": "eastasia",
+                "app_id": "2026081000000000",
                 "source_language": "ja",
                 "target_language": "zh-CN"
             }
         });
         let migrated = migrate_value(raw).unwrap();
         assert!(!migrated.migrated);
-        assert_eq!(migrated.config.version, 4);
+        assert_eq!(migrated.config.version, 5);
+        assert_eq!(migrated.config.translation.provider, "openai");
         assert_eq!(migrated.config.ocr.language, Language::Japanese);
         assert_eq!(
             migrated.config.translation.source_language,
             Language::Japanese
         );
         assert_eq!(migrated.config.translation.quality, "balanced");
+        assert_eq!(
+            migrated.config.translation.region.as_deref(),
+            Some("eastasia")
+        );
+        assert_eq!(
+            migrated.config.translation.app_id.as_deref(),
+            Some("2026081000000000")
+        );
+    }
+
+    #[test]
+    fn v4_config_with_api_provider_is_renamed_to_openai() {
+        let raw = serde_json::json!({
+            "version": 4,
+            "translation": {
+                "provider": "api",
+                "quality": "balanced",
+                "target_language": "zh-CN"
+            }
+        });
+        let migrated = migrate_value(raw).unwrap();
+        assert!(migrated.migrated);
+        assert_eq!(migrated.from_version, 4);
+        assert_eq!(migrated.config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(migrated.config.translation.provider, "openai");
+        assert_eq!(migrated.config.translation.quality, "balanced");
+        assert_eq!(migrated.config.translation.region, None);
+        assert_eq!(migrated.config.translation.app_id, None);
+    }
+
+    #[test]
+    fn v4_config_with_local_provider_is_preserved() {
+        let raw = serde_json::json!({
+            "version": 4,
+            "translation": { "provider": "local" }
+        });
+        let config = migrate_value(raw).unwrap().config;
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.translation.provider, "local");
+    }
+
+    #[test]
+    fn v4_config_with_openai_provider_is_preserved() {
+        // A v4 file that already uses the new id keeps it; the migration
+        // only rewrites the legacy "api" value.
+        let raw = serde_json::json!({
+            "version": 4,
+            "translation": { "provider": "openai" }
+        });
+        let config = migrate_value(raw).unwrap().config;
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.translation.provider, "openai");
+    }
+
+    #[test]
+    fn v4_config_region_and_app_id_are_preserved() {
+        // The v5 schema parses region/app_id, so values present in a v4
+        // file survive the migration instead of being dropped.
+        let raw = serde_json::json!({
+            "version": 4,
+            "translation": {
+                "provider": "api",
+                "region": "eastasia",
+                "app_id": "2026081000000000"
+            }
+        });
+        let config = migrate_value(raw).unwrap().config;
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.translation.provider, "openai");
+        assert_eq!(config.translation.region.as_deref(), Some("eastasia"));
+        assert_eq!(
+            config.translation.app_id.as_deref(),
+            Some("2026081000000000")
+        );
+    }
+
+    #[test]
+    fn migrate_v4_to_v5_is_idempotent() {
+        let mut config = AppConfig {
+            translation: crate::schema::TranslationConfig {
+                provider: "api".to_string(),
+                region: Some("eastasia".to_string()),
+                app_id: Some("2026081000000000".to_string()),
+                ..Default::default()
+            },
+            version: 4,
+            ..Default::default()
+        };
+        migrate_v4_to_v5(&mut config);
+        let after_first = config.clone();
+        migrate_v4_to_v5(&mut config);
+        assert_eq!(config, after_first);
+        assert_eq!(config.version, 5);
+        assert_eq!(config.translation.provider, "openai");
+        assert_eq!(config.translation.region.as_deref(), Some("eastasia"));
+        assert_eq!(
+            config.translation.app_id.as_deref(),
+            Some("2026081000000000")
+        );
     }
 
     #[test]
