@@ -1,5 +1,0 @@
-ctranslate2==4.8.1
-sentencepiece
-transformers
-torch
-huggingface_hub
