@@ -8,11 +8,11 @@
 
 use std::path::PathBuf;
 
-use vtrans_core::Language;
+use vtrans_core::{Language, ScreenRegion};
 
 use crate::schema::{
     AppConfig, CaptureConfig, FloatingBallConfig, HotkeyConfig, OcrConfig, ResultWindowConfig,
-    TranslationConfig, CURRENT_CONFIG_VERSION,
+    TranslationBoxConfig, TranslationConfig, CURRENT_CONFIG_VERSION,
 };
 
 /// Default capture interval in milliseconds.
@@ -140,6 +140,21 @@ pub(crate) const fn default_model_dir() -> Option<PathBuf> {
     None
 }
 
+/// Default empty list of translation boxes.
+pub(crate) fn default_translation_boxes() -> Vec<TranslationBoxConfig> {
+    Vec::new()
+}
+
+/// Default maximum number of concurrent translation boxes.
+pub(crate) const fn default_max_boxes() -> u32 {
+    8
+}
+
+/// Default warning threshold for translation box count.
+pub(crate) const fn default_warning_threshold() -> u32 {
+    4
+}
+
 /// Default config file format version.
 pub(crate) const fn default_version() -> u32 {
     CURRENT_CONFIG_VERSION
@@ -210,6 +225,16 @@ impl Default for HotkeyConfig {
     }
 }
 
+impl Default for TranslationBoxConfig {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            region: ScreenRegion::new("", 0, 0, 0, 0),
+            color: String::new(),
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -221,6 +246,9 @@ impl Default for AppConfig {
             hotkeys: HotkeyConfig::default(),
             log_level: default_log_level(),
             model_dir: default_model_dir(),
+            translation_boxes: default_translation_boxes(),
+            max_boxes: default_max_boxes(),
+            warning_threshold: default_warning_threshold(),
             version: default_version(),
         }
     }
@@ -307,5 +335,22 @@ mod tests {
         let json = "{}";
         let from_json: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(from_json, AppConfig::default());
+    }
+
+    #[test]
+    fn multi_box_defaults() {
+        let config = AppConfig::default();
+        assert!(config.translation_boxes.is_empty());
+        assert_eq!(config.max_boxes, 8);
+        assert_eq!(config.warning_threshold, 4);
+    }
+
+    #[test]
+    fn translation_box_config_default() {
+        let box_config = TranslationBoxConfig::default();
+        assert_eq!(box_config.id, 0);
+        assert!(box_config.color.is_empty());
+        assert_eq!(box_config.region.width, 0);
+        assert_eq!(box_config.region.height, 0);
     }
 }

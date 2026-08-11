@@ -53,6 +53,11 @@ const MIGRATIONS: &[Migration] = &[
         to: 5,
         apply: migrate_v4_to_v5,
     },
+    Migration {
+        from: 5,
+        to: 6,
+        apply: migrate_v5_to_v6,
+    },
 ];
 
 /// The outcome of migrating raw config JSON.
@@ -177,6 +182,19 @@ fn migrate_v4_to_v5(config: &mut AppConfig) {
     config.version = 5;
 }
 
+/// Migrates a version-`5` config to version `6`.
+///
+/// v6 adds `translation_boxes`, `max_boxes`, and `warning_threshold` to
+/// support multi-box live translation. The new fields are backfilled with
+/// defaults by `serde(default)` during deserialization (empty list, `8`,
+/// `4`), so this step only stamps the new version.
+///
+/// The step is idempotent: re-applying it to an already-v6 config only
+/// re-stamps the version.
+fn migrate_v5_to_v6(config: &mut AppConfig) {
+    config.version = 6;
+}
+
 /// Minimal deserialization target used to read the `version` field.
 #[derive(Deserialize)]
 struct VersionProbe {
@@ -224,19 +242,19 @@ mod tests {
     #[test]
     fn current_version_passes_through() {
         let raw = serde_json::json!({
-            "version": 5,
+             "version": 6,
             "capture": { "interval_ms": 700 }
         });
         let config = migrate_value(raw).unwrap().config;
-        assert_eq!(config.version, 5);
+        assert_eq!(config.version, 6);
         assert_eq!(config.capture.interval_ms, 700);
     }
 
     #[test]
     fn newer_version_is_rejected() {
-        let raw = serde_json::json!({ "version": 6 });
+        let raw = serde_json::json!({ "version": 7 });
         let err = migrate_value(raw).unwrap_err();
-        assert!(matches!(err, ConfigError::UnsupportedVersion(6)));
+        assert!(matches!(err, ConfigError::UnsupportedVersion(7)));
     }
 
     #[test]
@@ -275,10 +293,10 @@ mod tests {
 
     #[test]
     fn migrated_flag_is_false_for_current_version() {
-        let raw = serde_json::json!({ "version": 5 });
+        let raw = serde_json::json!({ "version": 6 });
         let migrated = migrate_value(raw).unwrap();
         assert!(!migrated.migrated);
-        assert_eq!(migrated.from_version, 5);
+        assert_eq!(migrated.from_version, 6);
     }
 
     #[test]
@@ -432,11 +450,11 @@ mod tests {
     }
 
     #[test]
-    fn v5_config_re_migration_is_idempotent() {
-        // A v5 config passes through `migrate_value` untouched: no version
-        // bump, no provider rename, no field changes.
+    fn v6_config_re_migration_is_idempotent() {
+        // A v6 config passes through `migrate_value` untouched: no version
+        // bump, no field changes, multi-box fields preserved.
         let raw = serde_json::json!({
-            "version": 5,
+            "version": 6,
             "ocr": { "language": "ja" },
             "translation": {
                 "provider": "openai",
@@ -445,11 +463,16 @@ mod tests {
                 "app_id": "2026081000000000",
                 "source_language": "ja",
                 "target_language": "zh-CN"
-            }
+            },
+            "translation_boxes": [
+                {"id": 0, "region": {"monitor_id": "m0", "x": 10, "y": 20, "width": 100, "height": 200}, "color": "#FF6B6B"}
+            ],
+            "max_boxes": 16,
+            "warning_threshold": 8
         });
         let migrated = migrate_value(raw).unwrap();
         assert!(!migrated.migrated);
-        assert_eq!(migrated.config.version, 5);
+        assert_eq!(migrated.config.version, 6);
         assert_eq!(migrated.config.translation.provider, "openai");
         assert_eq!(migrated.config.ocr.language, Language::Japanese);
         assert_eq!(
@@ -465,6 +488,48 @@ mod tests {
             migrated.config.translation.app_id.as_deref(),
             Some("2026081000000000")
         );
+        // Multi-box fields are preserved.
+        assert_eq!(migrated.config.max_boxes, 16);
+        assert_eq!(migrated.config.warning_threshold, 8);
+        assert_eq!(migrated.config.translation_boxes.len(), 1);
+        assert_eq!(migrated.config.translation_boxes[0].id, 0);
+        assert_eq!(migrated.config.translation_boxes[0].color, "#FF6B6B");
+    }
+
+    #[test]
+    fn v5_config_is_migrated_to_v6() {
+        // A v5 config without multi-box fields is migrated to v6; the new
+        // fields are backfilled with defaults by serde.
+        let raw = serde_json::json!({
+            "version": 5,
+            "ocr": { "language": "ja" },
+            "translation": {
+                "provider": "openai",
+                "source_language": "ja",
+                "target_language": "zh-CN"
+            }
+        });
+        let migrated = migrate_value(raw).unwrap();
+        assert!(migrated.migrated);
+        assert_eq!(migrated.from_version, 5);
+        assert_eq!(migrated.config.version, CURRENT_CONFIG_VERSION);
+        // Multi-box fields default to empty list, max_boxes=8, warning_threshold=4.
+        assert!(migrated.config.translation_boxes.is_empty());
+        assert_eq!(migrated.config.max_boxes, 8);
+        assert_eq!(migrated.config.warning_threshold, 4);
+    }
+
+    #[test]
+    fn migrate_v5_to_v6_is_idempotent() {
+        let mut config = AppConfig {
+            version: 5,
+            ..Default::default()
+        };
+        migrate_v5_to_v6(&mut config);
+        let after_first = config.clone();
+        migrate_v5_to_v6(&mut config);
+        assert_eq!(config, after_first);
+        assert_eq!(config.version, 6);
     }
 
     #[test]
