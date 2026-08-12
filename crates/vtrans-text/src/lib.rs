@@ -15,13 +15,18 @@
 //! - `japanese`: Japanese punctuation normalization;
 //! - `paragraph`: paragraph splitting and length limiting.
 //!
+//! - `box_dedup`: per-box fingerprint deduplication cache
+//!   (`BoxFingerprintCache`) for multi-box live translation.
+//!
 //! See `docs/modules/06-text.md` for the full module specification.
 
+pub mod box_dedup;
 pub mod fingerprint;
 pub mod japanese;
 pub mod normalizer;
 pub mod paragraph;
 
+pub use box_dedup::BoxFingerprintCache;
 pub use fingerprint::is_duplicate;
 pub use normalizer::TextNormalizer;
 pub use paragraph::DEFAULT_MAX_PARAGRAPH_LEN;

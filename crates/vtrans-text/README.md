@@ -8,7 +8,8 @@
 - 做：纯文本处理（合并 / 清洗 / 指纹 / 切分），无 IO、无网络、无模型推理，可在任意线程同步调用。
 - 不做：不负责 OCR 识别（vtrans-ocr）、翻译（vtrans-translation）或画面采集（vtrans-capture）。
 - 不做：不做语言检测与形态分析——日文标点规则需要调用方在已知源语言为日文时显式启用。
-- 不做：不持有运行状态或资源，`TextNormalizer` 是无状态入口，无生命周期管理负担。
+- 不做：`TextNormalizer` 不持有运行状态或资源，是无状态入口，无生命周期管理负担。
+- 做：`BoxFingerprintCache` 持有按框隔离的去重状态（`Mutex<HashMap<u32, u64>>`），线程安全，删除框时需调用 `remove_box` 清理。
 
 ## 2. 依赖关系
 
@@ -73,6 +74,11 @@ fn main() -> Result<(), vtrans_text::TextError> {
 | `TextNormalizer::split_paragraphs_default` | `fn split_paragraphs_default(text: &str) -> Vec<String>` | 使用 `DEFAULT_MAX_PARAGRAPH_LEN` 切分 |
 | `TextNormalizer::validate_length` | `fn validate_length(text: &str, max_len: usize) -> Result<(), TextError>` | 长度守卫，超限返回 `TooLong(len)` |
 | `is_duplicate` | `fn is_duplicate(a: &str, b: &str) -> bool` | 两段文本指纹一致即视为重复 |
+| `BoxFingerprintCache::new` | `fn new() -> Self` | 创建空的多框指纹去重缓存（`Send + Sync`） |
+| `BoxFingerprintCache::is_duplicate` | `fn is_duplicate(&self, box_id: u32, text: &str) -> bool` | 记录 `box_id` 的指纹并返回是否与上一帧重复；重复时 debug 日志记录 `box_id` |
+| `BoxFingerprintCache::clear_box` | `fn clear_box(&self, box_id: u32)` | 重置指定框的去重状态 |
+| `BoxFingerprintCache::remove_box` | `fn remove_box(&self, box_id: u32)` | 删除框时清理缓存，释放内存 |
+| `BoxFingerprintCache::clear_all` | `fn clear_all(&self)` | 重置所有框的去重状态 |
 | `japanese::normalize_punctuation` | `fn normalize_punctuation(text: &str) -> String` | 日文标点规范化：`，`→`、`，`．`→`。`，`､`→`、`，`｡`→`。`，`～`→`〜` |
 | `TextError` | enum | `TooLong(usize)` 文本超限；`Failed(String)` 预留 |
 | `DEFAULT_MAX_PARAGRAPH_LEN` | `usize = 2000` | 默认每段最大字符数 |
@@ -84,6 +90,7 @@ fn main() -> Result<(), vtrans_text::TextError> {
 
 - **错误语义**：唯一可失败入口是 `validate_length`，失败返回 `TextError::TooLong(实际字符数)`，属**校验类错误、不可重试**——正确做法是先 `split_paragraphs` 再逐段校验；其余入口全部不可失败（空输入返回空结果而非错误）。`TextError::Failed` 当前无构造路径，为冻结规格预留。
 - **并发模型**：全部函数为纯函数，`TextNormalizer` 是无状态单元结构体，天然 `Send + Sync`、无内部锁；多线程并发调用安全。
+- **多框缓存并发**：`BoxFingerprintCache` 通过内部 `Mutex` 实现 `Send + Sync`；多线程可共享 `Arc<BoxFingerprintCache>` 并发调用，Mutex 串行化访问。
 - **取消语义**：不适用——无异步、无 `CancellationToken`；如需取消请在上层（pipeline）进行。
 - **资源生命周期**：无文件句柄、会话、模型等资源；调用方不承担任何 close / drop 义务，返回值均为 owned 数据。
 - **边界条件**：空/纯空白输入 → `clean` 返回 `""`、`merge_lines` 返回 `""`、`split_paragraphs` 返回 `[]`、`is_duplicate("", " ")` 返回 `true`；`max_len = 0` 视为不限长；超长文本线性处理，但无空白且无句读的段落会硬切字符边界（可能拆词）；`merge_lines` 的多边形退化（高度为 0）时按默认 8px 间距阈值判定段落；指纹为非加密 64 位哈希，存在理论碰撞可能。
@@ -107,6 +114,9 @@ fn main() -> Result<(), vtrans_text::TextError> {
 | `merge_lines` 以 `reading_order` 为主序 + Y 间距分组 | 与 core 的 `OcrResult::from_lines` 排序语义一致，同时满足规格"Y 坐标接近合并为同段" | 纯空间排序（忽略 reading_order，与 core 契约冲突）；纯 reading_order 不分组（无法形成段落） |
 | `split_paragraphs` 换行即段落边界 | 与 `merge_lines` 输出（段落间 `\n`）直接对接，行为确定可测 | 仅空白行分段（`merge_lines` 输出无空白行，会退化为整段一刀切） |
 | `TextError::Failed` 保留但不构造 | 规格冻结的错误契约（两变体），`TooLong` 已有真实构造路径，`Failed` 留给未来可失败路径 | 删除 `Failed`（违反冻结契约，下游 `matches!` 无法匹配该变体） |
+| `BoxFingerprintCache` 每框只存最后指纹（不存历史集合） | 与 pipeline `TextDedup` 语义一致；A→B→A 时第三帧正确重译（stored=B，A） | 存全量集合（A→B→A 时第三帧误判重复，overlay 显示过期译文） |
+| `BoxFingerprintCache` 用 `std::sync::Mutex` 而非 `parking_lot` | 仅标准库依赖，无新增外部 crate；pipeline 每个 box 一个 task，锁竞争低 | `parking_lot::Mutex`（需新增依赖，收益不抵成本） |
+| `clear_box` 与 `remove_box` 行为相同但保留两个方法 | 表达意图不同（reset vs teardown），未来如改为集合存储则行为会分化 | 合并为一个方法（语义不清，维护者无法区分意图） |
 
 ## 8. 已知限制
 
@@ -131,7 +141,7 @@ cargo clippy -p vtrans-text --all-targets
 cargo fmt -p vtrans-text -- --check
 ```
 
-测试组成：71 单元测试（`src/*.rs` 内 `#[cfg(test)]`）、5 集成测试（`tests/flow.rs`，模拟流水线完整调用链）、13 rustdoc doctest；覆盖率（llvm-cov）≈99% 行 / 100% 函数。
+测试组成：95 单元测试（`src/*.rs` 内 `#[cfg(test)]`）、11 集成测试（`tests/flow.rs` + `tests/multibox.rs`，模拟流水线完整调用链与多框去重）、20 rustdoc doctest；覆盖率（llvm-cov）≈99% 行 / 100% 函数。
 
 ## 10. 详细规格
 
