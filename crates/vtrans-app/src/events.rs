@@ -2,7 +2,8 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
-use vtrans_pipeline::{PipelineError, PipelineEvent};
+use vtrans_core::truncate_for_log;
+use vtrans_pipeline::{BoxStatus, BoxedTranslationResult, PipelineError, PipelineEvent};
 
 /// Stable event names consumed by the frontend.
 pub const CAPTURE_STATUS_CHANGED: &str = "capture_status_changed";
@@ -17,6 +18,15 @@ pub const REGION_SELECTED: &str = "region_selected";
 pub const OVERLAY_REGION_UPDATED: &str = "overlay_region_updated";
 pub const OVERLAY_HIDDEN: &str = "overlay_hidden";
 pub const DEBUG_FRAME_UPDATED: &str = "debug_frame_updated";
+
+/// Stable multi-box event names consumed by the frontend.
+pub const MULTIBOX_RESULT: &str = "multibox://result";
+pub const MULTIBOX_BOX_ADDED: &str = "multibox://box-added";
+pub const MULTIBOX_BOX_REMOVED: &str = "multibox://box-removed";
+pub const MULTIBOX_BOX_UPDATED: &str = "multibox://box-updated";
+pub const MULTIBOX_STATUS: &str = "multibox://status";
+pub const MULTIBOX_WARNING: &str = "multibox://warning";
+pub const TRANSLATION_SINGLE_RESULT: &str = "translation://single-result";
 
 #[derive(Debug, Serialize)]
 struct StatusPayload<'a> {
@@ -188,6 +198,210 @@ pub fn emit_debug_frame<R: Runtime>(app: &AppHandle<R>, payload: DebugFramePaylo
     }
 }
 
+/// Payload of `multibox://box-added`.
+#[derive(Debug, Clone, Serialize)]
+struct BoxAddedPayload {
+    box_id: u32,
+    color: String,
+    region: vtrans_core::ScreenRegion,
+}
+
+/// Payload of `multibox://box-removed`.
+#[derive(Debug, Clone, Serialize)]
+struct BoxRemovedPayload {
+    box_id: u32,
+}
+
+/// Payload of `multibox://box-updated`.
+#[derive(Debug, Clone, Serialize)]
+struct BoxUpdatedPayload {
+    box_id: u32,
+    region: vtrans_core::ScreenRegion,
+}
+
+/// Payload of `multibox://status`.
+#[derive(Debug, Clone, Serialize)]
+struct BoxStatusPayload<'a> {
+    box_id: u32,
+    status: &'a BoxStatus,
+}
+
+/// Payload of `multibox://warning`.
+#[derive(Debug, Clone, Serialize)]
+struct WarningPayload {
+    current_count: u32,
+    max_count: u32,
+}
+
+/// Payload of `translation://single-result`.
+///
+/// Carries the original OCR text and its translation so the result window
+/// can display both without re-deriving them from separate pipeline events.
+/// Text is emitted to the frontend (which needs it) but only appears in
+/// logs in truncated form.
+#[derive(Debug, Clone, Serialize)]
+pub struct SingleResultPayload {
+    /// Original OCR-recognized text.
+    pub original_text: String,
+    /// Translated text from the provider.
+    pub translated_text: String,
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+}
+
+/// Emits a multi-box translation result to the frontend.
+///
+/// The payload is the [`BoxedTranslationResult`] which carries `box_id`,
+/// `color`, the translation result, and a timestamp. Only the `box_id` is
+/// logged; the translated text is never logged at this layer.
+#[tracing::instrument(skip(app, result), fields(box_id = result.box_id))]
+pub fn emit_multibox_result<R: Runtime>(app: &AppHandle<R>, result: &BoxedTranslationResult) {
+    tracing::debug!(
+        event = MULTIBOX_RESULT,
+        box_id = result.box_id,
+        "emitting multi-box result"
+    );
+    if let Err(error) = app.emit(MULTIBOX_RESULT, result) {
+        tracing::warn!(
+            event = MULTIBOX_RESULT,
+            error = %error,
+            "failed to emit multi-box result"
+        );
+    }
+}
+
+/// Emits a `multibox://box-added` notification.
+#[tracing::instrument(skip(app), fields(box_id))]
+pub fn emit_multibox_box_added<R: Runtime>(
+    app: &AppHandle<R>,
+    box_id: u32,
+    color: &str,
+    region: &vtrans_core::ScreenRegion,
+) {
+    let payload = BoxAddedPayload {
+        box_id,
+        color: color.to_string(),
+        region: region.clone(),
+    };
+    tracing::debug!(event = MULTIBOX_BOX_ADDED, box_id, "emitting box-added");
+    if let Err(error) = app.emit(MULTIBOX_BOX_ADDED, payload) {
+        tracing::warn!(
+            event = MULTIBOX_BOX_ADDED,
+            error = %error,
+            "failed to emit box-added event"
+        );
+    }
+}
+
+/// Emits a `multibox://box-removed` notification.
+#[tracing::instrument(skip(app), fields(box_id))]
+pub fn emit_multibox_box_removed<R: Runtime>(app: &AppHandle<R>, box_id: u32) {
+    let payload = BoxRemovedPayload { box_id };
+    tracing::debug!(event = MULTIBOX_BOX_REMOVED, box_id, "emitting box-removed");
+    if let Err(error) = app.emit(MULTIBOX_BOX_REMOVED, payload) {
+        tracing::warn!(
+            event = MULTIBOX_BOX_REMOVED,
+            error = %error,
+            "failed to emit box-removed event"
+        );
+    }
+}
+
+/// Emits a `multibox://box-updated` notification.
+#[tracing::instrument(skip(app), fields(box_id))]
+pub fn emit_multibox_box_updated<R: Runtime>(
+    app: &AppHandle<R>,
+    box_id: u32,
+    region: &vtrans_core::ScreenRegion,
+) {
+    let payload = BoxUpdatedPayload {
+        box_id,
+        region: region.clone(),
+    };
+    tracing::debug!(event = MULTIBOX_BOX_UPDATED, box_id, "emitting box-updated");
+    if let Err(error) = app.emit(MULTIBOX_BOX_UPDATED, payload) {
+        tracing::warn!(
+            event = MULTIBOX_BOX_UPDATED,
+            error = %error,
+            "failed to emit box-updated event"
+        );
+    }
+}
+
+/// Emits a `multibox://status` notification.
+#[tracing::instrument(skip(app, status), fields(box_id))]
+pub fn emit_multibox_status<R: Runtime>(app: &AppHandle<R>, box_id: u32, status: &BoxStatus) {
+    let payload = BoxStatusPayload { box_id, status };
+    tracing::debug!(
+        event = MULTIBOX_STATUS,
+        box_id,
+        ?status,
+        "emitting box status"
+    );
+    if let Err(error) = app.emit(MULTIBOX_STATUS, payload) {
+        tracing::warn!(
+            event = MULTIBOX_STATUS,
+            error = %error,
+            "failed to emit box status event"
+        );
+    }
+}
+
+/// Emits a `multibox://warning` notification when the box count reaches the
+/// warning threshold.
+#[tracing::instrument(skip(app))]
+pub fn emit_multibox_warning<R: Runtime>(app: &AppHandle<R>, current_count: u32, max_count: u32) {
+    let payload = WarningPayload {
+        current_count,
+        max_count,
+    };
+    tracing::debug!(
+        event = MULTIBOX_WARNING,
+        current_count,
+        max_count,
+        "emitting box count warning"
+    );
+    if let Err(error) = app.emit(MULTIBOX_WARNING, payload) {
+        tracing::warn!(
+            event = MULTIBOX_WARNING,
+            error = %error,
+            "failed to emit box count warning"
+        );
+    }
+}
+
+/// Emits a single-capture translation result to the result window.
+///
+/// This replaces showing the result on the main page: single-capture
+/// results now go to the result window via this event. The original and
+/// translated text are emitted to the frontend (which needs them) but
+/// only appear in logs in truncated form.
+#[tracing::instrument(skip(app, original_text, translated_text))]
+pub fn emit_translation_single_result<R: Runtime>(
+    app: &AppHandle<R>,
+    original_text: &str,
+    translated_text: &str,
+) {
+    tracing::debug!(
+        event = TRANSLATION_SINGLE_RESULT,
+        original = %truncate_for_log(original_text),
+        translated = %truncate_for_log(translated_text),
+        "emitting single translation result"
+    );
+    let payload = SingleResultPayload {
+        original_text: original_text.to_string(),
+        translated_text: translated_text.to_string(),
+        timestamp: unix_timestamp_ms(),
+    };
+    if let Err(error) = app.emit(TRANSLATION_SINGLE_RESULT, payload) {
+        tracing::warn!(
+            event = TRANSLATION_SINGLE_RESULT,
+            error = %error,
+            "failed to emit single translation result"
+        );
+    }
+}
+
 fn is_recoverable(error: &PipelineError) -> bool {
     matches!(error, PipelineError::Ocr(_) | PipelineError::Translation(_))
 }
@@ -269,5 +483,29 @@ mod tests {
     fn overlay_events_use_stable_names() {
         assert_eq!(OVERLAY_REGION_UPDATED, "overlay_region_updated");
         assert_eq!(OVERLAY_HIDDEN, "overlay_hidden");
+    }
+
+    #[test]
+    fn multibox_event_names_are_stable() {
+        assert_eq!(MULTIBOX_RESULT, "multibox://result");
+        assert_eq!(MULTIBOX_BOX_ADDED, "multibox://box-added");
+        assert_eq!(MULTIBOX_BOX_REMOVED, "multibox://box-removed");
+        assert_eq!(MULTIBOX_BOX_UPDATED, "multibox://box-updated");
+        assert_eq!(MULTIBOX_STATUS, "multibox://status");
+        assert_eq!(MULTIBOX_WARNING, "multibox://warning");
+        assert_eq!(TRANSLATION_SINGLE_RESULT, "translation://single-result");
+    }
+
+    #[test]
+    fn single_result_payload_serializes_with_frontend_field_names() {
+        let payload = SingleResultPayload {
+            original_text: "hello".to_string(),
+            translated_text: "hola".to_string(),
+            timestamp: 1_700_000_000_000,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains(r#""original_text":"hello""#));
+        assert!(json.contains(r#""translated_text":"hola""#));
+        assert!(json.contains(r#""timestamp":1700000000000"#));
     }
 }

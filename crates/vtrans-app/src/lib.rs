@@ -14,7 +14,7 @@ pub mod setup;
 pub mod state;
 pub mod tray;
 
-pub use commands::LiveTranslationConfig;
+pub use commands::{LiveTranslationConfig, TranslationBoxInfo};
 pub use error::AppError;
 pub use events::{emit_model_loading_progress, emit_pipeline_event};
 pub use hotkeys::register_hotkeys;
