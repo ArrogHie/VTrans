@@ -405,7 +405,7 @@ async fn run_translation_job(ctx: WorkerCtx, job: OcrJob, cancel: CancellationTo
 
 /// Clamps the capture interval to avoid busy-looping, logging when the
 /// configured value was below the minimum.
-fn clamp_interval_ms(interval_ms: u32) -> Duration {
+pub(crate) fn clamp_interval_ms(interval_ms: u32) -> Duration {
     let clamped = interval_ms.max(MIN_CAPTURE_INTERVAL_MS);
     if clamped != interval_ms {
         warn!(
@@ -419,7 +419,7 @@ fn clamp_interval_ms(interval_ms: u32) -> Duration {
 
 /// Clamps the difference threshold into `0.0..=1.0`, logging when the
 /// configured value was out of range.
-fn clamp_threshold(threshold: f32) -> f32 {
+pub(crate) fn clamp_threshold(threshold: f32) -> f32 {
     if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
         warn!(
             requested = threshold,
@@ -436,7 +436,7 @@ fn clamp_threshold(threshold: f32) -> f32 {
 }
 
 /// Returns `true` when two regions differ in any field.
-fn region_changed(a: &ScreenRegion, b: &ScreenRegion) -> bool {
+pub(crate) fn region_changed(a: &ScreenRegion, b: &ScreenRegion) -> bool {
     a.monitor_id != b.monitor_id
         || a.x != b.x
         || a.y != b.y

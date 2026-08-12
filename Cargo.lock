@@ -5788,6 +5788,8 @@ dependencies = [
  "async-trait",
  "mockall",
  "pretty_assertions",
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",
