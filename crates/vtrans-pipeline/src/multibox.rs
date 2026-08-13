@@ -17,7 +17,11 @@
 //!    time via [`TaskSlot`], normalizes text, checks per-box dedup via
 //!    [`BoxFingerprintCache`], forwards non-duplicate jobs;
 //! 3. **translation worker** -- runs at most one translation at a time,
-//!    tags the result with `box_id` and `color`, and broadcasts it.
+//!    pairs the OCR original text with the result, tags it with `box_id`
+//!    and `color`, and broadcasts it. Empty OCR text skips the provider
+//!    call, and translation failures still publish a result; both
+//!    degraded cases carry an empty `original_text` so the overlay is
+//!    cleared rather than left with stale content.
 //!
 //! All three sub-tasks observe the box's own [`CancellationToken`], so
 //! [`MultiBoxPipeline::stop_box`] / [`remove_box`] / [`stop_all`]
@@ -203,10 +207,15 @@ impl Default for MultiBoxConfig {
     }
 }
 
-/// A translation result tagged with the box that produced it.
+/// A translation result tagged with the box that produced it, plus the
+/// original OCR text that was translated.
 ///
 /// Serialized for IPC transport so the frontend can associate each result
-/// with its originating translation box and color.
+/// with its originating translation box, color, and source text. The
+/// `original_text` field carries the cleaned OCR text (the same text sent
+/// to the translation provider) and degrades to an empty string when
+/// translation fails or OCR produced no text; such degraded results are
+/// still published so stale overlay content is cleared.
 ///
 /// # Example
 ///
@@ -215,8 +224,10 @@ impl Default for MultiBoxConfig {
 /// use vtrans_pipeline::BoxedTranslationResult;
 ///
 /// let result = TranslationResult::new("hello", "mock", 42);
-/// let boxed = BoxedTranslationResult::new(0, "#FF6B6B", result);
+/// let boxed = BoxedTranslationResult::new(0, "#FF6B6B", result)
+///     .with_original_text("hello");
 /// assert_eq!(boxed.box_id, 0);
+/// assert_eq!(boxed.original_text, "hello");
 /// assert_eq!(boxed.result.translated_text, "hello");
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,20 +238,37 @@ pub struct BoxedTranslationResult {
     pub color: String,
     /// The translation result.
     pub result: TranslationResult,
+    /// Original OCR text that was translated (cleaned source-language
+    /// text). Empty when translation failed or OCR produced no text.
+    pub original_text: String,
     /// Unix timestamp in milliseconds.
     pub timestamp: u64,
 }
 
 impl BoxedTranslationResult {
-    /// Creates a new boxed result with the current timestamp.
+    /// Creates a new boxed result with the current timestamp and an empty
+    /// `original_text`; pair the OCR text with
+    /// [`with_original_text`](Self::with_original_text).
     #[must_use]
     pub fn new(box_id: u32, color: impl Into<String>, result: TranslationResult) -> Self {
         Self {
             box_id,
             color: color.into(),
             result,
+            original_text: String::new(),
             timestamp: now_millis(),
         }
+    }
+
+    /// Attaches the original OCR text paired with this translation.
+    ///
+    /// The text is the cleaned OCR output that was sent to the translation
+    /// provider (see [`normalize_result`]); callers pass an empty string
+    /// for degraded results.
+    #[must_use]
+    pub fn with_original_text(mut self, original_text: impl Into<String>) -> Self {
+        self.original_text = original_text.into();
+        self
     }
 }
 
@@ -886,13 +914,12 @@ async fn run_box_ocr_job(
         "OCR completed"
     );
 
-    // Per-box fingerprint dedup.
+    // Per-box fingerprint dedup. Empty text is forwarded (once, before the
+    // dedup cache marks it seen) so the translation worker can publish a
+    // cleared result with empty `original_text`; repeated unchanged frames
+    // are still skipped by the dedup cache.
     if ctx.dedup.is_duplicate(ctx.box_id, &normalized.merged_text) {
         debug!("text unchanged; skipping translation");
-        return;
-    }
-    if normalized.merged_text.trim().is_empty() {
-        debug!("empty text; skipping translation");
         return;
     }
 
@@ -938,8 +965,21 @@ async fn box_translation_worker(ctx: BoxWorkerCtx, mut jobs_rx: mpsc::Receiver<B
 }
 
 /// Translation stage for one OCR job.
+///
+/// Successful translations are paired with the OCR text carried by the
+/// job. Degraded cases still publish a result so the overlay is cleared
+/// rather than left with stale content: empty OCR text skips the provider
+/// call, and a failed translation publishes an empty translation -- both
+/// with an empty `original_text`. Cancellation is not a failure and
+/// publishes nothing.
 #[instrument(skip_all, fields(box_id = ctx.box_id))]
 async fn run_box_translation_job(ctx: BoxWorkerCtx, job: BoxOcrJob, cancel: CancellationToken) {
+    if job.text.trim().is_empty() {
+        debug!("empty OCR text; publishing cleared result");
+        publish_empty_result(&ctx);
+        return;
+    }
+
     let result = tokio::select! {
         biased;
         () = ctx.cancel.cancelled() => {
@@ -962,7 +1002,8 @@ async fn run_box_translation_job(ctx: BoxWorkerCtx, job: BoxOcrJob, cancel: Canc
                 provider = %translation.provider_id,
                 "translation completed"
             );
-            let boxed = BoxedTranslationResult::new(ctx.box_id, &ctx.color, translation);
+            let boxed = BoxedTranslationResult::new(ctx.box_id, &ctx.color, translation)
+                .with_original_text(job.text);
             let _ = ctx.results_tx.send(boxed);
         }
         Err(vtrans_core::TranslationError::Cancelled) => {
@@ -970,8 +1011,21 @@ async fn run_box_translation_job(ctx: BoxWorkerCtx, job: BoxOcrJob, cancel: Canc
         }
         Err(error) => {
             warn!(error = %error, "translation failed");
+            // Publish a cleared result so the overlay does not keep showing
+            // stale translated text; `original_text` stays empty.
+            publish_empty_result(&ctx);
         }
     }
+}
+
+/// Publishes a result with empty translated and original text for a box.
+///
+/// Used for degraded outcomes (empty OCR text, translation failure) so the
+/// overlay is cleared instead of retaining stale content.
+fn publish_empty_result(ctx: &BoxWorkerCtx) {
+    let empty = TranslationResult::new(String::new(), String::new(), 0);
+    let boxed = BoxedTranslationResult::new(ctx.box_id, &ctx.color, empty);
+    let _ = ctx.results_tx.send(boxed);
 }
 
 // ==========================================================================
@@ -1026,18 +1080,22 @@ mod tests {
         let boxed = BoxedTranslationResult::new(0, "#FF0000", result);
         assert_eq!(boxed.box_id, 0);
         assert_eq!(boxed.color, "#FF0000");
+        assert_eq!(boxed.original_text, "");
         assert!(boxed.timestamp > 0);
     }
 
     #[test]
     fn boxed_translation_result_serde_roundtrip() {
         let result = vtrans_core::types::TranslationResult::new("world", "mock", 5);
-        let boxed = BoxedTranslationResult::new(3, "#00FF00", result);
+        let boxed =
+            BoxedTranslationResult::new(3, "#00FF00", result).with_original_text("original text");
         let json = serde_json::to_string(&boxed).unwrap();
+        assert!(json.contains("\"original_text\":\"original text\""));
         let back: BoxedTranslationResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.box_id, 3);
         assert_eq!(back.color, "#00FF00");
         assert_eq!(back.result.translated_text, "world");
+        assert_eq!(back.original_text, "original text");
     }
 
     #[test]
