@@ -11,7 +11,7 @@
 
 ## 职责
 
-定义 Tauri Commands 和 Events，管理 AppState 生命周期，注册全局快捷键，组装所有模块的具体实现并注入 Pipeline。是 Rust 侧与前端通信的唯一桥梁。
+定义 Tauri Commands 和 Events，管理 AppState 生命周期，注册全局快捷键，组装所有模块的具体实现并注入 Pipeline；并管理多框实时翻译（`MultiBoxPipeline` 生命周期、结果/状态 forwarder、翻译框配置持久化）。是 Rust 侧与前端通信的唯一桥梁。
 
 ## 公开 API
 
@@ -36,8 +36,36 @@ t::generate_handler![
     set_provider_credentials, // (providerId, apiKey?, appId?, secret?)
     get_app_config,
     get_app_status,
+    add_translation_box,      // (region) -> TranslationBoxInfo
+    remove_translation_box,   // (boxId)
+    update_translation_box,   // (boxId, region)
+    list_translation_boxes,   // () -> Vec<TranslationBoxInfo>
+    start_multi_realtime,     // ()
+    stop_multi_realtime,      // ()
+    stop_box,                 // (boxId)
+    open_result_window,       // ()
 ]
 ```
+
+### 多框实时翻译 Commands（8 个）
+
+`TranslationBoxInfo { box_id, region, color }` 是前端面向的框信息结构
+（镜像 `vtrans_pipeline::TranslationBox`，字段名用 `box_id` 对齐 IPC 契约）。
+
+| Command | 参数（Tauri 2 默认 camelCase） | 返回 | 行为 |
+|---------|-------------------------------|------|------|
+| `add_translation_box` | `{ region }` | `TranslationBoxInfo` | 配置快照分配 `next_box_id` / `next_box_color`，持久化到 `translation_boxes`；懒初始化 `MultiBoxPipeline` 并注册框；发射 `multibox://box-added`；框数达到 `warning_threshold`（>0 且 count ≥ 阈值）时发射 `multibox://warning`（非阻塞） |
+| `remove_translation_box` | `{ boxId }` | `()` | 从 pipeline 移除（停任务、清去重/状态；`BoxNotFound` 容忍）并删配置条目；发射 `multibox://box-removed` |
+| `update_translation_box` | `{ boxId, region }` | `()` | 校验区域；pipeline `update_box`（运行中停旧任务以新区域重启）；更新配置；发射 `multibox://box-updated` |
+| `list_translation_boxes` | 无 | `Vec<TranslationBoxInfo>` | 从持久化配置读取（跨重启存活，pipeline 未启动亦可列出） |
+| `start_multi_realtime` | 无 | `()` | 清旧 pipeline，从当前配置重建并注册全部框；spawn forwarder task（结果转发 + 状态轮询）；`start_all`；显示 overlay 窗口 |
+| `stop_multi_realtime` | 无 | `()` | `stop_all`；清 pipeline + forwarder；隐藏 overlay；对每个框发射 `multibox://status`（`Stopped`） |
+| `stop_box` | `{ boxId }` | `()` | 停止单框任务（框保持注册）；发射该框 `Stopped` 状态 |
+| `open_result_window` | 无 | `()` | 显示/聚焦预声明的 `result` 窗口（窗口已在 tauri.conf.json 声明、关闭即隐藏，不新建） |
+
+错误映射：`add_box` 的 `BoxLimitExceeded` / `DuplicateBoxId` / `InvalidConfig`
+与 `update_box` / `remove_box` 的 `BoxNotFound` 等经 `AppError::Pipeline` 传给
+前端（`remove` / `update` 对 `BoxNotFound` 容忍继续）。
 
 ### 翻译 Provider 组装与凭据目标
 
@@ -78,17 +106,43 @@ vtrans-config 校验一致；旧 id `"api"` 已废弃（v4→v5 迁移重命名�
 pub struct AppState {
     config: RwLock<ConfigManager>,
     credentials: CredentialManager,
-    pipeline: RwLock<Option<Pipeline>>,
+    pipeline: RwLock<Option<Pipeline>>,          // 单框流水线
     ocr_provider: RwLock<Box<dyn OcrProvider>>,
     translation_provider: RwLock<Box<dyn TranslationProvider>>,
     capture_source: WindowsCaptureSource,
     model_manager: ModelManager,
+    // ── 多框实时翻译 ──
+    multi_pipeline: RwLock<Option<Arc<MultiBoxPipeline>>>, // 懒初始化
+    multi_forwarder: Mutex<Option<JoinHandle<()>>>,        // 结果/状态 forwarder task
+    multi_box_ids: Arc<RwLock<Vec<u32>>>,                  // 注册框 id（供状态轮询）
 }
 
 impl AppState {
     pub fn new(app_data_dir: &Path) -> Result<Self, AppError>;
+    fn build_multi_pipeline(&self) -> Result<MultiBoxPipeline, AppError>; // 复用单框同套 provider
+    fn ensure_multi_pipeline(&self) -> Result<Arc<MultiBoxPipeline>, AppError>; // 懒创建
+    async fn clear_multi_pipeline(&self);  // abort forwarder + 清 pipeline/ids
+    async fn set_multi_forwarder(&self, task: JoinHandle<()>);
+    fn add_multi_box_id(&self, box_id: u32);    // 去重登记
+    fn remove_multi_box_id(&self, box_id: u32);
+    fn multi_box_ids_snapshot(&self) -> Vec<u32>;
 }
 ```
+
+多框要点：
+
+- `build_multi_pipeline` 用 `MultiBoxConfig::with_max_boxes(capture.interval_ms,
+  capture.difference_threshold, ocr_options, translation_request,
+  config.max_boxes)`，捕获/OCR/翻译 provider 与单框流水线**共享同一组
+  `Arc`**——provider 切换对单框与多框同时生效；`multi_pipeline` 懒创建，
+  配置变更在下一次 `ensure_multi_pipeline` 生效。
+- forwarder task（`run_multi_forwarder`）：`subscribe_results()` 逐条发射
+  `multibox://result`；每 500ms 轮询 `pipeline.box_status()`，状态与上次
+  快照不同才发射 `multibox://status`（错误状态最多延迟 500ms）；结果流
+  关闭（pipeline 被清）时退出。`clear_multi_pipeline` 先 abort forwarder
+  再清 pipeline 与 id 列表，保证下次 `start_multi_realtime` 从最新配置重建。
+- 单框与多框互不影响：`Pipeline` 与 `MultiBoxPipeline` 独立实例，共享
+  provider 但各持独立 CaptureSession（可同时运行，资源消耗加倍）。
 
 ### Events
 
@@ -99,14 +153,40 @@ pub fn emit_overlay_hidden(app: &AppHandle);
 pub fn emit_debug_frame(app: &AppHandle, payload: DebugFramePayload);
 ```
 
+### 多框与结果窗口 Events（7 个，events.rs 常量 + 发射函数）
+
+| 事件名 | payload 形状 | 触发时机 |
+|--------|-------------|----------|
+| `multibox://result` | `BoxedTranslationResult`：`{ box_id, color, result: { translated_text, provider_id, elapsed_ms }, original_text, timestamp }` | forwarder 收到一条多框结果即转发 |
+| `multibox://box-added` | `{ box_id, color, region }` | `add_translation_box` 成功 |
+| `multibox://box-removed` | `{ box_id }` | `remove_translation_box` 成功 |
+| `multibox://box-updated` | `{ box_id, region }` | `update_translation_box` 成功 |
+| `multibox://status` | `{ box_id, status }`；`status` 为 `BoxStatus` 的 serde 表示：单元变体序列化为字符串 `"Running"` / `"Stopped"`，`Error` 为 `{"Error": "<msg>"}` | 状态变化（forwarder 500ms 轮询发现变化、stop 命令主动发射） |
+| `multibox://warning` | `{ current_count, max_count }` | 添加框后数量达到 `warning_threshold` |
+| `translation://single-result` | `{ original_text, translated_text, timestamp }` | 单次捕获完成后（OCR 与翻译均可得且原文非空），供结果窗口同时展示原文+译文 |
+
+日志纪律：`emit_multibox_result` 只记 `box_id`，译文不落日志；
+`emit_translation_single_result` 的原文/译文仅以 `truncate_for_log` 截断形式
+进入 debug 日志。
+
+`original_text` 语义（与 pipeline 一致）：多框 `multibox://result` 携带清洗
+后的 OCR 原文（F1/F2 落地）；翻译失败或 OCR 空文本时该字段与译文均为空串
+（前端据此清除该框 overlay 残留），取消不发射。
+
 ### 全局快捷键
 
 ```rust
 pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
 // Alt+Shift+A: start_region_selection (单次)
-// Alt+Shift+R: start_live_translation (实时)
-// Alt+Shift+S: stop_live_translation
+// Alt+Shift+R: start_live_translation (单框实时)
+// Alt+Shift+S: stop_live_translation (单框实时)
 ```
+
+**热键语义（用户确认的设计决策）**：Alt+Shift+R / Alt+Shift+S 始终控制
+**单框**实时会话（`hotkeys.rs` 仅注册 Select / StartLive / StopLive 三个动作，
+均走 `start_live_task` / `stop_live_task` / `select_region`）；多框实时翻译的
+启动 / 停止**仅由 UI 按钮**调用 `start_multi_realtime` / `stop_multi_realtime`，
+不注册多框热键、不复用 R/S。
 
 ### 窗口生命周期与托盘
 
@@ -291,8 +371,9 @@ Provider 与配置 id 一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
 
 ## 验收标准
 
-- [x] 所有 Commands 可被前端调用（`invoke_handler` 注册 16 个命令，前端
-      `src/services/tauri.ts` 全部按 Tauri 2 camelCase 参数契约调用）
+- [x] 所有 Commands 可被前端调用（`invoke_handler` 注册 26 个命令——18 个
+      基础命令 + 8 个多框命令，前端 `src/services/tauri.ts` 全部按 Tauri 2
+      camelCase 参数契约调用）
 - [x] 所有 Events 正确推送到前端（`events.rs` 单测 + `tests/contracts.rs`
       固化了事件名与 payload 形状）
 - [x] AppState 正确组装各模块实现（`AppState::new` / `new_with_debug`）
@@ -400,6 +481,29 @@ Provider 与配置 id 一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
       保存（持久化路径独立于 pipeline/provider 状态）
 - [x] 回归：fmt / clippy / app 单测 / workspace check 全绿；未修改其他
       crate 与 vtrans-core
+
+### 多框实时翻译验收（本任务）
+
+- [x] 8 个 Command 全部注册进 `invoke_handler` 并按 Tauri 2 默认 camelCase
+      映射参数（`boxId` 等）；`TranslationBoxInfo` IPC 字段名为 `box_id`
+      （contracts.rs 与前端 multiboxTypes.test.ts 双向断言）
+- [x] 7 个 Event 常量与前端一致：`multibox://result` / `box-added` /
+      `box-removed` / `box-updated` / `status` / `warning`、
+      `translation://single-result`；payload 形状与 TypeScript 类型一一对应
+- [x] `add_translation_box` 用配置 `next_box_id` / `next_box_color` 分配并
+      持久化；达到 `warning_threshold`（>0）发射 `multibox://warning`
+- [x] `start_multi_realtime` 从配置重建 pipeline、spawn forwarder、
+      `start_all`、显示 overlay；`stop_multi_realtime` 停全部并发射每框
+      `Stopped`；`stop_box` 单停
+- [x] forwarder：结果逐条转 `multibox://result`；500ms 轮询
+      `box_status()` 仅状态变化时发射 `multibox://status`
+- [x] `open_result_window` 只显示/聚焦预声明 result 窗口，不新建
+- [x] 热键语义按用户决策：Alt+Shift+R/S 控制单框实时；多框仅 UI 按钮
+- [x] `multibox://result` 经 F1/F2 携带 `original_text`（OCR 清洗原文）；
+      空文本/翻译失败降级为空串（前端清除残留）
+- [x] 单框链路（capture_once / live / 热键）与设置、provider、托盘、悬浮球
+      回归无变化
+- [x] 未修改 vtrans-core 与其它 crate；README 与本文档同步
 
 ## 开发注意事项
 
