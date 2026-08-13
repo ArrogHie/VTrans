@@ -5,7 +5,7 @@
 - 功能目标：在实时翻译模式下支持多个矩形框同时进行翻译，每个框独立采集、OCR、翻译并展示结果，用不同颜色区分
 - 使用场景：用户在主页面「翻译框」列表中新增/删除/修改翻译框（矩形区域），启动实时翻译后所有框同时工作；单次翻译仍仅支持单框
 - 优先级：P1
-- 状态：待拆解
+- 状态：已整合（2026-08-13 合并入 main，待手工验收；详见 LEDGER.md 与 INTEGRATION_REPORT.md）
 
 ## 验收标准（用户可验证）
 - [ ] 主页面有「翻译框」列表，可新增、删除、修改每个框的区域
@@ -28,11 +28,11 @@
 
 | 序号 | 模块 | 任务类型 | 依赖 | 建议分支 | 状态 |
 |------|------|----------|------|----------|------|
-| 1 | 02-config | 修改 | — | feat/multibox-config | 待分配 |
-| 2 | 06-text | 修改（条件性） | — | feat/multibox-text | 待分配 |
-| 3 | 09-pipeline | 新增+修改 | 依赖 1, 2 | feat/multibox-pipeline | 待分配 |
-| 4 | 10-app | 新增+修改 | 依赖 3 | feat/multibox-app | 待分配 |
-| 5 | 11-frontend | 新增+修改 | 依赖 4（IPC 契约） | feat/multibox-frontend | 待分配 |
+| 1 | 02-config | 修改 | — | feat/multibox-config | 已整合 |
+| 2 | 06-text | 修改（条件性） | — | feat/multibox-text | 已整合 |
+| 3 | 09-pipeline | 新增+修改 | 依赖 1, 2 | feat/multibox-pipeline | 已整合 |
+| 4 | 10-app | 新增+修改 | 依赖 3 | feat/multibox-app | 已整合 |
+| 5 | 11-frontend | 新增+修改 | 依赖 4（IPC 契约） | feat/multibox-frontend | 已整合 |
 
 ### 阶段安排
 - **阶段 A（并行）**：02-config + 06-text（层级 1，互不依赖）

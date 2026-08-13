@@ -5,7 +5,7 @@
 - 需求来源：用户提出
 - 优先级：P1
 - 创建时间：2026-08-11
-- 当前状态：阶段 A+B+C Review 全部通过，整合执行中
+- 当前状态：已整合（main dd0e5e1），待手工验收；遗留问题见 INTEGRATION_REPORT.md
 
 ## 用户已确认决策（2026-08-11）
 1. 优先级：P1
@@ -116,12 +116,14 @@
 - 观察项（非阻塞，见整合报告遗留问题）：多框结果不含原文（已知限制，README 已注明）；热键 Alt+Shift+R/S 未接入多框启动/停止；docs/modules/*.md 与 ARCHITECTURE.md 未同步多框契约
 - 结论：✅ 通过，进入整合
 
-### 2026-08-13 整合执行
-- 合并顺序：feat/multibox-config → feat/multibox-text → feat/multibox-pipeline → feat/multibox-app → feat/multibox-frontend（均 --no-ff）
-- 详见 INTEGRATION_REPORT.md
+### 2026-08-13 整合完成
+- 按依赖顺序 --no-ff 合并入 main：feat/multibox-config（9e8e626）→ feat/multibox-text（7a3b97b）→ feat/multibox-pipeline（1258528）→ feat/multibox-app（513929f）→ feat/multibox-frontend（dd0e5e1），全部零冲突
+- main 全量门禁复核：fmt / clippy（0 错误）/ workspace 测试 / pnpm 264 测试 / tsc 全部 PASS
+- 验收标准 16 条代码层面对照全部满足；弹窗「每框显示原文」细化要求未满足（遗留问题 1）
+- 输出 INTEGRATION_REPORT.md；功能状态：已整合 / 待验收（手工冒烟 + 遗留问题 1/2 用户决策后关闭）
 
-## 整合计划（待执行）
-1. 阶段 A+B：02-config + 06-text + 09-pipeline 合并到 main，验证 workspace 编译
-2. 阶段 C：10-app + 11-frontend 合并到 main，验证 workspace 编译+测试+前端
-3. 端到端验证：cargo tauri dev 下多框实时翻译功能可用
-4. 输出整合报告
+## 整合记录（已完成）
+1. ✅ 阶段 A+B：02-config + 06-text + 09-pipeline 合并到 main，workspace 编译验证通过
+2. ✅ 阶段 C：10-app + 11-frontend 合并到 main，workspace 编译+测试+前端门禁通过
+3. ⏳ 端到端验证：GUI 冒烟为手工验证项（沙箱无显示环境），待用户执行
+4. ✅ 输出整合报告：INTEGRATION_REPORT.md
