@@ -178,6 +178,38 @@ impl TranslationProvider for EchoTranslationProvider {
     }
 }
 
+/// A translation provider that always fails with an API error, used to
+/// exercise the degraded-result path of the multi-box pipeline.
+struct FailingTranslationProvider {
+    delay: Duration,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TranslationProvider for FailingTranslationProvider {
+    fn id(&self) -> &'static str {
+        "failing-translation"
+    }
+
+    async fn translate(
+        &self,
+        _request: &TranslationRequest,
+        cancel: CancellationToken,
+    ) -> Result<TranslationResult, TranslationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::select! {
+            () = cancel.cancelled() => Err(TranslationError::Cancelled),
+            () = tokio::time::sleep(self.delay) => {
+                Err(TranslationError::ApiRequest("mock failure".into()))
+            }
+        }
+    }
+
+    fn supported_pairs(&self) -> &[(Language, Language)] {
+        &[(Language::English, Language::ChineseSimplified)]
+    }
+}
+
 // ==========================================================================
 // Helpers
 // ==========================================================================
@@ -201,10 +233,10 @@ fn multibox_config(max_boxes: u32) -> MultiBoxConfig {
     )
 }
 
-fn make_deps<C: CaptureSource + 'static>(
+fn make_deps<C: CaptureSource + 'static, T: TranslationProvider + 'static>(
     capture: C,
     ocr: EchoOcrProvider,
-    translation: EchoTranslationProvider,
+    translation: T,
 ) -> PipelineDeps {
     PipelineDeps::new(Box::new(capture), Box::new(ocr), Box::new(translation))
 }
@@ -906,4 +938,156 @@ async fn start_all_when_already_running_returns_error() {
     assert!(matches!(result, Err(PipelineError::AlreadyRunning)));
 
     pipeline.stop_all().await.unwrap();
+}
+
+#[tokio::test]
+async fn results_carry_ocr_original_text() {
+    let ocr_text = "hello world";
+    let capture = GeneratingCaptureSource::new(three_frames(), Duration::from_millis(1));
+    let ocr = EchoOcrProvider {
+        text: ocr_text.into(),
+        delay: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let translation = EchoTranslationProvider {
+        prefix: "zh:".into(),
+        delay: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let pipeline = MultiBoxPipeline::new(multibox_config(8), make_deps(capture, ocr, translation));
+
+    pipeline
+        .add_box(TranslationBox::new(
+            0,
+            ScreenRegion::new("m0", 0, 0, 8, 8),
+            "#FF0000",
+        ))
+        .await
+        .unwrap();
+
+    let mut rx = pipeline.subscribe_results();
+    pipeline.start_all().await.unwrap();
+
+    let results = collect_results(&mut rx, Duration::from_secs(5)).await;
+    pipeline.stop_all().await.unwrap();
+
+    assert!(!results.is_empty(), "expected at least one result");
+    for result in &results {
+        assert_eq!(
+            result.original_text, ocr_text,
+            "original_text should equal the OCR text sent to translation"
+        );
+        assert_eq!(
+            result.result.translated_text,
+            format!("zh:{ocr_text}"),
+            "translated text should match the echo provider output"
+        );
+    }
+}
+
+#[tokio::test]
+async fn translation_failure_publishes_result_with_empty_original_text() {
+    let capture = GeneratingCaptureSource::new(three_frames(), Duration::from_millis(1));
+    let ocr = EchoOcrProvider {
+        text: "fail me".into(),
+        delay: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let translation = FailingTranslationProvider {
+        delay: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let pipeline = MultiBoxPipeline::new(multibox_config(8), make_deps(capture, ocr, translation));
+
+    pipeline
+        .add_box(TranslationBox::new(
+            0,
+            ScreenRegion::new("m0", 0, 0, 8, 8),
+            "#FF0000",
+        ))
+        .await
+        .unwrap();
+
+    let mut rx = pipeline.subscribe_results();
+    pipeline.start_all().await.unwrap();
+
+    let results = collect_results(&mut rx, Duration::from_secs(5)).await;
+    pipeline.stop_all().await.unwrap();
+
+    assert!(
+        !results.is_empty(),
+        "a failed translation should still publish a result"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.original_text.is_empty() && r.result.translated_text.is_empty()),
+        "degraded results should carry empty original and translated text: {results:?}"
+    );
+}
+
+#[tokio::test]
+async fn empty_ocr_text_publishes_result_with_empty_original_text() {
+    let capture = GeneratingCaptureSource::new(three_frames(), Duration::from_millis(1));
+    let ocr = EchoOcrProvider {
+        text: String::new(),
+        delay: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let translation = EchoTranslationProvider {
+        prefix: "zh:".into(),
+        delay: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    };
+    let translation_calls = translation.calls.clone();
+    let pipeline = MultiBoxPipeline::new(multibox_config(8), make_deps(capture, ocr, translation));
+
+    pipeline
+        .add_box(TranslationBox::new(
+            0,
+            ScreenRegion::new("m0", 0, 0, 8, 8),
+            "#FF0000",
+        ))
+        .await
+        .unwrap();
+
+    let mut rx = pipeline.subscribe_results();
+    pipeline.start_all().await.unwrap();
+
+    let results = collect_results(&mut rx, Duration::from_secs(5)).await;
+    pipeline.stop_all().await.unwrap();
+
+    assert!(
+        !results.is_empty(),
+        "empty OCR text should still publish a cleared result"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r.original_text.is_empty() && r.result.translated_text.is_empty()),
+        "empty OCR results should carry empty original and translated text: {results:?}"
+    );
+    assert_eq!(
+        translation_calls.load(Ordering::SeqCst),
+        0,
+        "empty OCR text must skip the translation provider"
+    );
+}
+
+#[test]
+fn boxed_translation_result_serde_exposes_original_text_field() {
+    let result = TranslationResult::new("translated", "mock", 3);
+    let boxed =
+        BoxedTranslationResult::new(7, "#123456", result).with_original_text("original text");
+    let json = serde_json::to_string(&boxed).unwrap();
+    assert!(
+        json.contains("\"original_text\":\"original text\""),
+        "JSON should contain the `original_text` field: {json}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["original_text"], "original text");
+    assert_eq!(parsed["box_id"], 7);
+    assert_eq!(parsed["color"], "#123456");
+    let back: BoxedTranslationResult = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.original_text, "original text");
 }

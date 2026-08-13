@@ -108,7 +108,9 @@ pub struct MultiBoxConfig {
     pub max_boxes: u32,                  // 默认 8
 }
 pub struct BoxedTranslationResult {
-    pub box_id: u32, pub color: String, pub result: TranslationResult, pub timestamp: u64,
+    pub box_id: u32, pub color: String, pub result: TranslationResult,
+    pub original_text: String,          // 送入翻译的清洗后 OCR 原文；失败/无文本时为空串
+    pub timestamp: u64,
 }
 pub enum BoxStatus { Running, Stopped, Error(String) }
 
@@ -131,6 +133,13 @@ impl MultiBoxPipeline {
 `max_boxes * 2`）汇集，`subscribe_results` 返回一个由 forwarder 驱动的私有
 `mpsc::Receiver`，提供 per-subscriber 背压。单框错误（如采集失败）只设置该框的
 `BoxStatus::Error`，不影响其他框。`Drop` 时自动取消并清理所有 task。
+
+结果原文配对：`BoxedTranslationResult.original_text` 为送入翻译 provider 的清洗后
+OCR 文本（`OcrResult.merged_text` 经 `normalize_result` 清洗/归一化后的结果，
+与 `TranslationRequest.text` 一致）。降级语义：OCR 无文本时跳过 provider 调用、
+翻译失败时在错误日志后发布空译文，两种情况下 `original_text` 均为空串且结果
+照常发布（overlay 据此清除旧内容，而不是保留过期译文）；取消（Cancelled）
+不算失败，不发布结果。
 
 新增错误变体：`BoxNotFound(u32)`、`BoxLimitExceeded(u32)`、`DuplicateBoxId(u32)`、
 `InvalidConfig(String)`。
@@ -194,9 +203,11 @@ cargo fmt --all -- --check
 停止清理、区域更新、背压有界、会话自然结束。
 
 `tests/pipeline_multibox.rs` 使用无状态 mock Provider（`EchoOcrProvider`、`EchoTranslationProvider`、
-`GeneratingCaptureSource`）覆盖多框场景：2+ 框并发独立运行、运行时增删框、区域修改重启、停止单框、
-错误隔离（一框采集失败不影响其他框）、指纹去重隔离（框间不交叉）、通道容量背压、8 框并发无 panic/
-死锁基准、以及各类边界错误（重复 ID、超限、不存在、重复启停）。
+`FailingTranslationProvider`、`GeneratingCaptureSource`）覆盖多框场景：2+ 框并发独立运行、运行时增删框、
+区域修改重启、停止单框、错误隔离（一框采集失败不影响其他框）、指纹去重隔离（框间不交叉）、
+通道容量背压、8 框并发无 panic/死锁基准、各类边界错误（重复 ID、超限、不存在、重复启停）、
+结果原文配对（`original_text` 与 OCR 输入一致）、翻译失败/空 OCR 文本的降级发布（原文与译文均为
+空串、空文本不调用翻译 provider）、以及 `original_text` serde 字段名断言。
 
 ## 7. 人工验证（全管线：采集屏幕 -> OCR -> 翻译 -> 输出）
 
