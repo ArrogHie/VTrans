@@ -5,7 +5,7 @@
 - 需求来源：用户提出
 - 优先级：P1
 - 创建时间：2026-08-11
-- 当前状态：已整合（main 9a00507），待手工验收；后续迭代 F1/F2/D1 已完成并整合（2026-08-13）。剩余：GUI 手工冒烟 + 用户推送 main。遗留问题见 INTEGRATION_REPORT.md
+- 当前状态：已整合（main 07bcc3f），待手工验收；后续迭代 F1/F2/D1 与 UI 三缺陷修复（BUGFIX-1/2/3）已完成并整合（2026-08-13）。剩余：GUI 手工冒烟 + 用户推送 main。遗留问题见 INTEGRATION_REPORT.md
 
 ## 用户已确认决策（2026-08-11）
 1. 优先级：P1
@@ -127,6 +127,11 @@
 2. 热键语义 → **保持现状**：Alt+Shift+R/S 继续控制单框实时会话，多框启动/停止仅 UI 按钮（记录为设计决策，遗留 2 关闭）
 3. 文档同步 → **派单补齐**：TASK-DOCSYNC.md（docs/modules/02/06/09/10 + ARCHITECTURE.md），由各模块开发 Agent 执行
 
+### 2026-08-13 UI 三缺陷修复（用户 bug 报告 → 分诊 11-frontend → 派单修复）
+- BUGFIX-1 主页面按模式分离区块：single 模式只渲染「翻译区域」（含选择并翻译）；live 模式只渲染「翻译框」与单框实时控制行；runLive 无选区时回退先框选再启动（与悬浮球一致）。任务单 TASK-BUGFIX-11-ui.md；分支 fix/11-multibox-ui-bugs；Review 通过（范围仅 src/、tsc、273 前端测试）→ 合并 main（07bcc3f）
+- BUGFIX-2 弹窗多框原文逐框折叠：默认折叠 + 每框 chevron 开关，展开状态按 box_id 记忆，空原文无开关（替代 F2 的常显）
+- BUGFIX-3 弹窗滚动：根容器 min-h-screen→h-screen，多框滚动容器与单框译文区补 min-h-0 + overflow-y-auto（flexbox min-height:auto 陷阱修复），滚动条不隐藏
+
 ### 后续迭代台账
 
 | 序号 | 模块 | 任务单 | 分支 | 状态 |
@@ -134,6 +139,7 @@
 | F1 | 09-pipeline | TASK-FOLLOWUP-09-pipeline.md | feat/multibox-original-text-pipeline | 已整合（0fca96d） |
 | F2 | 11-frontend | TASK-FOLLOWUP-11-frontend.md | feat/multibox-original-text-frontend | 已整合（223f600） |
 | D1 | 02/06/09/10 文档同步 | TASK-DOCSYNC.md | docs/multibox-contract-sync | 已整合（9a00507） |
+| B1-B3 | 11-frontend UI 缺陷 | TASK-BUGFIX-11-ui.md | fix/11-multibox-ui-bugs | 已整合（07bcc3f） |
 
 ### 2026-08-13 后续迭代执行完成（F1/F2/D1 派发子代理开发）
 - F1（pipeline 原文字段）：`BoxedTranslationResult` 新增 `original_text`（配对 OCR 清洗文本；空 OCR/翻译失败发布空原文+空译文以清除 overlay；取消不发布）；`with_original_text` builder 保持三参 `new` 向后兼容；README 更新；Review 通过（范围仅 pipeline、fmt/clippy 0 警告、90 测试全绿）→ --no-ff 合并 main（0fca96d）
