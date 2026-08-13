@@ -32,10 +32,10 @@ describe("frontend contracts", () => {
   });
 
   it("matches the backend config schema version", () => {
-    // 与 vtrans-config 的 CURRENT_CONFIG_VERSION（5）保持一致：任何
+    // 与 vtrans-config 的 CURRENT_CONFIG_VERSION（6）保持一致：任何
     // “未水合即保存”路径都必须携带后端接受的版本，否则 save_settings
     // 会被校验拒绝。
-    expect(DEFAULT_CONFIG.version).toBe(5);
+    expect(DEFAULT_CONFIG.version).toBe(6);
   });
 
   it("matches the model verification report shape", () => {

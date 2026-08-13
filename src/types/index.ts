@@ -66,6 +66,67 @@ export interface DebugFramePayload {
   timestamp_ms: number;
 }
 
+/** A translation box as returned by the multi-box IPC commands. */
+export interface TranslationBoxInfo {
+  box_id: number;
+  region: ScreenRegion;
+  color: string;
+}
+
+/**
+ * Runtime status of a single translation box.
+ *
+ * Mirrors `vtrans_pipeline::BoxStatus`'s serde representation: the unit
+ * variants serialize as plain strings (`"Running"` / `"Stopped"`) and the
+ * `Error` newtype variant serializes as `{ "Error": message }`.
+ */
+export type BoxStatus = "Running" | "Stopped" | { Error: string };
+
+/** A multi-box translation result tagged with its originating box. */
+export interface BoxedTranslationResult {
+  box_id: number;
+  color: string;
+  result: TranslationResult;
+  timestamp: number;
+}
+
+/** Payload of the `translation://single-result` event. */
+export interface SingleResultPayload {
+  original_text: string;
+  translated_text: string;
+  timestamp: number;
+}
+
+/** Payload of `multibox://box-added`. */
+export interface BoxAddedPayload {
+  box_id: number;
+  color: string;
+  region: ScreenRegion;
+}
+
+/** Payload of `multibox://box-removed`. */
+export interface BoxRemovedPayload {
+  box_id: number;
+}
+
+/** Payload of `multibox://box-updated`. */
+export interface BoxUpdatedPayload {
+  box_id: number;
+  region: ScreenRegion;
+}
+
+/** Payload of `multibox://status`. */
+export interface BoxStatusPayload {
+  box_id: number;
+  status: BoxStatus;
+}
+
+/** Payload of `multibox://warning`. */
+export interface WarningPayload {
+  current_count: number;
+  max_count: number;
+}
+
 export interface AppConfig {
   capture: CaptureConfig;
   ocr: OcrConfig;
@@ -75,7 +136,20 @@ export interface AppConfig {
   hotkeys: HotkeyConfig;
   log_level: string;
   model_dir: string | null;
+  /** Persisted multi-box translation entries (field name is `id`, per config schema). */
+  translation_boxes: TranslationBoxConfigEntry[];
+  /** Maximum number of concurrent translation boxes. */
+  max_boxes: number;
+  /** Active-box count at which the UI should warn (0 disables the warning). */
+  warning_threshold: number;
   version: number;
+}
+
+/** A translation box entry as stored inside `AppConfig.translation_boxes`. */
+export interface TranslationBoxConfigEntry {
+  id: number;
+  region: ScreenRegion;
+  color: string;
 }
 
 export interface CaptureConfig {
@@ -205,7 +279,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   log_level: "info",
   model_dir: null,
-  version: 5,
+  translation_boxes: [],
+  max_boxes: 8,
+  warning_threshold: 4,
+  version: 6,
 };
 
 /** Allowed range for the mini-bar background opacity. */
@@ -292,4 +369,34 @@ export function isLocalPairSupported(
     config.translation.source_language === "en" &&
     config.translation.target_language === "zh-CN"
   );
+}
+
+/** Reports whether a box status is the serialized `Error` variant. */
+export function isBoxError(status: BoxStatus): status is { Error: string } {
+  return typeof status === "object" && status !== null && "Error" in status;
+}
+
+/** Maps a box status to its Chinese UI label. */
+export function boxStatusLabel(status: BoxStatus): string {
+  if (isBoxError(status)) return "错误";
+  return status === "Running" ? "运行中" : "已停止";
+}
+
+/** Whether the multi-box session is actively engaged (running or has results). */
+export function isMultiBoxEngaged(
+  statuses: Record<number, BoxStatus>,
+  resultCount: number,
+): boolean {
+  if (resultCount > 0) return true;
+  return Object.values(statuses).some((status) => status === "Running");
+}
+
+/** Whether the active-box count should surface a performance warning. */
+export function shouldWarnBoxCount(count: number, warningThreshold: number): boolean {
+  return warningThreshold > 0 && count >= warningThreshold;
+}
+
+/** Human-readable warning text for an over-threshold box count. */
+export function boxCountWarningText(warningThreshold: number): string {
+  return `翻译框过多可能导致卡顿，建议不超过 ${warningThreshold} 个`;
 }

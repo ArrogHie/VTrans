@@ -1,9 +1,16 @@
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  BoxAddedPayload,
+  BoxRemovedPayload,
+  BoxStatusPayload,
+  BoxUpdatedPayload,
+  BoxedTranslationResult,
   EventPayloadMap,
   OcrResult,
   PipelineConfig,
+  SingleResultPayload,
   TranslationResult,
+  WarningPayload,
 } from "../types";
 
 export type Unlisten = UnlistenFn;
@@ -61,6 +68,78 @@ export const FRONTEND_LIVE_CONFIG = "frontend_live_config";
 export const FRONTEND_LIVE_PAUSED = "frontend_live_paused";
 export const FRONTEND_LIVE_STOPPED = "frontend_live_stopped";
 export const FRONTEND_FLOATER_ENABLED = "frontend_floater_enabled";
+
+/** Stable multi-box event names emitted by `vtrans-app`. */
+export const MULTIBOX_RESULT = "multibox://result";
+export const MULTIBOX_BOX_ADDED = "multibox://box-added";
+export const MULTIBOX_BOX_REMOVED = "multibox://box-removed";
+export const MULTIBOX_BOX_UPDATED = "multibox://box-updated";
+export const MULTIBOX_STATUS = "multibox://status";
+export const MULTIBOX_WARNING = "multibox://warning";
+export const TRANSLATION_SINGLE_RESULT = "translation://single-result";
+
+/** Listen for a multi-box translation result tagged with its box id/color. */
+export function onMultiBoxResult(
+  callback: (result: BoxedTranslationResult) => void,
+): Promise<Unlisten> {
+  return listen<BoxedTranslationResult>(MULTIBOX_RESULT, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
+
+/** Listen for a translation box being added. */
+export function onMultiBoxBoxAdded(
+  callback: (payload: BoxAddedPayload) => void,
+): Promise<Unlisten> {
+  return listen<BoxAddedPayload>(MULTIBOX_BOX_ADDED, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
+
+/** Listen for a translation box being removed. */
+export function onMultiBoxBoxRemoved(
+  callback: (payload: BoxRemovedPayload) => void,
+): Promise<Unlisten> {
+  return listen<BoxRemovedPayload>(MULTIBOX_BOX_REMOVED, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
+
+/** Listen for a translation box region being updated. */
+export function onMultiBoxBoxUpdated(
+  callback: (payload: BoxUpdatedPayload) => void,
+): Promise<Unlisten> {
+  return listen<BoxUpdatedPayload>(MULTIBOX_BOX_UPDATED, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
+
+/** Listen for a translation box runtime status change. */
+export function onMultiBoxStatus(
+  callback: (payload: BoxStatusPayload) => void,
+): Promise<Unlisten> {
+  return listen<BoxStatusPayload>(MULTIBOX_STATUS, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
+
+/** Listen for the box-count performance warning. */
+export function onMultiBoxWarning(
+  callback: (payload: WarningPayload) => void,
+): Promise<Unlisten> {
+  return listen<WarningPayload>(MULTIBOX_WARNING, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
+
+/** Listen for a single-capture translation result (original + translated). */
+export function onSingleTranslationResult(
+  callback: (payload: SingleResultPayload) => void,
+): Promise<Unlisten> {
+  return listen<SingleResultPayload>(TRANSLATION_SINGLE_RESULT, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
 
 /** Listen for a single-capture result shared between Tauri webviews. */
 export function listenToFrontendOcrResult(callback: (result: OcrResult) => void): Promise<Unlisten> {
