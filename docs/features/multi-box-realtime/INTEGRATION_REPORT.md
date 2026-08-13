@@ -70,9 +70,9 @@
 
 | # | 问题 | 性质 | 负责人 | 状态 |
 |---|------|------|--------|------|
-| 1 | 多框结果不含原文：BoxedTranslationResult 仅携带 TranslationResult（译文），弹窗多框区域无法显示原文。需 pipeline 层将 OCR 文本与翻译结果配对后增加字段（影响 pipeline/app/frontend）。vtrans-app README 已注明为已知限制 | 功能缺口（PLAN 弹窗设计细化要求） | 模块开发 Agent（后续迭代） | 待用户决定是否纳入 |
-| 2 | 热键 Alt+Shift+R/S 仍启动/停止单框实时会话，未接入多框（hotkeys.rs 未改动）。与「复用现有热键」确认决策的解读偏差：多框启动/停止目前仅 UI 按钮 | 需用户确认语义 | 统筹转用户 | 待用户确认 |
-| 3 | docs/modules/01-10*.md 与 docs/ARCHITECTURE.md 未同步多框契约（新命令/事件、MultiBoxPipeline、TranslationBoxConfig、v5 迁移）。crate README 与 src/README.md 已更新 | 文档同步缺口 | 各模块开发 Agent | 待派文档同步任务 |
+| 1 | 多框结果不含原文：BoxedTranslationResult 仅携带 TranslationResult（译文），弹窗多框区域无法显示原文。需 pipeline 层将 OCR 文本与翻译结果配对后增加字段（影响 pipeline/frontend；app 仅 README 同步）。vtrans-app README 已注明为已知限制 | 功能缺口（PLAN 弹窗设计细化要求） | 模块开发 Agent（后续迭代） | **已确认纳入后续迭代**（2026-08-13 用户决策）；任务单见 TASK-FOLLOWUP-09-pipeline.md / TASK-FOLLOWUP-11-frontend.md |
+| 2 | 热键 Alt+Shift+R/S 仍启动/停止单框实时会话，未接入多框（hotkeys.rs 未改动）。与「复用现有热键」确认决策的解读偏差 | 需用户确认语义 | 用户 | **已确认保持现状**（2026-08-13 用户决策）：R/S 控制单框实时，多框仅 UI 按钮。记录为设计决策，关闭 |
+| 3 | docs/modules/01-10*.md 与 docs/ARCHITECTURE.md 未同步多框契约（新命令/事件、MultiBoxPipeline、TranslationBoxConfig、v5 迁移）。crate README 与 src/README.md 已更新 | 文档同步缺口 | 各模块开发 Agent | **已确认派单补齐**（2026-08-13 用户决策）；任务单见 TASK-DOCSYNC.md |
 | 4 | 本地 main 领先 origin/main 一个提交 1fe7380（2026-08-11 旧 feature-plans 文档清理）。沙箱无网络，fetch/push 需用户执行；推送时该提交一并带出 | 推送提醒 | 用户 | 待推送 |
 | 5 | GUI 端到端冒烟（cargo tauri dev 下框选、多框实时、弹窗布局、警告、热键回归）无法在沙箱执行，需有显示环境手工验证 | 手工验证项 | 用户/验收 | 待验收 |
 | 6 | clippy 既有警告 1 处（vtrans-translation「items after a test module」），非本功能引入 | 非阻塞 | — | 观察 |

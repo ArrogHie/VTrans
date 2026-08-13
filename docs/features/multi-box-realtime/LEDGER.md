@@ -5,7 +5,7 @@
 - 需求来源：用户提出
 - 优先级：P1
 - 创建时间：2026-08-11
-- 当前状态：已整合（main dd0e5e1），待手工验收；遗留问题见 INTEGRATION_REPORT.md
+- 当前状态：已整合（main 7b25bb0），待手工验收；用户决策（2026-08-13）：① 多框原文缺口纳入后续迭代（TASK-FOLLOWUP-*）② 热键保持现状（R/S 控制单框实时，多框仅 UI 按钮）③ 文档同步派单补齐（TASK-DOCSYNC.md）。遗留问题见 INTEGRATION_REPORT.md
 
 ## 用户已确认决策（2026-08-11）
 1. 优先级：P1
@@ -121,6 +121,19 @@
 - main 全量门禁复核：fmt / clippy（0 错误）/ workspace 测试 / pnpm 264 测试 / tsc 全部 PASS
 - 验收标准 16 条代码层面对照全部满足；弹窗「每框显示原文」细化要求未满足（遗留问题 1）
 - 输出 INTEGRATION_REPORT.md；功能状态：已整合 / 待验收（手工冒烟 + 遗留问题 1/2 用户决策后关闭）
+
+### 2026-08-13 遗留问题用户决策
+1. 多框原文缺口 → **纳入后续迭代**：派单 TASK-FOLLOWUP-09-pipeline.md、TASK-FOLLOWUP-11-frontend.md（app 仅 README 同步）
+2. 热键语义 → **保持现状**：Alt+Shift+R/S 继续控制单框实时会话，多框启动/停止仅 UI 按钮（记录为设计决策，遗留 2 关闭）
+3. 文档同步 → **派单补齐**：TASK-DOCSYNC.md（docs/modules/02/06/09/10 + ARCHITECTURE.md），由各模块开发 Agent 执行
+
+### 后续迭代台账
+
+| 序号 | 模块 | 任务单 | 建议分支 | 状态 |
+|------|------|--------|----------|------|
+| F1 | 09-pipeline | TASK-FOLLOWUP-09-pipeline.md | feat/multibox-original-text-pipeline | 待分配 |
+| F2 | 11-frontend | TASK-FOLLOWUP-11-frontend.md | feat/multibox-original-text-frontend | 待分配（依赖 F1） |
+| D1 | 02/06/09/10 文档同步 | TASK-DOCSYNC.md | 按 GIT_WORKFLOW 命名 | 待分配 |
 
 ## 整合记录（已完成）
 1. ✅ 阶段 A+B：02-config + 06-text + 09-pipeline 合并到 main，workspace 编译验证通过
