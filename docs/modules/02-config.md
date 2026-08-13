@@ -26,6 +26,9 @@ pub struct AppConfig {
     pub hotkeys: HotkeyConfig,
     pub log_level: String,           // 默认 "info"
     pub model_dir: Option<PathBuf>,  // None = 使用默认路径
+    pub translation_boxes: Vec<TranslationBoxConfig>, // 默认 []（空 = 未配置多框模式），跨重启持久化
+    pub max_boxes: u32,              // 默认 8，范围 1..=32
+    pub warning_threshold: u32,      // 默认 4，范围 0..=max_boxes；0 禁用警告
     pub version: u32,
 }
 
@@ -60,6 +63,27 @@ pub struct HotkeyConfig {
     pub select_and_translate: String,  // 默认 "Alt+Shift+A"
     pub live_translate: String,        // 默认 "Alt+Shift+R"
     pub stop_live: String,             // 默认 "Alt+Shift+S"
+}
+
+/// 单个翻译框（多框实时模式）
+pub struct TranslationBoxConfig {
+    pub id: u32,             // 唯一 id（next_box_id 分配）
+    pub region: ScreenRegion, // 该框捕获/翻译的屏幕区域
+    pub color: String,       // 展示用 hex 颜色（如 "#FF6B6B"）
+}
+
+/// 翻译框颜色调色板（8 色高对比）
+pub const BOX_COLOR_PALETTE: &[&str] = &[
+    "#FF6B6B", "#4ECDC4", "#45B7D1", "#FFA07A",
+    "#98D8C8", "#F7DC6F", "#BB8FCE", "#85C1E9",
+];
+
+impl AppConfig {
+    /// 下一个可用框 id：max(id) + 1；无框时为 0
+    pub fn next_box_id(&self) -> u32;
+    /// 下一个可用框颜色：调色板中第一个未被占用的颜色；
+    /// 全部占用后按当前框数对 8 取模从头循环
+    pub fn next_box_color(&self) -> &'static str;
 }
 
 /// 配置管理器
@@ -113,12 +137,14 @@ crates/vtrans-config/
 |--------|------|------|
 | 默认值生成 | 单元 | 所有字段有合理默认值 |
 | 序列化往返 | 单元 | to_json -> from_json 一致 |
-| 版本迁移 | 单元 | v0 -> v5 迁移链完整；v3 -> v4 补 `quality`、同步 `source_language = ocr.language`；v4 -> v5 `api -> openai` 重命名 + 补 `region`/`app_id`；v5 重复迁移幂等 |
+| 版本迁移 | 单元 | v0 -> v6 迁移链完整；v3 -> v4 补 `quality`、同步 `source_language = ocr.language`；v4 -> v5 `api -> openai` 重命名 + 补 `region`/`app_id`；v5 -> v6 补 `translation_boxes`/`max_boxes`/`warning_threshold`（serde 默认兜底，仅盖版本戳）；各步重复迁移幂等 |
 | 范围校验 | 单元 | interval_ms 超范围返回 Validation |
 | 质量档位校验 | 单元 | `"fast"` / `"balanced"` 接受，非法值拒绝 |
 | 跨字段一致性校验 | 单元 | `ocr.language != translation.source_language` 拒绝，一致接受 |
 | Provider 白名单校验 | 单元 | 6 个合法 id 接受；`"api"` / 未知 id 拒绝 |
 | Provider 字段必需性校验 | 单元 | `api_model` 仅 openai 必填；`region` 非空；`app_id` 仅 baidu 必填；local 忽略全部 |
+| 多框字段校验 | 单元 | `max_boxes` ∈ 1..=32；`warning_threshold` ≤ `max_boxes`；`translation_boxes` 数量 ≤ `max_boxes` |
+| 框 id/颜色分配 | 单元 | `next_box_id` 空表返回 0、否则 max+1；`next_box_color` 取首个未占用调色板色、全部占用后按数量取模循环 |
 | 文件不存在时创建默认 | 集成 | 首次加载返回默认配置并写入文件 |
 | 并发写入安全 | 集成 | 多线程 update 不冲突 |
 
@@ -133,6 +159,8 @@ crates/vtrans-config/
 - [x] v4 配置 `provider == "api"` 迁移后为 `"openai"`、版本 5、`region`/`app_id` 补 `None`；v5 重复迁移无副作用
 - [x] `ocr.language != translation.source_language` 拒绝保存；一致接受；`AppConfig::default()` 恒通过
 - [x] provider 白名单与各 provider 字段必需性校验通过新增测试（默认 provider 为 `openai`）
+- [x] 多框字段：缺失补默认（空列表 / `max_boxes=8` / `warning_threshold=4`）、v5 配置迁移到 v6 后字段为默认值、v6 配置透传不迁移且多框字段保留
+- [x] `next_box_id` / `next_box_color` 分配规则单测通过（含调色板耗尽循环）
 - [x] 单元测试通过（`cargo test -p vtrans-config` 全绿）
 - [x] README.md 完整
 
@@ -141,7 +169,7 @@ crates/vtrans-config/
 - 配置文件路径：directories::config_dir() / "vtrans" / "config.json"
 - 保存时先写临时文件再原子替换，避免写入中断导致损坏
 - update 方法内部加锁（RwLock），保证并发安全
-- 配置版本号用于未来迁移，当前为 5
+- 配置版本号用于未来迁移，当前为 6（`CURRENT_CONFIG_VERSION = 6`）
 - API Key / Secret 不落配置（走 `vtrans-security` 凭据库）；`app_id`（百度 APP ID）与 `region`（Azure 区域）为非敏感字段，可存配置
 
 ## 增量记录
@@ -163,3 +191,12 @@ crates/vtrans-config/
 - 迁移：`CURRENT_CONFIG_VERSION` 4 → 5。`migrate_v4_to_v5` 将旧 `provider == "api"` 重命名为 `"openai"`；`region` / `app_id` 由 serde default 补 `None`（文件中显式值保留）；迁移幂等。
 - 校验：`validate_translation` 按 provider 校验字段必需性——所有云端 Provider 要求 `api_endpoint` 为 `http(s)://`；`api_model` 仅 `openai` 必填（DeepL / Google 可选，Azure / 百度可空）；`region` 出现时必须非空（Azure 可选）；`app_id` 仅 `baidu` 必填；`local` 忽略 endpoint / model / region / app_id。`auto` 目标语言仍拒绝；语言联动规则不变。
 - 行为变更：`AppConfig::validate()` 拒绝 `"api"` 旧 id、未知 provider 与缺失必需字段的配置；旧 v4 配置在加载时自动完成 `api -> openai` 重命名。
+
+### v6 增量：多框实时翻译配置（分支 `feat/multibox-config`）
+
+对应功能计划 `docs/features/multi-box-realtime/PLAN.md`（多框实时翻译：多区域并行采集-OCR-翻译）。
+
+- schema：`AppConfig` 新增 `translation_boxes: Vec<TranslationBoxConfig>`（默认空列表，空 = 未配置多框模式）、`max_boxes: u32`（默认 8，范围 `1..=32`）、`warning_threshold: u32`（默认 4，范围 `0..=max_boxes`，`0` 禁用警告）。`TranslationBoxConfig { id, region, color }` 每个框携带独立区域与展示颜色（hex 字符串），随配置跨重启持久化；`id` 由 `next_box_id()` 分配（`max(id)+1`，空表为 `0`），`color` 由 `next_box_color()` 从 `BOX_COLOR_PALETTE`（8 色）取首个未占用色，全部占用后按 `len % 8` 从头循环。
+- 迁移：`CURRENT_CONFIG_VERSION` 5 → 6。`migrate_v5_to_v6` 仅盖版本戳；新字段由 `serde(default)` 兜底（空列表、8、4），迁移幂等。
+- 校验：`max_boxes` 必须在 `1..=32`；`warning_threshold` 不得超过 `max_boxes`（可为 0）；`translation_boxes` 数量不得超过 `max_boxes`。
+- 行为变更：旧 v5 配置加载时自动补多框默认字段并迁移到 v6；v6 配置透传不迁移。
