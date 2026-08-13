@@ -42,6 +42,7 @@ const BOX = { box_id: 0, region: REGION, color: "#FF6B6B" };
 const BOXED = {
   box_id: 0,
   color: "#FF6B6B",
+  original_text: "hello",
   result: { translated_text: "你好", provider_id: "mock", elapsed_ms: 1 },
   timestamp: 1,
 };
@@ -61,6 +62,9 @@ describe("ResultWindow multi-box layout", () => {
     expect(html).toContain('data-testid="multibox-results"');
     // 多框模式下不渲染单次翻译的原文折叠开关。
     expect(html).not.toContain('data-testid="result-source-toggle"');
+    // 弹窗内的多框区域展示每框原文与译文。
+    expect(html).toContain('data-testid="multibox-original-0"');
+    expect(html).toContain("hello");
   });
 
   it("shows a stopped title after the multi-box session stops", () => {

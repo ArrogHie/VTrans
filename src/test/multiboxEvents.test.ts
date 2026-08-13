@@ -37,6 +37,7 @@ describe("multi-box event service", () => {
     const result = {
       box_id: 0,
       color: "#FF6B6B",
+      original_text: "hello",
       result: { translated_text: "你好", provider_id: "mock", elapsed_ms: 3 },
       timestamp: 1_700_000_000_000,
     };

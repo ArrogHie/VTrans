@@ -86,6 +86,12 @@ export type BoxStatus = "Running" | "Stopped" | { Error: string };
 export interface BoxedTranslationResult {
   box_id: number;
   color: string;
+  /**
+   * OCR-recognized source text for this box (same text sent to translation).
+   * Empty when OCR failed or produced no text; the UI omits the original
+   * area entirely in that case.
+   */
+  original_text: string;
   result: TranslationResult;
   timestamp: number;
 }

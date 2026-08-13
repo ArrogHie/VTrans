@@ -149,7 +149,7 @@ describe("multi-box store actions", () => {
     useAppStore.getState().setBoxStatus(0, "Running");
     useAppStore
       .getState()
-      .setMultiBoxResult({ box_id: 0, color: "#FF6B6B", result: { translated_text: "x", provider_id: "mock", elapsed_ms: 1 }, timestamp: 1 });
+      .setMultiBoxResult({ box_id: 0, color: "#FF6B6B", original_text: "hello", result: { translated_text: "x", provider_id: "mock", elapsed_ms: 1 }, timestamp: 1 });
     useAppStore.getState().removeBox(0);
     const state = useAppStore.getState();
     expect(state.translationBoxes).toEqual([]);
@@ -170,10 +170,11 @@ describe("multi-box store actions", () => {
     useAppStore.getState().setSingleResult({ original_text: "hello", translated_text: "你好", timestamp: 1 });
     useAppStore
       .getState()
-      .setMultiBoxResult({ box_id: 0, color: "#FF6B6B", result: { translated_text: "你好", provider_id: "mock", elapsed_ms: 1 }, timestamp: 1 });
+      .setMultiBoxResult({ box_id: 0, color: "#FF6B6B", original_text: "hello", result: { translated_text: "你好", provider_id: "mock", elapsed_ms: 1 }, timestamp: 1 });
     const state = useAppStore.getState();
     expect(state.singleResult?.translated_text).toBe("你好");
     expect(state.multiBoxResults[0].result.translated_text).toBe("你好");
+    expect(state.multiBoxResults[0].original_text).toBe("hello");
   });
 
   it("resets all multi-box state", () => {
