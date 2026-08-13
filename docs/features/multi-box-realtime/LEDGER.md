@@ -5,7 +5,7 @@
 - 需求来源：用户提出
 - 优先级：P1
 - 创建时间：2026-08-11
-- 当前状态：阶段 A+B Review 通过，待整合
+- 当前状态：阶段 A+B+C Review 全部通过，整合执行中
 
 ## 用户已确认决策（2026-08-11）
 1. 优先级：P1
@@ -26,8 +26,8 @@
 | 1 | 02-config | TASK-02-config.md | feat/multibox-config | A | Review 通过 | fmt/clippy/test PASS |
 | 2 | 06-text | TASK-06-text.md | feat/multibox-text | A | Review 通过 | fmt/clippy/test PASS |
 | 3 | 09-pipeline | TASK-09-pipeline.md | feat/multibox-pipeline | B | Review 通过 | fmt/clippy/test PASS |
-| 4 | 10-app | TASK-10-app.md | feat/multibox-app | C | 待分配 | 依赖 3 |
-| 5 | 11-frontend | TASK-11-frontend.md | feat/multibox-frontend | C | 待分配 | 依赖 4 IPC 契约 |
+| 4 | 10-app | TASK-10-app.md | feat/multibox-app | C | Review 通过 | fmt/clippy/test PASS；命令/事件契约两端一致 |
+| 5 | 11-frontend | TASK-11-frontend.md | feat/multibox-frontend | C | Review 通过 | pnpm test/tsc PASS；弹窗布局与主页面精简达标 |
 
 ## Review 结果（2026-08-12）
 
@@ -104,6 +104,21 @@
 - 所有关键类型和 API 存在
 - README 均已更新
 - 结论：✅ 通过，进入整合
+
+### 2026-08-13 模块 10/11 Review 完成（阶段 C）
+- 质量门禁全部 PASS：cargo fmt --all -- --check；cargo clippy --workspace --all-targets（0 错误，仅 vtrans-translation 1 个既有非本功能警告）；cargo test --workspace 全绿；pnpm test 38 文件 / 264 测试；tsc --noEmit
+- 整合级 Review 通过：
+  - 契约一致性：8 个 Command（add/remove/update/list_translation_boxes、start/stop_multi_realtime、stop_box、open_result_window）与 7 个 Event（multibox://result/box-added/box-removed/box-updated/status/warning、translation://single-result）Rust 与 TypeScript 两端名称、payload 形状一一对应；BoxStatus 外部标签 serde（"Running"/"Stopped"/{"Error": msg}）与 TS 类型一致；contracts.rs 含 serde 契约测试
+  - 模块边界：vtrans-core 未修改；各分支 diff 仅限本 crate 与协调文档；src-tauri 未改动（经 vtrans_app::builder 挂载，与项目结构一致；任务单 CRATE_PATH 待确认项以此为准）
+  - 横切标准：无 todo!/dbg!/println!；unimplemented! 仅 doctest 脚手架（multibox.rs rustdoc 示例）；日志脱敏（truncate_for_log/mask_sensitive）；错误归属 AppError/PipelineError 正确
+  - 验收标准 16 条代码层面对照：全部满足（详见整合报告）
+  - 文档：vtrans-app README、src/README.md、前端 types 已更新
+- 观察项（非阻塞，见整合报告遗留问题）：多框结果不含原文（已知限制，README 已注明）；热键 Alt+Shift+R/S 未接入多框启动/停止；docs/modules/*.md 与 ARCHITECTURE.md 未同步多框契约
+- 结论：✅ 通过，进入整合
+
+### 2026-08-13 整合执行
+- 合并顺序：feat/multibox-config → feat/multibox-text → feat/multibox-pipeline → feat/multibox-app → feat/multibox-frontend（均 --no-ff）
+- 详见 INTEGRATION_REPORT.md
 
 ## 整合计划（待执行）
 1. 阶段 A+B：02-config + 06-text + 09-pipeline 合并到 main，验证 workspace 编译
