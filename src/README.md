@@ -17,7 +17,9 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
 - 多框实时翻译：主窗口提供翻译框列表（颜色色块 + 编号 + 运行/停止/错误状态 +
   编辑/删除按钮，不显示坐标/大小/形状信息）与「新增翻译框」「开始多框实时」
   控制；翻译弹窗按框由上到下堆叠展示结果（每框以各自颜色的 border 包裹，
-  框间用分隔线分隔，整体可滚动）；单次翻译结果同样在翻译弹窗展示。
+  框间用分隔线分隔，整体可滚动）；每框展示该框的 OCR 原文与译文——原文为
+  次级色小字、位于译文上方，原文为空时不渲染原文区域（不留空占位），译文
+  始终为框内主体；单次翻译结果同样在翻译弹窗展示。
 - 卡顿警告：框数达到 `warning_threshold` 时在列表顶部显示持久警告条，并弹出
   短暂 toast（文案「翻译框过多可能导致卡顿，建议不超过 N 个」）。
 - 主页面精简：主页面不再显示翻译原文/译文与选区坐标/大小信息，结果统一由
@@ -109,7 +111,8 @@ export function isCloudProvider(provider: ProviderId): boolean;
 export interface TranslationBoxInfo { box_id: number; region: ScreenRegion; color: string; }
 export type BoxStatus = "Running" | "Stopped" | { Error: string };
 export interface BoxedTranslationResult {
-  box_id: number; color: string; result: TranslationResult; timestamp: number;
+  box_id: number; color: string; original_text: string;
+  result: TranslationResult; timestamp: number;
 }
 export function isBoxError(status: BoxStatus): status is { Error: string };
 export function boxStatusLabel(status: BoxStatus): string;      // 运行中/已停止/错误
@@ -328,7 +331,8 @@ pnpm tauri dev
 - 翻译框列表组件：列表渲染（色块 + 编号 + 编辑/删除）、空态引导、状态徽标、
   运行中框的停止按钮、阈值上下警告条显隐、**不渲染坐标/大小/形状信息**。
 - 多框结果组件：由上到下堆叠、彩色边框（`2px solid <color>`）、框间分隔线、
-  滚动容器、已停止占位、未水合时按结果回退、错误消息透出。
+  滚动容器、已停止占位、未水合时按结果回退、错误消息透出；每框展示原文
+  （有原文时以次级色小字渲染在译文上方，空原文不渲染原文区域）。
 - 翻译弹窗多框布局：多框 engaged 时渲染堆叠结果 + 标题栏「运行中/已停止」，
   未 engaged 时回退单次迷你条。
 - overlay 多框：`upsertOverlayBox` 按 box_id 幂等去重与顺序保持。
@@ -409,10 +413,10 @@ pnpm tauri dev
     到达前显示「正在切换翻译引擎…」spinner；命中缓存时进度近瞬时跳到 100%。
     若后端版本未补发事件，切换期间仅显示 spinner，完成后直接生效，不影响功能。
     切换完成/失败后 `providerSwitching` 复位，下拉框恢复可用。
-14. 多框翻译结果（`multibox://result` / `BoxedTranslationResult`）只携带译文
-    （`result.translated_text`），不含 OCR 原文；因此多框模式下翻译弹窗每个框
-    只展示译文 + 框编号/颜色 + 状态，原文仅在单次翻译（`translation://single-result`）
-    中展示。
+14. 多框翻译结果（`multibox://result` / `BoxedTranslationResult`）携带
+    `original_text`（OCR 原文，即送入翻译的文本）与 `result.translated_text`；
+    翻译弹窗每框展示原文（次级色小字，位于译文上方）与译文。OCR 失败或未识别
+    出文本、翻译失败时上游发送空原文，前端此时不渲染原文区域（不留空占位）。
 15. 多框常驻方框由单个 overlay 窗口绘制，`ScreenRegion` 坐标为显示器相对物理
     像素；当多个翻译框跨越不同显示器时，单个 overlay 窗口无法同时覆盖所有
     显示器，方框仅在其所属显示器与 overlay 窗口覆盖区域一致时对齐。这是后端

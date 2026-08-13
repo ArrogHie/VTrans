@@ -20,9 +20,10 @@ interface MultiBoxResultsProps {
  * whose color matches the box's palette color (e.g. `2px solid #FF6B6B`), and
  * separated by dividers. The whole stack scrolls (`overflow-y: auto`) so an
  * arbitrary number of boxes stays usable inside the small popup. Each section
- * shows the box ordinal, its runtime status, and the latest translated text
- * (or a stopped/error placeholder). Multi-box results carry no source text —
- * see the backend `BoxedTranslationResult` contract.
+ * shows the box ordinal, its runtime status, and the latest result: the OCR
+ * original text as small secondary-colored text above the translation (only
+ * when non-empty, so failed/empty OCR leaves no placeholder), followed by the
+ * translated text (or a stopped/error placeholder).
  */
 export function MultiBoxResults({ boxes, results, statuses }: MultiBoxResultsProps) {
   // Defensive fallback: derive entries from results when the box list has not
@@ -47,6 +48,7 @@ export function MultiBoxResults({ boxes, results, statuses }: MultiBoxResultsPro
             : isBoxError(status)
               ? status.Error
               : "等待翻译…";
+        const originalText = result?.original_text ?? "";
         return (
           <div key={box.box_id} data-testid={`multibox-result-${box.box_id}`}>
             <section
@@ -74,6 +76,14 @@ export function MultiBoxResults({ boxes, results, statuses }: MultiBoxResultsPro
                   {boxStatusLabel(status)}
                 </span>
               </div>
+              {originalText !== "" && (
+                <p
+                  className="result-text mb-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-100/70 p-1.5 leading-5 text-slate-500"
+                  data-testid={`multibox-original-${box.box_id}`}
+                >
+                  {originalText}
+                </p>
+              )}
               <p
                 className="result-text whitespace-pre-wrap break-words leading-5 text-slate-700"
                 data-testid={`multibox-translation-${box.box_id}`}

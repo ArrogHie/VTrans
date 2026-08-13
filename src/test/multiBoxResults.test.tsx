@@ -3,9 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MultiBoxResults } from "../components/MultiBoxResults";
 import type { BoxedTranslationResult } from "../types";
 
-const result = (boxId: number, color: string, text: string): BoxedTranslationResult => ({
+const result = (
+  boxId: number,
+  color: string,
+  text: string,
+  originalText = "",
+): BoxedTranslationResult => ({
   box_id: boxId,
   color,
+  original_text: originalText,
   result: { translated_text: text, provider_id: "mock", elapsed_ms: 1 },
   timestamp: 1,
 });
@@ -36,12 +42,60 @@ describe("MultiBoxResults", () => {
     expect(html).toContain("已停止");
   });
 
+  it("renders the original text above the translation when present", () => {
+    const html = renderToStaticMarkup(
+      <MultiBoxResults
+        boxes={BOXES}
+        results={{
+          0: result(0, "#FF6B6B", "你好", "hello"),
+          1: result(1, "#4ECDC4", "世界", "world"),
+        }}
+        statuses={{ 0: "Running", 1: "Running" }}
+      />,
+    );
+    expect(html).toContain('data-testid="multibox-original-0"');
+    expect(html).toContain('data-testid="multibox-original-1"');
+    expect(html).toContain("hello");
+    expect(html).toContain("world");
+    // 原文以小字次级色样式渲染在译文上方（次级底色样式仅原文区域使用）。
+    expect(html).toContain("bg-slate-100/70");
+    const originalIndex = html.indexOf("hello");
+    const translationIndex = html.indexOf("你好");
+    expect(originalIndex).toBeGreaterThanOrEqual(0);
+    expect(translationIndex).toBeGreaterThan(originalIndex);
+  });
+
+  it("omits the original area entirely when original_text is empty", () => {
+    const html = renderToStaticMarkup(
+      <MultiBoxResults
+        boxes={BOXES}
+        results={{
+          0: result(0, "#FF6B6B", "你好", "hello"),
+          1: result(1, "#4ECDC4", "世界", ""),
+        }}
+        statuses={{ 0: "Running", 1: "Stopped" }}
+      />,
+    );
+    // 有原文的框渲染原文区域。
+    expect(html).toContain('data-testid="multibox-original-0"');
+    // 空原文的框不渲染原文区域，也不留任何空占位。
+    expect(html).not.toContain('data-testid="multibox-original-1"');
+    // 布局回归：彩色边框、分隔线、状态徽章保持现状。
+    expect(html).toContain("2px solid #FF6B6B");
+    expect(html).toContain("2px solid #4ECDC4");
+    expect((html.match(/multibox-divider/g) ?? []).length).toBe(1);
+    expect(html).toContain("运行中");
+    expect(html).toContain("已停止");
+  });
+
   it("makes the stack scrollable", () => {
     const html = renderToStaticMarkup(
       <MultiBoxResults boxes={BOXES} results={{}} statuses={{}} />,
     );
     expect(html).toContain('data-testid="multibox-results"');
     expect(html).toContain("overflow-y-auto");
+    // 无结果时不渲染任何原文区域。
+    expect(html).not.toContain("multibox-original");
   });
 
   it("marks a stopped box without a result as stopped", () => {
