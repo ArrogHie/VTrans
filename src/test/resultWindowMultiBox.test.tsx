@@ -62,9 +62,10 @@ describe("ResultWindow multi-box layout", () => {
     expect(html).toContain('data-testid="multibox-results"');
     // 多框模式下不渲染单次翻译的原文折叠开关。
     expect(html).not.toContain('data-testid="result-source-toggle"');
-    // 弹窗内的多框区域展示每框原文与译文。
-    expect(html).toContain('data-testid="multibox-original-0"');
-    expect(html).toContain("hello");
+    // 每框原文默认折叠：有原文的框渲染逐框开关，原文内容不直接展示。
+    expect(html).toContain('data-testid="multibox-original-toggle-0"');
+    expect(html).not.toContain('data-testid="multibox-original-0"');
+    expect(html).not.toContain("hello");
   });
 
   it("shows a stopped title after the multi-box session stops", () => {

@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { BoxStatus, BoxedTranslationResult } from "../types";
 import { boxStatusLabel, isBoxError } from "../types";
 
@@ -11,6 +13,11 @@ interface MultiBoxResultsProps {
   boxes: MultiBoxEntry[];
   results: Record<number, BoxedTranslationResult>;
   statuses: Record<number, BoxStatus>;
+  /**
+   * Test seam only: box ids whose original text starts expanded.
+   * Production always starts with every box's original text collapsed.
+   */
+  initialExpandedBoxIds?: readonly number[];
 }
 
 /**
@@ -24,8 +31,34 @@ interface MultiBoxResultsProps {
  * original text as small secondary-colored text above the translation (only
  * when non-empty, so failed/empty OCR leaves no placeholder), followed by the
  * translated text (or a stopped/error placeholder).
+ *
+ * The original text is collapsed by default behind a per-box chevron toggle
+ * in the section header (styled like the single-box result window's「原文」
+ * toggle). Expansion state lives in component state keyed by box_id, so the
+ * high-frequency result stream never resets what the user opened.
  */
-export function MultiBoxResults({ boxes, results, statuses }: MultiBoxResultsProps) {
+export function MultiBoxResults({
+  boxes,
+  results,
+  statuses,
+  initialExpandedBoxIds,
+}: MultiBoxResultsProps) {
+  const [expandedBoxIds, setExpandedBoxIds] = useState<ReadonlySet<number>>(
+    () => new Set(initialExpandedBoxIds ?? []),
+  );
+
+  const toggleOriginal = (boxId: number) => {
+    setExpandedBoxIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(boxId)) {
+        next.delete(boxId);
+      } else {
+        next.add(boxId);
+      }
+      return next;
+    });
+  };
+
   // Defensive fallback: derive entries from results when the box list has not
   // been hydrated yet (e.g. the popup opened before the list command returned).
   const entries =
@@ -49,6 +82,7 @@ export function MultiBoxResults({ boxes, results, statuses }: MultiBoxResultsPro
               ? status.Error
               : "等待翻译…";
         const originalText = result?.original_text ?? "";
+        const expanded = expandedBoxIds.has(box.box_id);
         return (
           <div key={box.box_id} data-testid={`multibox-result-${box.box_id}`}>
             <section
@@ -75,8 +109,25 @@ export function MultiBoxResults({ boxes, results, statuses }: MultiBoxResultsPro
                 >
                   {boxStatusLabel(status)}
                 </span>
+                {originalText !== "" && (
+                  <button
+                    type="button"
+                    onClick={() => toggleOriginal(box.box_id)}
+                    className="ml-auto flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-[11px] font-medium text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                    aria-expanded={expanded}
+                    aria-label={`显示或隐藏框 ${index + 1} 的原文`}
+                    data-testid={`multibox-original-toggle-${box.box_id}`}
+                  >
+                    {expanded ? (
+                      <ChevronDown size={13} aria-hidden="true" />
+                    ) : (
+                      <ChevronRight size={13} aria-hidden="true" />
+                    )}
+                    原文
+                  </button>
+                )}
               </div>
-              {originalText !== "" && (
+              {originalText !== "" && expanded && (
                 <p
                   className="result-text mb-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-100/70 p-1.5 leading-5 text-slate-500"
                   data-testid={`multibox-original-${box.box_id}`}
