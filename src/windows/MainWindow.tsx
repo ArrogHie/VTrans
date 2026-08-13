@@ -3,7 +3,6 @@ import {
   ExternalLink,
   FolderCheck,
   MousePointer2,
-  Pause,
   Play,
   RefreshCw,
   Settings2,
@@ -30,10 +29,7 @@ import {
 } from "../services/tauri";
 import {
   selectAndTranslateOnce,
-  selectRegionForLive,
-  startLive,
   stopLive as stopLiveSession,
-  toggleLivePause,
 } from "../services/translateActions";
 import {
   addBox,
@@ -132,33 +128,9 @@ export function MainWindow() {
   const selectRegion = async () => {
     setBusy(true);
     try {
-      // 单次模式：框选并翻译；实时模式：框选后启动/重启实时会话。
+      // 该按钮仅在单次模式渲染：框选并翻译一次，结果进翻译弹窗。
       // 状态机与错误处理统一由 translateActions 服务承担，与悬浮球共用。
-      await (mode === "single" ? selectAndTranslateOnce() : selectRegionForLive());
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const runLive = async () => {
-    setBusy(true);
-    try {
-      // 「翻译区域」区块仅在单次模式渲染，实时模式无选区时先框选再启动
-      // （与悬浮球 toggleLiveFromFloater 的无选区分支一致）。
-      if (useAppStore.getState().selectedRegion) {
-        await startLive();
-      } else {
-        await selectRegionForLive();
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const togglePause = async () => {
-    setBusy(true);
-    try {
-      await toggleLivePause();
+      await selectAndTranslateOnce();
     } finally {
       setBusy(false);
     }
@@ -286,6 +258,9 @@ export function MainWindow() {
   };
 
   const disabled = busy || status === "ocr_in_progress" || status === "translating";
+  // 多框会话控制：任一框运行中即视为会话进行中。列表组件不再持有会话级
+  // 启停按钮，统一由 live 模式底部控制行驱动（BUGFIX-2）。
+  const anyRunning = translationBoxes.some((box) => boxStatuses[box.box_id] === "Running");
 
   return (
     <main className="min-h-screen bg-slate-50 px-5 py-6 text-slate-900">
@@ -353,9 +328,6 @@ export function MainWindow() {
               <MousePointer2 size={18} className="text-indigo-500" aria-hidden="true" />
             </div>
             <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button w-full">
-              <MousePointer2 size={16} />选择屏幕区域
-            </button>
-            <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button mt-2 w-full">
               <Play size={16} />选择并翻译
             </button>
           </section>
@@ -370,8 +342,6 @@ export function MainWindow() {
             onAdd={() => void handleAddBox()}
             onEdit={(boxId) => void handleEditBox(boxId)}
             onRemove={(boxId) => void handleRemoveBox(boxId)}
-            onStart={() => void handleStartMulti()}
-            onStop={() => void handleStopMulti()}
             onStopBox={(boxId) => void handleStopBox(boxId)}
           />
         )}
@@ -407,13 +377,22 @@ export function MainWindow() {
 
         {mode === "live" && (
           <section className="grid grid-cols-2 gap-2">
-            {livePaused ? (
-              <button type="button" onClick={() => void runLive()} disabled={busy} className="primary-button"><Play size={16} />继续实时</button>
-            ) : (
-              <button type="button" onClick={() => void togglePause()} disabled={busy || !liveConfig} className="secondary-button"><Pause size={16} />暂停</button>
-            )}
-            <button type="button" onClick={() => void runLive()} disabled={busy || Boolean(liveConfig && !livePaused)} className="secondary-button"><Play size={16} />开始实时</button>
-            <button type="button" onClick={() => void stopLive()} disabled={busy} className="secondary-button col-span-2"><Square size={16} />停止</button>
+            <button
+              type="button"
+              onClick={() => void handleStartMulti()}
+              disabled={multiBusy || translationBoxes.length === 0 || anyRunning}
+              className="primary-button"
+            >
+              <Play size={16} />开始实时
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleStopMulti()}
+              disabled={multiBusy || !anyRunning}
+              className="secondary-button"
+            >
+              <Square size={16} />停止
+            </button>
           </section>
         )}
 

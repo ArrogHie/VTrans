@@ -29,8 +29,6 @@ function renderList(
       onAdd={noop}
       onEdit={noop}
       onRemove={noop}
-      onStart={noop}
-      onStop={noop}
       onStopBox={noop}
     />,
   );
@@ -76,14 +74,13 @@ describe("TranslationBoxList", () => {
     const html = renderList([BOX_0, BOX_1], { 0: "Running", 1: "Stopped" });
     expect(html).toContain("停止框 1");
     expect(html).not.toContain("停止框 2");
-    // The running box drives the whole session into the "stop all" control.
-    expect(html).toContain("停止全部");
+    // 会话级启停按钮已移出列表（BUGFIX-2），由主窗口 live 底部控制行负责。
+    expect(html).not.toContain("停止全部");
   });
 
-  it("offers start when nothing is running", () => {
-    const html = renderList([BOX_0], { 0: "Stopped" });
-    expect(html).toContain("开始多框实时");
-    expect(html).not.toContain("停止全部");
+  it("never renders the whole-session start/stop controls", () => {
+    expect(renderList([BOX_0], { 0: "Stopped" })).not.toContain("开始多框实时");
+    expect(renderList([BOX_0], { 0: "Running" })).not.toContain("停止全部");
   });
 
   it("never renders coordinates, size or shape information", () => {

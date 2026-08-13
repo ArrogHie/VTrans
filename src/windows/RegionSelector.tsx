@@ -54,7 +54,9 @@ export function RegionSelector() {
 
   const cancelSelection = useCallback(() => {
     void (async () => {
-      await hideRegionOverlay();
+      // 取消路径同样重置本地选区状态：窗口 hide 不销毁组件，下次打开
+      // 必须从空白开始，不能残留本次的拖拽/已确认状态。
+      resetSelection();
       try {
         await cancelRegionSelection();
       } catch {
@@ -63,7 +65,7 @@ export function RegionSelector() {
         await getCurrentWindow().hide();
       }
     })();
-  }, []);
+  }, [resetSelection]);
 
   const confirmSelection = useCallback(async () => {
     if (!start || !end) return;
@@ -79,17 +81,23 @@ export function RegionSelector() {
     try {
       await updateLiveRegion(region, mode);
       setSelectedRegion(region);
+      // 提交成功后立即重置本地选区状态（hide 之前）：窗口 hide 不销毁组件，
+      // 下次打开必须从空白开始拖框。提交失败不重置，保留选区供重试。
+      resetSelection();
       await getCurrentWindow().hide();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "选区提交失败");
     }
-  }, [end, mode, monitorId, setSelectedRegion, start]);
+  }, [end, mode, monitorId, resetSelection, setSelectedRegion, start]);
 
   useEffect(() => {
     let active = true;
     let unlistenClose: (() => void) | undefined;
     const currentWindow = getCurrentWindow();
     void currentWindow.onCloseRequested(async () => {
+      // 系统关闭路径（Alt+F4 等）同样重置本地选区状态后再通知后端，
+      // 保证下次打开选区窗口从空白开始。
+      resetSelection();
       await cancelRegionSelection();
     }).then((unlisten) => {
       if (active) unlistenClose = unlisten;
@@ -114,7 +122,7 @@ export function RegionSelector() {
       unlistenClose?.();
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [cancelSelection, confirmSelection]);
+  }, [cancelSelection, confirmSelection, resetSelection]);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (phase !== "selecting") return;

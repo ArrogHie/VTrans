@@ -13,6 +13,11 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: { getByLabel: (...args: unknown[]) => getByLabel(...args) },
 }));
 
+// startMultiBox 先定位 overlay 再 invoke 后端命令；overlay 定位行为本身由
+// regionOverlay.test.ts 覆盖，这里只断言调用顺序与入参。
+const showMultiBoxOverlay = vi.fn();
+vi.mock("../services/regionOverlay", () => ({ showMultiBoxOverlay }));
+
 const {
   addBox,
   editBox,
@@ -103,11 +108,22 @@ describe("removeBox", () => {
 });
 
 describe("start/stop/open", () => {
-  it("starts and stops multi-box realtime", async () => {
+  it("positions the overlay before starting multi-box realtime", async () => {
+    useAppStore.getState().setTranslationBoxes([BOX_INFO]);
+    showMultiBoxOverlay.mockResolvedValue(undefined);
     invoke.mockResolvedValueOnce(undefined);
-    expect((await startMultiBox()).ok).toBe(true);
-    expect(invoke).toHaveBeenCalledWith("start_multi_realtime", undefined);
 
+    expect((await startMultiBox()).ok).toBe(true);
+    // BUGFIX-2：后端 start_multi_realtime 只 show overlay 不定位，前端必须
+    // 先用当前框列表定位，且定位先于后端命令。
+    expect(showMultiBoxOverlay).toHaveBeenCalledWith([BOX_INFO]);
+    expect(showMultiBoxOverlay.mock.invocationCallOrder[0]).toBeLessThan(
+      invoke.mock.invocationCallOrder[0],
+    );
+    expect(invoke).toHaveBeenCalledWith("start_multi_realtime", undefined);
+  });
+
+  it("stops multi-box realtime", async () => {
     invoke.mockResolvedValueOnce(undefined);
     expect((await stopMultiBox()).ok).toBe(true);
     expect(invoke).toHaveBeenCalledWith("stop_multi_realtime", undefined);
