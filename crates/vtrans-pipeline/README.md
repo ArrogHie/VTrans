@@ -25,10 +25,13 @@
 | 外部 | `tokio-util` | `CancellationToken` 协作取消 |
 | 外部 | `thiserror` | `PipelineError` 错误枚举派生 |
 | 外部 | `tracing` | 结构化日志（入口 `#[instrument]`、错误路径 `warn!`/`error!`） |
+| 外部 | `serde` | `TranslationBox` / `BoxedTranslationResult` 的 `Serialize`/`Deserialize`（用于 IPC 传输） |
 | dev | `async-trait` | 集成测试中 mock provider 的 trait 实现 |
+| dev | `serde_json` | 单元测试中的序列化往返测试 |
 
-无新增外部依赖：取消协调（`cancel::TaskSlot`）、帧差检测（`dedup::FrameDiffer`）、文本去重
-（`dedup::TextDedup`）均为本 crate 实现，避免引入第三方依赖。
+新增外部依赖 `serde`：用于 `TranslationBox` / `BoxedTranslationResult` 的 `Serialize`/`Deserialize`，
+满足跨 IPC 序列化传输需求。取消协调（`cancel::TaskSlot`）、帧差检测（`dedup::FrameDiffer`）、
+文本去重（`dedup::TextDedup`）、多框管理（`multibox::MultiBoxPipeline`）均为本 crate 实现。
 
 ## 3. 公开 API 概要
 
@@ -93,6 +96,45 @@ pub use cancel::TaskSlot;            // 最多一个任务在飞，新任务到�
 pub use dedup::{FrameDiffer, TextDedup, DEFAULT_DIFFERENCE_THRESHOLD};
 ```
 
+### 多框实时翻译（MultiBoxPipeline）
+
+```rust
+pub struct TranslationBox { pub id: u32, pub region: ScreenRegion, pub color: String }
+pub struct MultiBoxConfig {
+    pub capture_interval_ms: u32,
+    pub difference_threshold: f32,
+    pub ocr_options: OcrOptions,
+    pub translation_request: TranslationRequest,
+    pub max_boxes: u32,                  // 默认 8
+}
+pub struct BoxedTranslationResult {
+    pub box_id: u32, pub color: String, pub result: TranslationResult, pub timestamp: u64,
+}
+pub enum BoxStatus { Running, Stopped, Error(String) }
+
+impl MultiBoxPipeline {
+    pub fn new(config: MultiBoxConfig, deps: PipelineDeps) -> Self;
+    pub async fn add_box(&self, box_: TranslationBox) -> Result<(), PipelineError>;
+    pub async fn remove_box(&self, box_id: u32) -> Result<(), PipelineError>;
+    pub async fn update_box(&self, box_id: u32, region: ScreenRegion) -> Result<(), PipelineError>;
+    pub async fn start_all(&self) -> Result<(), PipelineError>;
+    pub async fn stop_all(&self) -> Result<(), PipelineError>;
+    pub async fn stop_box(&self, box_id: u32) -> Result<(), PipelineError>;
+    pub fn subscribe_results(&self) -> mpsc::Receiver<BoxedTranslationResult>;
+    pub fn box_count(&self) -> usize;
+    pub fn box_status(&self, box_id: u32) -> Option<BoxStatus>;
+}
+```
+
+每个翻译框作为独立 Tokio task 运行，拥有独立的 `CaptureSession`、`FrameDiffer`、
+`BoxFingerprintCache` 和 `CancellationToken`。结果通过 `broadcast` channel（容量 =
+`max_boxes * 2`）汇集，`subscribe_results` 返回一个由 forwarder 驱动的私有
+`mpsc::Receiver`，提供 per-subscriber 背压。单框错误（如采集失败）只设置该框的
+`BoxStatus::Error`，不影响其他框。`Drop` 时自动取消并清理所有 task。
+
+新增错误变体：`BoxNotFound(u32)`、`BoxLimitExceeded(u32)`、`DuplicateBoxId(u32)`、
+`InvalidConfig(String)`。
+
 ### 单次模式链路
 
 ```text
@@ -150,6 +192,11 @@ cargo fmt --all -- --check
 集成测试使用 `tests/common/mod.rs` 中的脚本化 mock Provider（可编程返回值、延迟、阻塞、取消计数与
 并发峰值），覆盖：单次完整链路、错误上报、取消、帧差跳过、指纹去重、旧任务取消、并发上限、
 停止清理、区域更新、背压有界、会话自然结束。
+
+`tests/pipeline_multibox.rs` 使用无状态 mock Provider（`EchoOcrProvider`、`EchoTranslationProvider`、
+`GeneratingCaptureSource`）覆盖多框场景：2+ 框并发独立运行、运行时增删框、区域修改重启、停止单框、
+错误隔离（一框采集失败不影响其他框）、指纹去重隔离（框间不交叉）、通道容量背压、8 框并发无 panic/
+死锁基准、以及各类边界错误（重复 ID、超限、不存在、重复启停）。
 
 ## 7. 人工验证（全管线：采集屏幕 -> OCR -> 翻译 -> 输出）
 

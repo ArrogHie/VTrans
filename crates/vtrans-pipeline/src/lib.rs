@@ -22,6 +22,7 @@
 pub mod cancel;
 pub mod dedup;
 pub mod live;
+pub mod multibox;
 pub mod single;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +43,9 @@ use vtrans_text::TextNormalizer;
 
 pub use cancel::TaskSlot;
 pub use dedup::{FrameDiffer, TextDedup, DEFAULT_DIFFERENCE_THRESHOLD};
+pub use multibox::{
+    BoxStatus, BoxedTranslationResult, MultiBoxConfig, MultiBoxPipeline, TranslationBox,
+};
 pub use single::run_single_capture;
 
 /// Observes captured frames before they enter OCR.
@@ -94,6 +98,22 @@ pub enum PipelineError {
     /// The run was cancelled via [`Pipeline::stop`].
     #[error("cancelled")]
     Cancelled,
+
+    /// A translation box was not found in the registry.
+    #[error("box not found: {0}")]
+    BoxNotFound(u32),
+
+    /// The maximum number of translation boxes was exceeded.
+    #[error("box limit exceeded: max {0}")]
+    BoxLimitExceeded(u32),
+
+    /// A box with this ID already exists in the registry.
+    #[error("duplicate box id: {0}")]
+    DuplicateBoxId(u32),
+
+    /// An invalid configuration value was supplied.
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
 }
 
 /// Configuration for a pipeline run.
