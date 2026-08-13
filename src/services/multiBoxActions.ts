@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores/appStore";
+import { showMultiBoxOverlay } from "./regionOverlay";
 import {
   addTranslationBox,
   getIpcErrorMessage,
@@ -79,6 +80,10 @@ export async function removeBox(boxId: number): Promise<MultiBoxActionResult> {
 /** Starts real-time translation for every configured box. */
 export async function startMultiBox(): Promise<MultiBoxActionResult> {
   try {
+    // 后端 start_multi_realtime 只 show overlay 窗口、不定位（BUGFIX-2 根因）。
+    // 先按第一个框所在显示器定位/缩放 overlay（只定位不 show，失败仅告警），
+    // 后端随后 show 时各框才能按物理坐标/dpr 对齐绘制。
+    await showMultiBoxOverlay(useAppStore.getState().translationBoxes);
     await startMultiRealtime();
     return succeeded;
   } catch (error) {

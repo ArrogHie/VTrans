@@ -14,7 +14,7 @@ vi.mock("@tauri-apps/api/window", () => ({
   availableMonitors: (...args: unknown[]) => availableMonitorsMock(...args),
 }));
 
-const { hideRegionOverlay, showRegionOverlay } = await import("../services/regionOverlay");
+const { hideRegionOverlay, showMultiBoxOverlay, showRegionOverlay } = await import("../services/regionOverlay");
 
 function createWindowMock() {
   return {
@@ -105,6 +105,63 @@ describe("regionOverlay", () => {
     getByLabel.mockResolvedValue(windowMock);
 
     await expect(showRegionOverlay(REGION)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
+describe("showMultiBoxOverlay", () => {
+  it("positions the overlay on the first box's monitor without showing it", async () => {
+    const windowMock = createWindowMock();
+    getByLabel.mockResolvedValue(windowMock);
+
+    await showMultiBoxOverlay([
+      { region: { ...REGION, monitor_id: "\\\\.\\DISPLAY2" } },
+      { region: { ...REGION, monitor_id: "\\\\.\\DISPLAY1" } },
+    ]);
+
+    expect(getByLabel).toHaveBeenCalledWith("overlay");
+    expect(windowMock.setPosition).toHaveBeenCalledWith(expect.objectContaining({ x: 1920, y: 0 }));
+    expect(windowMock.setSize).toHaveBeenCalledWith(expect.objectContaining({ width: 2560, height: 1440 }));
+    expect(windowMock.setIgnoreCursorEvents).toHaveBeenCalledWith(true);
+    // 只定位不 show：后端 start_multi_realtime 负责显示，避免空 overlay 闪烁；
+    // 也不发布 region，多框边框由 box-added/box-updated 事件驱动。
+    expect(windowMock.show).not.toHaveBeenCalled();
+    expect(emitMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the first monitor when the box monitor is gone", async () => {
+    const windowMock = createWindowMock();
+    getByLabel.mockResolvedValue(windowMock);
+
+    await showMultiBoxOverlay([{ region: { ...REGION, monitor_id: "\\\\.\\DISPLAY3" } }]);
+
+    expect(windowMock.setPosition).toHaveBeenCalledWith(expect.objectContaining({ x: 0, y: 0 }));
+    expect(windowMock.setSize).toHaveBeenCalledWith(expect.objectContaining({ width: 1920, height: 1080 }));
+  });
+
+  it("does nothing when there are no boxes", async () => {
+    const windowMock = createWindowMock();
+    getByLabel.mockResolvedValue(windowMock);
+
+    await expect(showMultiBoxOverlay([])).resolves.toBeUndefined();
+    expect(windowMock.setPosition).not.toHaveBeenCalled();
+  });
+
+  it("does nothing when the overlay window is not configured", async () => {
+    getByLabel.mockResolvedValue(null);
+
+    await expect(showMultiBoxOverlay([{ region: REGION }])).resolves.toBeUndefined();
+    expect(emitMock).not.toHaveBeenCalled();
+  });
+
+  it("swallows positioning failures instead of breaking the caller", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const windowMock = createWindowMock();
+    windowMock.setPosition.mockRejectedValue(new Error("permission denied"));
+    getByLabel.mockResolvedValue(windowMock);
+
+    await expect(showMultiBoxOverlay([{ region: REGION }])).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
