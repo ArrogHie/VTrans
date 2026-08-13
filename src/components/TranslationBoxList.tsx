@@ -1,4 +1,4 @@
-import { LayoutGrid, Pencil, Play, Plus, Square, Trash2 } from "lucide-react";
+import { LayoutGrid, Pencil, Plus, Square, Trash2 } from "lucide-react";
 import type { BoxStatus, TranslationBoxInfo } from "../types";
 import { boxCountWarningText, boxStatusLabel, isBoxError, shouldWarnBoxCount } from "../types";
 
@@ -11,8 +11,6 @@ interface TranslationBoxListProps {
   onAdd: () => void;
   onEdit: (boxId: number) => void;
   onRemove: (boxId: number) => void;
-  onStart: () => void;
-  onStop: () => void;
   onStopBox: (boxId: number) => void;
 }
 
@@ -22,8 +20,10 @@ interface TranslationBoxListProps {
  * Lists each configured translation box as a color swatch, its ordinal number
  * and runtime status, with per-box edit/remove (and stop-while-running)
  * actions. Deliberately omits coordinates/size/shape: the list is a compact
- * index, not a geometry inspector. The add button and the start/stop-all
- * control live here so the whole multi-box workflow is one cohesive section.
+ * index, not a geometry inspector. The add button lives here; the
+ * whole-session start/stop controls are owned by the main window's live-mode
+ * bottom row, so the multi-box workflow keeps a single source of truth for
+ * session control.
  */
 export function TranslationBoxList({
   boxes,
@@ -33,11 +33,8 @@ export function TranslationBoxList({
   onAdd,
   onEdit,
   onRemove,
-  onStart,
-  onStop,
   onStopBox,
 }: TranslationBoxListProps) {
-  const anyRunning = boxes.some((box) => statuses[box.box_id] === "Running");
   const showWarning = shouldWarnBoxCount(boxes.length, warningThreshold);
 
   return (
@@ -121,7 +118,7 @@ export function TranslationBoxList({
         </ul>
       )}
 
-      <div className="mt-3 space-y-2">
+      <div className="mt-3">
         <button
           type="button"
           onClick={onAdd}
@@ -131,27 +128,6 @@ export function TranslationBoxList({
           <Plus size={16} aria-hidden="true" />
           新增翻译框
         </button>
-        {anyRunning ? (
-          <button
-            type="button"
-            onClick={onStop}
-            disabled={busy}
-            className="secondary-button col-span-2 w-full"
-          >
-            <Square size={16} aria-hidden="true" />
-            停止全部
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={onStart}
-            disabled={busy || boxes.length === 0}
-            className="primary-button w-full"
-          >
-            <Play size={16} aria-hidden="true" />
-            开始多框实时
-          </button>
-        )}
       </div>
     </section>
   );
