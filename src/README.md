@@ -14,6 +14,14 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
 - 通过拖动框选生成物理像素坐标的 `ScreenRegion`。
 - 监听后端 pipeline/model 事件，并在多个 Tauri WebView 间同步结果和实时会话状态。
 - 展示 OCR 原文和翻译结果，支持重新翻译、暂停/继续、置顶和窗口拖动。
+- 多框实时翻译：主窗口提供翻译框列表（颜色色块 + 编号 + 运行/停止/错误状态 +
+  编辑/删除按钮，不显示坐标/大小/形状信息）与「新增翻译框」「开始多框实时」
+  控制；翻译弹窗按框由上到下堆叠展示结果（每框以各自颜色的 border 包裹，
+  框间用分隔线分隔，整体可滚动）；单次翻译结果同样在翻译弹窗展示。
+- 卡顿警告：框数达到 `warning_threshold` 时在列表顶部显示持久警告条，并弹出
+  短暂 toast（文案「翻译框过多可能导致卡顿，建议不超过 N 个」）。
+- 主页面精简：主页面不再显示翻译原文/译文与选区坐标/大小信息，结果统一由
+  翻译弹窗承载，并提供「打开翻译弹窗」按钮（`open_result_window`）。
 - 设置面板支持选择五种云端翻译 Provider（OpenAI/DeepL/Google/Azure/百度）
   与本地 ONNX 模型，并按所选 Provider 条件渲染端点/模型/区域/APP ID 表单；
   API Key/Secret 只经 `set_provider_credentials` 写入系统凭据，不进配置、
@@ -59,6 +67,19 @@ export function setProviderCredentials(
 ): Promise<void>;
 ```
 
+多框命令（camelCase 参数契约，与 `crates/vtrans-app/tests/contracts.rs` 一致）：
+
+```ts
+export function addTranslationBox(region: ScreenRegion): Promise<TranslationBoxInfo>;
+export function removeTranslationBox(boxId: number): Promise<void>;
+export function updateTranslationBox(boxId: number, region: ScreenRegion): Promise<void>;
+export function listTranslationBoxes(): Promise<TranslationBoxInfo[]>;
+export function startMultiRealtime(): Promise<void>;
+export function stopMultiRealtime(): Promise<void>;
+export function stopBox(boxId: number): Promise<void>;
+export function openResultWindow(): Promise<void>;
+```
+
 其余命令封装包括 `cancelRegionSelection`、`updateLiveRegion`、`setOcrLanguage`、
 `setTranslationProvider`、`setApiKey` 和 `loadLocalModels`。`setApiKey` 保持
 原有签名（按当前已保存 provider 写入），设置面板统一改用
@@ -81,6 +102,27 @@ export function isCloudProvider(provider: ProviderId): boolean;
 `TranslationConfig` 新增 `region`（Azure 区域）与 `app_id`（百度 APP ID）两个
 可空字段；百度 Secret 与各 provider 的 API Key 一样只进系统凭据，不落配置。
 
+多框类型与映射（`BoxStatus` 的 serde 表示与 `vtrans_pipeline::BoxStatus`
+一致：`"Running"`/`"Stopped"` 为纯字符串，`Error` 为 `{ "Error": message }`）：
+
+```ts
+export interface TranslationBoxInfo { box_id: number; region: ScreenRegion; color: string; }
+export type BoxStatus = "Running" | "Stopped" | { Error: string };
+export interface BoxedTranslationResult {
+  box_id: number; color: string; result: TranslationResult; timestamp: number;
+}
+export function isBoxError(status: BoxStatus): status is { Error: string };
+export function boxStatusLabel(status: BoxStatus): string;      // 运行中/已停止/错误
+export function isMultiBoxEngaged(statuses, resultCount): boolean;
+export function shouldWarnBoxCount(count, threshold): boolean;
+export function boxCountWarningText(threshold): string;
+```
+
+`AppConfig` 新增 `translation_boxes`（`TranslationBoxConfigEntry[]`，配置 schema
+字段名为 `id` 而非 `box_id`）、`max_boxes` 与 `warning_threshold`，
+`DEFAULT_CONFIG.version` 同步到 6，避免未水合即保存被后端校验拒绝或整包
+`save_settings` 覆盖后端多框字段。
+
 ### Event service
 
 ```ts
@@ -89,6 +131,26 @@ export function listenToEvent<K extends keyof EventPayloadMap>(
   callback: (payload: EventPayloadMap[K]) => void,
 ): Promise<Unlisten>;
 export function subscribeToBackendEvents(handlers: ...): Promise<Unlisten>;
+```
+
+多框事件监听（稳定事件名见 `vtrans_app::events`）：
+
+```ts
+export const MULTIBOX_RESULT = "multibox://result";
+export const MULTIBOX_BOX_ADDED = "multibox://box-added";
+export const MULTIBOX_BOX_REMOVED = "multibox://box-removed";
+export const MULTIBOX_BOX_UPDATED = "multibox://box-updated";
+export const MULTIBOX_STATUS = "multibox://status";
+export const MULTIBOX_WARNING = "multibox://warning";
+export const TRANSLATION_SINGLE_RESULT = "translation://single-result";
+
+export function onMultiBoxResult(cb): Promise<Unlisten>;
+export function onMultiBoxBoxAdded(cb): Promise<Unlisten>;
+export function onMultiBoxBoxRemoved(cb): Promise<Unlisten>;
+export function onMultiBoxBoxUpdated(cb): Promise<Unlisten>;
+export function onMultiBoxStatus(cb): Promise<Unlisten>;
+export function onMultiBoxWarning(cb): Promise<Unlisten>;
+export function onSingleTranslationResult(cb): Promise<Unlisten>;
 ```
 
 Debug 帧服务（仅 Debug 模式启用）：
@@ -251,6 +313,25 @@ pnpm tauri dev
 - 凭据 IPC：`set_provider_credentials` 只发送提供的字段，百度 `appId` + `secret`
   双字段载荷与后端契约一致。
 - 模式切换控件在实时会话运行期间的禁用行为。
+- 多框类型与配置：`BoxStatus` 的 Error 判定与中文标签、`isMultiBoxEngaged`
+  判定、`shouldWarnBoxCount` / `boxCountWarningText` 警告逻辑、`DEFAULT_CONFIG`
+  多框默认值（`translation_boxes` 空列表、`max_boxes` 8、`warning_threshold` 4、
+  `version` 6）。
+- 多框 IPC：8 个命令的参数名（`boxId` camelCase、`add_translation_box` 传
+  `region` 等）与 `list_translation_boxes` 无参调用。
+- 多框事件：7 个事件名与 payload 解包（`multibox://result`、`box-added`、
+  `box-removed`、`box-updated`、`status`、`warning`、`translation://single-result`）。
+- 多框动作与 store：`addBox`/`editBox`/`removeBox`/`startMultiBox`/
+  `stopMultiBox`/`stopSingleBox`/`hydrateBoxes` 经 mock IPC 覆盖；store 的
+  `upsertBox`（按 box_id 去重）、`removeBox`（级联清理 status/result）、
+  `updateBoxRegion`、`setBoxStatus`/`setMultiBoxResult`/`resetMultiBox`。
+- 翻译框列表组件：列表渲染（色块 + 编号 + 编辑/删除）、空态引导、状态徽标、
+  运行中框的停止按钮、阈值上下警告条显隐、**不渲染坐标/大小/形状信息**。
+- 多框结果组件：由上到下堆叠、彩色边框（`2px solid <color>`）、框间分隔线、
+  滚动容器、已停止占位、未水合时按结果回退、错误消息透出。
+- 翻译弹窗多框布局：多框 engaged 时渲染堆叠结果 + 标题栏「运行中/已停止」，
+  未 engaged 时回退单次迷你条。
+- overlay 多框：`upsertOverlayBox` 按 box_id 幂等去重与顺序保持。
 
 ### 手工验证项
 
@@ -311,7 +392,7 @@ pnpm tauri dev
     （不再整包 `save_settings`），滑块改动防抖 350ms，实时会话运行期间也可保存。
     每个 WebView 的 Zustand store 相互隔离：result/floater 均在挂载时自行
     `get_app_config` 水合（ResultWindow 应用外观、FloatingBall 控制显隐与外观），
-    不依赖主窗口；`DEFAULT_CONFIG.version` 与后端 `CURRENT_CONFIG_VERSION`（5）
+    不依赖主窗口；`DEFAULT_CONFIG.version` 与后端 `CURRENT_CONFIG_VERSION`（6）
     保持一致，避免未水合即保存被后端校验拒绝。
 11. 悬浮球默认关闭（`floating_ball.enabled`），直径与透明度（`size_px` 32–72、
     `opacity` 0.3–1.0）由 CSS 变量 `--floater-size` / `--floater-opacity` 驱动，
@@ -328,3 +409,14 @@ pnpm tauri dev
     到达前显示「正在切换翻译引擎…」spinner；命中缓存时进度近瞬时跳到 100%。
     若后端版本未补发事件，切换期间仅显示 spinner，完成后直接生效，不影响功能。
     切换完成/失败后 `providerSwitching` 复位，下拉框恢复可用。
+14. 多框翻译结果（`multibox://result` / `BoxedTranslationResult`）只携带译文
+    （`result.translated_text`），不含 OCR 原文；因此多框模式下翻译弹窗每个框
+    只展示译文 + 框编号/颜色 + 状态，原文仅在单次翻译（`translation://single-result`）
+    中展示。
+15. 多框常驻方框由单个 overlay 窗口绘制，`ScreenRegion` 坐标为显示器相对物理
+    像素；当多个翻译框跨越不同显示器时，单个 overlay 窗口无法同时覆盖所有
+    显示器，方框仅在其所属显示器与 overlay 窗口覆盖区域一致时对齐。这是后端
+    单 overlay 窗口的既有约束（前端不修改 Rust 侧）。
+16. 多框警告文案中的「建议不超过 N 个」的 N 取前端 `config.warning_threshold`
+    （`multibox://warning` 事件 payload 仅含 `current_count`/`max_count`，不含
+    阈值本身），与列表顶部持久警告条使用同一阈值，二者文案一致。

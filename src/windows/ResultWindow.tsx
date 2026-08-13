@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { MultiBoxResults } from "../components/MultiBoxResults";
 import {
   applyHydratedAppearance,
   applyResultAppearance,
@@ -22,28 +23,36 @@ import {
 import { getIpcErrorMessage, captureOnce, publishFrontendOcrResult } from "../services/tauri";
 import { toggleLivePause } from "../services/translateActions";
 import { getAppConfig } from "../services/tauri";
+import { hydrateBoxes } from "../services/multiBoxActions";
 import { useAppStore } from "../stores/appStore";
 import {
   RESULT_FONT_SIZE_MAX,
   RESULT_FONT_SIZE_MIN,
   RESULT_OPACITY_MAX,
   RESULT_OPACITY_MIN,
+  isMultiBoxEngaged,
 } from "../types";
 
 /** Debounce delay for persisting appearance changes (ms). */
 const APPEARANCE_PERSIST_MS = 350;
 
 /**
- * Mini-bar translation popup (result window).
+ * Translation popup (result window).
  *
- * The translation is the main body; the source text is collapsible and
- * hidden by default. A single toolbar row provides pin, pause/resume
- * (live), retranslate (single), appearance and close actions. Appearance
- * (font size and background alpha) is applied instantly through CSS custom
- * properties on the root node and persisted through the dedicated
- * `update_result_window_appearance` command; the text itself never fades —
- * only the background alpha changes, letting the desktop show through the
- * transparent window.
+ * Supports two layouts:
+ *
+ * - **Multi-box**: when the multi-box session is engaged, results are stacked
+ *   top-to-bottom, each wrapped in a border matching the box's palette color,
+ *   separated by dividers and scrollable. The title bar reflects the overall
+ *   running/stopped state.
+ * - **Single-box** (single capture / single-region live): the classic mini-bar
+ *   with translation as the main body and a collapsible source text. A single
+ *   capture now prefers the dedicated `translation://single-result` payload
+ *   (original + translated together); live mode streams via the legacy
+ *   OCR/translation result events.
+ *
+ * Appearance (font size and background alpha) applies instantly through CSS
+ * custom properties and persists through `update_result_window_appearance`.
  *
  * `initialSourceOpen` is a test seam only; production always starts with the
  * source text collapsed.
@@ -53,12 +62,17 @@ export function ResultWindow({
 }: { initialSourceOpen?: boolean } = {}) {
   const ocrResult = useAppStore((state) => state.ocrResult);
   const translationResult = useAppStore((state) => state.translationResult);
+  const singleResult = useAppStore((state) => state.singleResult);
+  const translationBoxes = useAppStore((state) => state.translationBoxes);
+  const multiBoxResults = useAppStore((state) => state.multiBoxResults);
+  const boxStatuses = useAppStore((state) => state.boxStatuses);
   const mode = useAppStore((state) => state.mode);
   const livePaused = useAppStore((state) => state.livePaused);
   const error = useAppStore((state) => state.error);
   const setError = useAppStore((state) => state.setError);
   const setOcrResult = useAppStore((state) => state.setOcrResult);
   const setTranslationResult = useAppStore((state) => state.setTranslationResult);
+  const setSingleResult = useAppStore((state) => state.setSingleResult);
   const config = useAppStore((state) => state.config);
 
   const rootRef = useRef<HTMLElement | null>(null);
@@ -70,6 +84,9 @@ export function ResultWindow({
   const [fontSizePx, setFontSizePx] = useState(() =>
     clampResultFontSize(config.result_window.font_size_px),
   );
+
+  const multiBoxEngaged = isMultiBoxEngaged(boxStatuses, Object.keys(multiBoxResults).length);
+  const multiBoxRunning = Object.values(boxStatuses).some((status) => status === "Running");
 
   // 挂载首帧把当前外观写入 CSS 变量，避免闪烁。
   useEffect(() => {
@@ -96,6 +113,12 @@ export function ResultWindow({
     };
   }, []);
 
+  // 多框列表独立水合：结果窗口需要颜色/顺序来渲染堆叠布局，即使重启后
+  // 尚未收到 box-added 事件也能正确展示已持久化的翻译框。
+  useEffect(() => {
+    void hydrateBoxes();
+  }, []);
+
   // 本地外观变化（滑块或水合）时即时应用到 CSS 变量；
   // 窗口存活期间 store 配置变化（如主窗口设置面板保存）时，
   // 通过 setConfig 驱动本 effect 重新应用，保证两个 WebView 一致。
@@ -116,8 +139,6 @@ export function ResultWindow({
     persistTimer.current = window.setTimeout(() => {
       void persistResultAppearance(nextOpacity, nextFontSizePx)
         .then(() => {
-          // 后端命令已持久化，这里只把同一份值写回本地 store，
-          // 让其他依赖 config 的 UI（如主窗口）保持同步。
           const current = useAppStore.getState().config;
           useAppStore.getState().setConfig({
             ...current,
@@ -153,8 +174,9 @@ export function ResultWindow({
     if (mode === "live") return;
     const region = useAppStore.getState().selectedRegion;
     if (!region) return;
-    // 清空上一次的译文，避免新原文与旧译文并列造成误导。
+    // 清空上一次的译文与单次结果，避免新原文与旧译文并列造成误导。
     setTranslationResult(null);
+    setSingleResult(null);
     try {
       const result = await captureOnce(region);
       setOcrResult(result);
@@ -165,6 +187,9 @@ export function ResultWindow({
   };
 
   const pause = () => void toggleLivePause();
+
+  const sourceText = singleResult?.original_text ?? ocrResult?.merged_text ?? "";
+  const translatedText = singleResult?.translated_text ?? translationResult?.translated_text ?? "";
 
   return (
     <main
@@ -181,10 +206,16 @@ export function ResultWindow({
           <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-indigo-500">
             VTRANS
           </span>
-          {mode === "live" && (
+          {multiBoxEngaged ? (
             <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
-              {livePaused ? "已暂停" : "实时"}
+              {multiBoxRunning ? "运行中" : "已停止"}
             </span>
+          ) : (
+            mode === "live" && (
+              <span className="rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-600">
+                {livePaused ? "已暂停" : "实时"}
+              </span>
+            )
           )}
         </div>
         <div className="flex items-center gap-0.5">
@@ -196,7 +227,7 @@ export function ResultWindow({
           >
             {alwaysOnTop ? <Pin size={14} /> : <PinOff size={14} />}
           </button>
-          {mode === "live" && (
+          {!multiBoxEngaged && mode === "live" && (
             <button
               type="button"
               onClick={pause}
@@ -206,7 +237,7 @@ export function ResultWindow({
               {livePaused ? <Play size={14} /> : <Pause size={14} />}
             </button>
           )}
-          {mode === "single" && (
+          {!multiBoxEngaged && mode === "single" && (
             <button
               type="button"
               onClick={() => void retranslate()}
@@ -267,29 +298,35 @@ export function ResultWindow({
         </div>
       )}
 
-      <button
-        type="button"
-        onClick={() => setSourceOpen((value) => !value)}
-        className="flex items-center gap-1 self-start rounded px-1 py-0.5 text-[11px] font-medium text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
-        aria-expanded={sourceOpen}
-        data-testid="result-source-toggle"
-      >
-        {sourceOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-        原文
-      </button>
-      {sourceOpen && (
-        <p className="result-text max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-100/70 p-1.5 leading-5 text-slate-500" data-testid="result-source-text">
-          {ocrResult?.merged_text || "暂无内容"}
-        </p>
-      )}
+      {multiBoxEngaged ? (
+        <MultiBoxResults boxes={translationBoxes} results={multiBoxResults} statuses={boxStatuses} />
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={() => setSourceOpen((value) => !value)}
+            className="flex items-center gap-1 self-start rounded px-1 py-0.5 text-[11px] font-medium text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            aria-expanded={sourceOpen}
+            data-testid="result-source-toggle"
+          >
+            {sourceOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            原文
+          </button>
+          {sourceOpen && (
+            <p className="result-text max-h-24 overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-slate-100/70 p-1.5 leading-5 text-slate-500" data-testid="result-source-text">
+              {sourceText || "暂无内容"}
+            </p>
+          )}
 
-      <p
-        className="result-text flex-1 whitespace-pre-wrap break-words leading-6 text-slate-800"
-        data-testid="result-translation-text"
-        data-tauri-drag-region
-      >
-        {translationResult?.translated_text || "等待翻译…"}
-      </p>
+          <p
+            className="result-text flex-1 whitespace-pre-wrap break-words leading-6 text-slate-800"
+            data-testid="result-translation-text"
+            data-tauri-drag-region
+          >
+            {translatedText || "等待翻译…"}
+          </p>
+        </>
+      )}
     </main>
   );
 }

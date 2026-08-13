@@ -4,6 +4,12 @@ import {
   listenToFrontendLivePaused,
   listenToFrontendLiveStopped,
   listenToFrontendOcrResult,
+  onMultiBoxBoxAdded,
+  onMultiBoxBoxRemoved,
+  onMultiBoxBoxUpdated,
+  onMultiBoxResult,
+  onMultiBoxStatus,
+  onSingleTranslationResult,
   subscribeToBackendEvents,
   type Unlisten,
 } from "./services/events";
@@ -37,6 +43,12 @@ function useBackendEvents() {
   const setModelProgress = useAppStore((state) => state.setModelProgress);
   const setSelectedRegion = useAppStore((state) => state.setSelectedRegion);
   const setError = useAppStore((state) => state.setError);
+  const upsertBox = useAppStore((state) => state.upsertBox);
+  const removeBox = useAppStore((state) => state.removeBox);
+  const updateBoxRegion = useAppStore((state) => state.updateBoxRegion);
+  const setBoxStatus = useAppStore((state) => state.setBoxStatus);
+  const setMultiBoxResult = useAppStore((state) => state.setMultiBoxResult);
+  const setSingleResult = useAppStore((state) => state.setSingleResult);
 
   useEffect(() => {
     let disposed = false;
@@ -102,6 +114,14 @@ function useBackendEvents() {
           setMode("single");
           setStatus("idle");
         }),
+        onMultiBoxBoxAdded((payload) => {
+          upsertBox({ box_id: payload.box_id, color: payload.color, region: payload.region });
+        }),
+        onMultiBoxBoxRemoved((payload) => removeBox(payload.box_id)),
+        onMultiBoxBoxUpdated((payload) => updateBoxRegion(payload.box_id, payload.region)),
+        onMultiBoxStatus((payload) => setBoxStatus(payload.box_id, payload.status)),
+        onMultiBoxResult((result) => setMultiBoxResult(result)),
+        onSingleTranslationResult((payload) => setSingleResult(payload)),
       ]);
       if (disposed) {
         for (const unlisten of unlisteners) unlisten();
@@ -117,7 +137,7 @@ function useBackendEvents() {
       disposed = true;
       cleanup?.();
     };
-  }, [setError, setLiveConfig, setLivePaused, setMode, setModelProgress, setOcrResult, setSelectedRegion, setStatus, setTranslationResult]);
+  }, [removeBox, setBoxStatus, setError, setLiveConfig, setLivePaused, setMode, setModelProgress, setMultiBoxResult, setOcrResult, setSelectedRegion, setSingleResult, setStatus, setTranslationResult, updateBoxRegion, upsertBox]);
 }
 
 export default App;

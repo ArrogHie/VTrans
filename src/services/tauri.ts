@@ -7,6 +7,7 @@ import type {
   OcrResult,
   PipelineConfig,
   ScreenRegion,
+  TranslationBoxInfo,
   VerifyReport,
 } from "../types";
 
@@ -180,6 +181,55 @@ export function getAppConfig(): Promise<AppConfig> {
 /** Returns a frontend-safe application status snapshot. */
 export function getAppStatus(): Promise<AppStatus> {
   return call<AppStatus>("get_app_status");
+}
+
+/**
+ * Adds a translation box and returns its assigned id, region, and color.
+ *
+ * The backend assigns the next id/color from its palette and emits a
+ * `multibox://box-added` event; the returned info mirrors that event payload.
+ */
+export function addTranslationBox(region: ScreenRegion): Promise<TranslationBoxInfo> {
+  return call<TranslationBoxInfo>("add_translation_box", { region });
+}
+
+/** Removes a translation box by id. */
+export function removeTranslationBox(boxId: number): Promise<void> {
+  // Tauri 2 maps the Rust `box_id` parameter to the camelCase `boxId`.
+  return call<void>("remove_translation_box", { boxId });
+}
+
+/** Updates a translation box's capture region. */
+export function updateTranslationBox(boxId: number, region: ScreenRegion): Promise<void> {
+  return call<void>("update_translation_box", { boxId, region });
+}
+
+/** Lists all configured translation boxes (survives restarts). */
+export function listTranslationBoxes(): Promise<TranslationBoxInfo[]> {
+  return call<TranslationBoxInfo[]>("list_translation_boxes");
+}
+
+/** Starts multi-box real-time translation for all configured boxes. */
+export function startMultiRealtime(): Promise<void> {
+  return call<void>("start_multi_realtime");
+}
+
+/** Stops all multi-box translation tasks. */
+export function stopMultiRealtime(): Promise<void> {
+  return call<void>("stop_multi_realtime");
+}
+
+/** Stops a single translation box, leaving it registered. */
+export function stopBox(boxId: number): Promise<void> {
+  return call<void>("stop_box", { boxId });
+}
+
+/**
+ * Opens the translation popup (result window), or focuses it if already
+ * visible. The window is pre-declared, so this never creates a new one.
+ */
+export function openResultWindow(): Promise<void> {
+  return call<void>("open_result_window");
 }
 
 /** Publishes a single-capture result to the other Tauri webviews. */

@@ -1,13 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
-import { FolderCheck, MousePointer2, Pause, Play, RefreshCw, Settings2, Square } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  ExternalLink,
+  FolderCheck,
+  MousePointer2,
+  Pause,
+  Play,
+  RefreshCw,
+  Settings2,
+  Square,
+} from "lucide-react";
 import { DebugPanel } from "../components/DebugPanel";
 import { LanguageSelector } from "../components/LanguageSelector";
 import { ModeToggle } from "../components/ModeToggle";
 import { ProviderSelect } from "../components/ProviderSelect";
-import { ResultCard } from "../components/ResultCard";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { StatusBar } from "../components/StatusBar";
+import { TranslationBoxList } from "../components/TranslationBoxList";
 import { useDebugFrame } from "../hooks/useDebugFrame";
+import { onMultiBoxWarning } from "../services/events";
 import { showRegionOverlay } from "../services/regionOverlay";
 import {
   getAppConfig,
@@ -25,10 +35,19 @@ import {
   stopLive as stopLiveSession,
   toggleLivePause,
 } from "../services/translateActions";
+import {
+  addBox,
+  editBox,
+  hydrateBoxes,
+  openResultPopup,
+  removeBox,
+  startMultiBox,
+  stopMultiBox,
+  stopSingleBox,
+} from "../services/multiBoxActions";
 import { useAppStore } from "../stores/appStore";
-import { regionPreviewBox } from "../utils/regionPreview";
 import { shouldRestoreOverlay } from "../utils/overlayVisibility";
-import { isLocalPairSupported } from "../types";
+import { boxCountWarningText, isLocalPairSupported } from "../types";
 import type { LanguageCode, Mode, ProviderId } from "../types";
 
 const OCR_LANGUAGES = [
@@ -45,28 +64,28 @@ const TARGET_LANGUAGES = [
 
 export function MainWindow() {
   const {
-    mode, status, error, selectedRegion, config, modelProgress, liveConfig, livePaused,
-    providerSwitching,
+    mode, status, error, config, modelProgress, liveConfig, livePaused,
+    providerSwitching, translationBoxes, boxStatuses,
     setMode, setStatus, setSelectedRegion, setProvider, setConfig, updateLanguage,
     setProviderSwitching, setModelProgress,
   } = useAppStore();
-  const ocrResult = useAppStore((state) => state.ocrResult);
-  const translationResult = useAppStore((state) => state.translationResult);
   const [busy, setBusy] = useState(false);
+  const [multiBusy, setMultiBusy] = useState(false);
   const [modelMessage, setModelMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
+  const [warningToast, setWarningToast] = useState<string | null>(null);
   const debugFrame = useDebugFrame(debugMode);
 
   useEffect(() => {
     let active = true;
     void (async () => {
       try {
-        const [config, snapshot] = await Promise.all([getAppConfig(), getAppStatus()]);
+        const [configSnapshot, snapshot] = await Promise.all([getAppConfig(), getAppStatus()]);
         if (!active) return;
         // 先水合真实配置再应用状态快照，保证整包 save_settings
         // 不会用前端默认值覆盖后端字段（OCR 语言、日志级别等）。
-        useAppStore.getState().setConfig(config);
+        useAppStore.getState().setConfig(configSnapshot);
         useAppStore.getState().applyStatus(snapshot);
         setDebugMode(snapshot.debug_mode);
         if (snapshot.selected_region) {
@@ -79,16 +98,36 @@ export function MainWindow() {
       } catch {
         // 水合失败时保留默认配置与初始状态，用户仍可手动操作。
       }
+      // 多框列表独立水合（失败不影响主流程），与配置水合互不阻塞。
+      void hydrateBoxes();
     })();
     return () => {
       active = false;
     };
   }, [setSelectedRegion]);
 
-  const regionLabel = useMemo(() => {
-    if (!selectedRegion) return "尚未选择区域";
-    return `${selectedRegion.width} × ${selectedRegion.height} · ${selectedRegion.monitor_id}`;
-  }, [selectedRegion]);
+  // 卡顿警告 toast：后端在框数达到阈值时发 multibox://warning，前端弹出
+  // 短暂通知；持久警告条由 TranslationBoxList 依据同一阈值派生。
+  useEffect(() => {
+    let disposed = false;
+    let timer: number | undefined;
+    let unlistenFn: (() => void) | undefined;
+    void onMultiBoxWarning(() => {
+      if (disposed) return;
+      const threshold = useAppStore.getState().config.warning_threshold;
+      setWarningToast(boxCountWarningText(threshold));
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setWarningToast(null), 5000);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenFn = unlisten;
+    });
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+      unlistenFn?.();
+    };
+  }, []);
 
   const selectRegion = async () => {
     setBusy(true);
@@ -182,6 +221,64 @@ export function MainWindow() {
     }
   };
 
+  // 多框操作统一走 multiBoxActions 状态机；busy 仅锁定多框区块，不阻塞单次/实时。
+  const handleAddBox = async () => {
+    setMultiBusy(true);
+    try {
+      await addBox();
+    } finally {
+      setMultiBusy(false);
+    }
+  };
+  const handleEditBox = async (boxId: number) => {
+    setMultiBusy(true);
+    try {
+      await editBox(boxId);
+    } finally {
+      setMultiBusy(false);
+    }
+  };
+  const handleRemoveBox = async (boxId: number) => {
+    setMultiBusy(true);
+    try {
+      await removeBox(boxId);
+    } finally {
+      setMultiBusy(false);
+    }
+  };
+  const handleStartMulti = async () => {
+    setMultiBusy(true);
+    try {
+      await startMultiBox();
+    } finally {
+      setMultiBusy(false);
+    }
+  };
+  const handleStopMulti = async () => {
+    setMultiBusy(true);
+    try {
+      await stopMultiBox();
+    } finally {
+      setMultiBusy(false);
+    }
+  };
+  const handleStopBox = async (boxId: number) => {
+    setMultiBusy(true);
+    try {
+      await stopSingleBox(boxId);
+    } finally {
+      setMultiBusy(false);
+    }
+  };
+  const handleOpenResult = async () => {
+    setMultiBusy(true);
+    try {
+      await openResultPopup();
+    } finally {
+      setMultiBusy(false);
+    }
+  };
+
   const disabled = busy || status === "ocr_in_progress" || status === "translating";
 
   return (
@@ -202,6 +299,24 @@ export function MainWindow() {
           <Settings2 size={20} aria-hidden="true" />
         </button>
       </header>
+
+      {warningToast && (
+        <div
+          role="status"
+          data-testid="multibox-warning-toast"
+          className="fixed left-1/2 top-4 z-50 flex max-w-[90%] -translate-x-1/2 items-center gap-2 rounded-lg bg-amber-100 px-4 py-2 text-xs font-medium text-amber-800 shadow-lg"
+        >
+          <span className="min-w-0 break-words">{warningToast}</span>
+          <button
+            type="button"
+            onClick={() => setWarningToast(null)}
+            className="shrink-0 rounded px-1 text-amber-600 hover:bg-amber-200"
+            title="关闭"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {settingsOpen && (
         <SettingsPanel
@@ -226,45 +341,35 @@ export function MainWindow() {
           <div className="mb-3 flex items-center justify-between">
             <div>
               <h2 className="text-sm font-semibold">翻译区域</h2>
-              <p className="mt-1 text-xs text-slate-400">{regionLabel}</p>
+              <p className="mt-1 text-xs text-slate-400">框选要翻译的屏幕区域</p>
             </div>
             <MousePointer2 size={18} className="text-indigo-500" aria-hidden="true" />
           </div>
           <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button w-full">
             <MousePointer2 size={16} />选择屏幕区域
           </button>
-          {selectedRegion && (
-            <div className="mt-3">
-              <div className="relative mx-auto h-24 w-40 overflow-hidden rounded-md border border-slate-200 bg-slate-50">
-                <div
-                  className="absolute rounded border-2 border-indigo-400 bg-indigo-400/20"
-                  style={regionPreviewBox(selectedRegion, 160, 96)}
-                  data-testid="region-preview"
-                />
-              </div>
-              <p className="mt-1 text-center text-[11px] text-slate-400">
-                位置 ({selectedRegion.x}, {selectedRegion.y}) · {selectedRegion.width} × {selectedRegion.height}（物理像素）
-              </p>
-            </div>
-          )}
         </section>
+
+        <TranslationBoxList
+          boxes={translationBoxes}
+          statuses={boxStatuses}
+          warningThreshold={config.warning_threshold}
+          busy={multiBusy}
+          onAdd={() => void handleAddBox()}
+          onEdit={(boxId) => void handleEditBox(boxId)}
+          onRemove={(boxId) => void handleRemoveBox(boxId)}
+          onStart={() => void handleStartMulti()}
+          onStop={() => void handleStopMulti()}
+          onStopBox={(boxId) => void handleStopBox(boxId)}
+        />
 
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold">翻译结果</h2>
-            {mode === "live" && (
-              <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-600">
-                {livePaused ? "已暂停" : "实时更新中"}
-              </span>
-            )}
-          </div>
-          <div className="space-y-3">
-            <ResultCard title="原文" text={ocrResult?.merged_text ?? ""} />
-            <ResultCard title="译文" text={translationResult?.translated_text ?? ""} />
-          </div>
+          <button type="button" onClick={() => void handleOpenResult()} disabled={multiBusy} className="secondary-button w-full">
+            <ExternalLink size={16} aria-hidden="true" />打开翻译弹窗
+          </button>
         </section>
 
-        {debugMode && <DebugPanel frame={debugFrame} ocrText={ocrResult?.merged_text ?? null} />}
+        {debugMode && <DebugPanel frame={debugFrame} ocrText={null} />}
 
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <h2 className="mb-3 text-sm font-semibold">语言与引擎</h2>

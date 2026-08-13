@@ -2,6 +2,8 @@ import { create } from "zustand";
 import type {
   AppConfig,
   AppStatus,
+  BoxStatus,
+  BoxedTranslationResult,
   LanguageCode,
   Mode,
   OcrResult,
@@ -9,6 +11,8 @@ import type {
   PipelineStatus,
   ProviderId,
   ScreenRegion,
+  SingleResultPayload,
+  TranslationBoxInfo,
   TranslationResult,
 } from "../types";
 import { DEFAULT_CONFIG, normalizeProviderId } from "../types";
@@ -25,6 +29,14 @@ interface AppState {
   hydrated: boolean;
   liveConfig: PipelineConfig | null;
   livePaused: boolean;
+  /** Configured multi-box translation boxes (ordered, per-window). */
+  translationBoxes: TranslationBoxInfo[];
+  /** Latest runtime status per box id. */
+  boxStatuses: Record<number, BoxStatus>;
+  /** Latest translation result per box id. */
+  multiBoxResults: Record<number, BoxedTranslationResult>;
+  /** Latest single-capture result shown by the result window. */
+  singleResult: SingleResultPayload | null;
   setMode: (mode: Mode) => void;
   setStatus: (status: PipelineStatus) => void;
   setOcrResult: (result: OcrResult | null) => void;
@@ -41,6 +53,14 @@ interface AppState {
   setProvider: (provider: ProviderId) => void;
   applyStatus: (status: AppStatus) => void;
   resetResults: () => void;
+  setTranslationBoxes: (boxes: TranslationBoxInfo[]) => void;
+  upsertBox: (box: TranslationBoxInfo) => void;
+  removeBox: (boxId: number) => void;
+  updateBoxRegion: (boxId: number, region: ScreenRegion) => void;
+  setBoxStatus: (boxId: number, status: BoxStatus) => void;
+  setMultiBoxResult: (result: BoxedTranslationResult) => void;
+  setSingleResult: (result: SingleResultPayload | null) => void;
+  resetMultiBox: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -56,6 +76,10 @@ export const useAppStore = create<AppState>((set) => ({
   hydrated: false,
   liveConfig: null,
   livePaused: false,
+  translationBoxes: [],
+  boxStatuses: {},
+  multiBoxResults: {},
+  singleResult: null,
   setMode: (mode) => set({ mode, error: null }),
   setStatus: (status) => set({ status, error: typeof status === "object" ? status.error : null }),
   setOcrResult: (ocrResult) => set({ ocrResult }),
@@ -143,6 +167,38 @@ export const useAppStore = create<AppState>((set) => ({
       };
     }),
   resetResults: () => set({ ocrResult: null, translationResult: null, error: null }),
+  setTranslationBoxes: (translationBoxes) => set({ translationBoxes }),
+  upsertBox: (box) =>
+    set((state) => ({
+      translationBoxes: state.translationBoxes.some((entry) => entry.box_id === box.box_id)
+        ? state.translationBoxes.map((entry) => (entry.box_id === box.box_id ? box : entry))
+        : [...state.translationBoxes, box],
+    })),
+  removeBox: (boxId) =>
+    set((state) => {
+      const boxStatuses = { ...state.boxStatuses };
+      delete boxStatuses[boxId];
+      const multiBoxResults = { ...state.multiBoxResults };
+      delete multiBoxResults[boxId];
+      return {
+        translationBoxes: state.translationBoxes.filter((entry) => entry.box_id !== boxId),
+        boxStatuses,
+        multiBoxResults,
+      };
+    }),
+  updateBoxRegion: (boxId, region) =>
+    set((state) => ({
+      translationBoxes: state.translationBoxes.map((entry) =>
+        entry.box_id === boxId ? { ...entry, region } : entry,
+      ),
+    })),
+  setBoxStatus: (boxId, status) =>
+    set((state) => ({ boxStatuses: { ...state.boxStatuses, [boxId]: status } })),
+  setMultiBoxResult: (result) =>
+    set((state) => ({ multiBoxResults: { ...state.multiBoxResults, [result.box_id]: result } })),
+  setSingleResult: (singleResult) => set({ singleResult }),
+  resetMultiBox: () =>
+    set({ translationBoxes: [], boxStatuses: {}, multiBoxResults: {}, singleResult: null }),
 }));
 
 export type { AppState };
