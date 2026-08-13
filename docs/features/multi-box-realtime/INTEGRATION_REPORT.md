@@ -95,6 +95,7 @@
 | 4 | 推送提醒（本地 main 领先 origin，含 1fe7380 文档清理提交） | 待推送 |
 | 5 | GUI 端到端冒烟 | 待手工验收 |
 | 6 | clippy 既有警告（vtrans-translation） | 观察 |
+| 7 | **flaky 测试**：vtrans-translation tests/api_provider.rs 的 mock HTTP 用例（如 retry_after_header_is_honored、http_401_returns_unauthorized、retries_until_success）在 2026-08-13 多框整合门禁中出现随机失败（HTTP 502/断言失败，复跑通过）。取证：`git diff 1fe7380..main -- crates/vtrans-translation` 仅 Cargo.lock 差异，源码未变 → 与多框无关的既有缺陷（cloud provider 时代引入的 mock 时序竞态） | 既有缺陷 | 07-translation 模块开发 Agent（建议派 fix/07-api-provider-flaky-tests） | 待派单 |
 
 ## UI 缺陷修复整合（2026-08-13，用户 bug 报告）
 
@@ -106,10 +107,22 @@
 
 Review：范围仅 src/（6 文件）；pnpm 273 测试（39 文件）+ tsc 通过；无 console.log 残留。任务单：TASK-BUGFIX-11-ui.md。
 
+## UI 交互缺陷修复整合（2026-08-13，用户第二轮 bug 报告）
+
+| Bug | 描述 | 修复 | 合并提交 |
+|-----|------|------|----------|
+| B2-1 | 单次模式出现「选择屏幕区域」与「选择并翻译」两个同功能按钮 | 仅保留「选择并翻译」 | e781c40（分支 fix/11-multibox-interaction） |
+| B2-2 | live 模式「开始多框实时」与「开始实时」并存 | 列表删除会话级启停按钮；底部「开始实时/停止」统一控制多框；删除「暂停/继续实时」（单框实时由热键/悬浮球/弹窗控制，既定设计决策） | 同上 |
+| B2-3 | overlay 实时框与实际框位置不符 | 根因：多框启动时后端只 show overlay 不定位；修复：启动前前端把 overlay 定位/铺满第一个框所在显示器（物理坐标），失败仅告警；已知限制：单窗口只覆盖一个显示器 | 同上 |
+| B2-4 | 选区窗口每次残留上一次的框，需先点「重新选择」 | 确认成功/取消/系统关闭三条退出路径均重置选区状态，每次打开从空白开始 | 同上 |
+
+Review：范围仅 src/（10 文件）；pnpm 282 测试（39 文件）+ tsc 通过；无 console.log 残留；IPC 契约未变更。任务单：TASK-BUGFIX-11-interaction.md。
+> 门禁说明：合并后 main 全量门禁中 cargo test --workspace 出现 vtrans-translation api_provider 的随机失败（遗留 7，与本功能无关、该 crate 源码未变）；fmt/clippy/pnpm/tsc 与其余全部 workspace 测试均 PASS，多框相关 crate（config/text/pipeline/app）测试全绿。
+
 ## 结论
 
-- [x] 功能已整合：5 个模块分支 + 后续迭代 F1/F2/D1 + UI 缺陷修复 B1-B3 全部合并入 main（当前 07bcc3f），零冲突
-- [x] 原文缺口、文档同步、三处 UI 缺陷均已闭环
+- [x] 功能已整合：5 个模块分支 + 后续迭代 F1/F2/D1 + 两轮 UI 缺陷修复（B1-B3、B2-1..4）全部合并入 main（当前 e781c40），零冲突
+- [x] 原文缺口、文档同步、两轮共 7 处 UI/交互缺陷均已闭环
 - [ ] 功能关闭前置：GUI 手工冒烟（遗留 5）通过 + 用户推送 main（遗留 4）后，置「已验收 / 已关闭」
 
 ## 附：合并后 main 状态

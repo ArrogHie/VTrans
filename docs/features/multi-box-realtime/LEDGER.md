@@ -5,7 +5,7 @@
 - 需求来源：用户提出
 - 优先级：P1
 - 创建时间：2026-08-11
-- 当前状态：已整合（main 07bcc3f），待手工验收；后续迭代 F1/F2/D1 与 UI 三缺陷修复（BUGFIX-1/2/3）已完成并整合（2026-08-13）。剩余：GUI 手工冒烟 + 用户推送 main。遗留问题见 INTEGRATION_REPORT.md
+- 当前状态：已整合（main e781c40），待手工验收；后续迭代 F1/F2/D1 与两轮 UI 缺陷修复（BUGFIX-1/2/3、BUGFIX-2 四缺陷）已完成并整合（2026-08-13）。剩余：GUI 手工冒烟 + 用户推送 main。遗留问题见 INTEGRATION_REPORT.md
 
 ## 用户已确认决策（2026-08-11）
 1. 优先级：P1
@@ -132,6 +132,13 @@
 - BUGFIX-2 弹窗多框原文逐框折叠：默认折叠 + 每框 chevron 开关，展开状态按 box_id 记忆，空原文无开关（替代 F2 的常显）
 - BUGFIX-3 弹窗滚动：根容器 min-h-screen→h-screen，多框滚动容器与单框译文区补 min-h-0 + overflow-y-auto（flexbox min-height:auto 陷阱修复），滚动条不隐藏
 
+### 2026-08-13 UI 交互四缺陷修复（用户 bug 报告 → 分诊 11-frontend → 派单修复）
+- BUGFIX-2-1 单次模式仅保留一个「选择并翻译」按钮（删除重复的「选择屏幕区域」）
+- BUGFIX-2-2 live 模式统一由底部「开始实时/停止」控制多框会话；翻译框列表删除「开始多框实时/停止全部」；删除「暂停/继续实时」（单框实时由热键 R/S、悬浮球、弹窗控制——既定设计决策）
+- BUGFIX-2-3 多框启动前把 overlay 窗口定位到第一个框所在显示器（物理坐标/尺寸，只定位不 show）；已知限制：单窗口仅覆盖一个显示器，跨显示器框不对齐（记录于 src/README.md）
+- BUGFIX-2-4 选区窗口三条退出路径（确认成功/取消/系统关闭）均重置本地选区状态，每次打开直接从空白开始拖框
+- 任务单 TASK-BUGFIX-11-interaction.md；分支 fix/11-multibox-interaction；Review 通过（范围仅 src/、tsc、282 前端测试）→ 合并 main（e781c40）
+
 ### 后续迭代台账
 
 | 序号 | 模块 | 任务单 | 分支 | 状态 |
@@ -140,6 +147,7 @@
 | F2 | 11-frontend | TASK-FOLLOWUP-11-frontend.md | feat/multibox-original-text-frontend | 已整合（223f600） |
 | D1 | 02/06/09/10 文档同步 | TASK-DOCSYNC.md | docs/multibox-contract-sync | 已整合（9a00507） |
 | B1-B3 | 11-frontend UI 缺陷 | TASK-BUGFIX-11-ui.md | fix/11-multibox-ui-bugs | 已整合（07bcc3f） |
+| B2-1..4 | 11-frontend 交互缺陷 | TASK-BUGFIX-11-interaction.md | fix/11-multibox-interaction | 已整合（e781c40） |
 
 ### 2026-08-13 后续迭代执行完成（F1/F2/D1 派发子代理开发）
 - F1（pipeline 原文字段）：`BoxedTranslationResult` 新增 `original_text`（配对 OCR 清洗文本；空 OCR/翻译失败发布空原文+空译文以清除 overlay；取消不发布）；`with_original_text` builder 保持三参 `new` 向后兼容；README 更新；Review 通过（范围仅 pipeline、fmt/clippy 0 警告、90 测试全绿）→ --no-ff 合并 main（0fca96d）
