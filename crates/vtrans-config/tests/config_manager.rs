@@ -10,8 +10,11 @@ use std::path::Path;
 use std::sync::{Arc, Barrier};
 
 use tempfile::tempdir;
-use vtrans_config::{AppConfig, ConfigError, ConfigManager, CURRENT_CONFIG_VERSION};
-use vtrans_core::Language;
+use vtrans_config::{
+    AppConfig, ConfigError, ConfigManager, TranslationBoxConfig, BOX_COLOR_PALETTE,
+    CURRENT_CONFIG_VERSION,
+};
+use vtrans_core::{Language, ScreenRegion};
 
 /// Directory containing test fixture files.
 const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
@@ -105,7 +108,7 @@ fn update_on_missing_file_returns_not_found() {
 #[test]
 fn invalid_range_is_rejected_on_load() {
     let dir = tempdir().unwrap();
-    write_config(dir.path(), r#"{"capture":{"interval_ms":10},"version":5}"#);
+    write_config(dir.path(), r#"{"capture":{"interval_ms":10},"version":6}"#);
     let manager = ConfigManager::new(dir.path()).unwrap();
 
     let err = manager.load().unwrap_err();
@@ -186,7 +189,7 @@ fn load_does_not_rewrite_current_version_file() {
     let dir = tempdir().unwrap();
     // Compact v5 JSON: loading must not touch the file when it is already
     // at the current version (no pretty-printing, no field expansion).
-    let raw = r#"{"version":5,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
+    let raw = r#"{"version":6,"capture":{"interval_ms":600,"difference_threshold":0.05}}"#;
     write_config(dir.path(), raw);
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -235,7 +238,7 @@ fn invalid_opacity_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":5,"result_window":{"opacity":0.2}}"#,
+        r#"{"version":6,"result_window":{"opacity":0.2}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -251,7 +254,7 @@ fn invalid_font_size_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":5,"result_window":{"font_size_px":30}}"#,
+        r#"{"version":6,"result_window":{"font_size_px":30}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -310,7 +313,7 @@ fn invalid_floating_ball_opacity_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":5,"floating_ball":{"opacity":0.2}}"#,
+        r#"{"version":6,"floating_ball":{"opacity":0.2}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -326,7 +329,7 @@ fn invalid_floating_ball_size_is_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":5,"floating_ball":{"size_px":80}}"#,
+        r#"{"version":6,"floating_ball":{"size_px":80}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -459,7 +462,7 @@ fn mismatched_languages_at_current_version_are_rejected_on_load() {
     let dir = tempdir().unwrap();
     write_config(
         dir.path(),
-        r#"{"version":5,"ocr":{"language":"ja"},"translation":{"source_language":"en"}}"#,
+        r#"{"version":6,"ocr":{"language":"ja"},"translation":{"source_language":"en"}}"#,
     );
     let manager = ConfigManager::new(dir.path()).unwrap();
 
@@ -532,4 +535,140 @@ fn concurrent_updates_do_not_lose_mutations() {
     let loaded = manager.load().unwrap();
     let expected = 500 + u32::try_from(THREADS).unwrap();
     assert_eq!(loaded.capture.interval_ms, expected);
+}
+
+#[test]
+fn v5_config_is_migrated_with_multi_box_defaults() {
+    let dir = tempdir().unwrap();
+    let fixture = fs::read_to_string(Path::new(FIXTURES_DIR).join("config_v5.json")).unwrap();
+    write_config(dir.path(), &fixture);
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let config = manager.load().unwrap();
+
+    // v5 fields survive the migration.
+    assert_eq!(config.capture.interval_ms, 800);
+    assert_eq!(config.translation.provider, "openai");
+    assert_eq!(config.translation.quality, "balanced");
+    assert_eq!(config.ocr.language, Language::Japanese);
+    assert_eq!(config.translation.source_language, Language::Japanese);
+    assert_eq!(
+        config.translation.target_language,
+        Language::ChineseSimplified
+    );
+    assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+
+    // Multi-box fields are backfilled with defaults by serde.
+    assert!(config.translation_boxes.is_empty());
+    assert_eq!(config.max_boxes, 8);
+    assert_eq!(config.warning_threshold, 4);
+
+    // The migrated file is persisted with the new version.
+    let persisted = read_raw(dir.path());
+    assert_eq!(
+        persisted["version"].as_u64(),
+        Some(u64::from(CURRENT_CONFIG_VERSION))
+    );
+}
+
+#[test]
+fn multi_box_config_round_trip() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let region = ScreenRegion::new("monitor0", 100, 200, 640, 480);
+    let config = AppConfig {
+        translation_boxes: vec![
+            TranslationBoxConfig::new(0, region.clone(), "#FF6B6B"),
+            TranslationBoxConfig::new(1, region.clone(), "#4ECDC4"),
+        ],
+        max_boxes: 16,
+        warning_threshold: 8,
+        ..Default::default()
+    };
+
+    manager.save(&config).unwrap();
+    let loaded = manager.load().unwrap();
+
+    assert_eq!(loaded.translation_boxes.len(), 2);
+    assert_eq!(loaded.translation_boxes[0].id, 0);
+    assert_eq!(loaded.translation_boxes[0].color, "#FF6B6B");
+    assert_eq!(loaded.translation_boxes[1].id, 1);
+    assert_eq!(loaded.translation_boxes[1].color, "#4ECDC4");
+    assert_eq!(loaded.max_boxes, 16);
+    assert_eq!(loaded.warning_threshold, 8);
+}
+
+#[test]
+fn invalid_max_boxes_is_rejected_on_save() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let config = AppConfig {
+        max_boxes: 0,
+        ..Default::default()
+    };
+    let err = manager.save(&config).unwrap_err();
+    match err {
+        ConfigError::Validation(msg) => assert!(msg.contains("max_boxes")),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert!(!manager.config_path().exists());
+}
+
+#[test]
+fn too_many_boxes_is_rejected_on_save() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let region = ScreenRegion::new("m", 0, 0, 10, 10);
+    let config = AppConfig {
+        max_boxes: 1,
+        warning_threshold: 0,
+        translation_boxes: vec![
+            TranslationBoxConfig::new(0, region.clone(), "#FF6B6B"),
+            TranslationBoxConfig::new(1, region, "#4ECDC4"),
+        ],
+        ..Default::default()
+    };
+    let err = manager.save(&config).unwrap_err();
+    match err {
+        ConfigError::Validation(msg) => assert!(msg.contains("translation_boxes count")),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[test]
+fn update_preserves_multi_box_fields() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+
+    let region = ScreenRegion::new("m", 10, 20, 100, 200);
+    manager
+        .save(&AppConfig {
+            translation_boxes: vec![TranslationBoxConfig::new(0, region, "#FF6B6B")],
+            max_boxes: 12,
+            warning_threshold: 6,
+            ..Default::default()
+        })
+        .unwrap();
+
+    manager.update(|c| c.capture.interval_ms = 1000).unwrap();
+
+    let loaded = manager.load().unwrap();
+    assert_eq!(loaded.capture.interval_ms, 1000);
+    assert_eq!(loaded.translation_boxes.len(), 1);
+    assert_eq!(loaded.translation_boxes[0].id, 0);
+    assert_eq!(loaded.translation_boxes[0].color, "#FF6B6B");
+    assert_eq!(loaded.max_boxes, 12);
+    assert_eq!(loaded.warning_threshold, 6);
+}
+
+#[test]
+fn default_config_uses_palette_color_for_first_box() {
+    let dir = tempdir().unwrap();
+    let manager = ConfigManager::new(dir.path()).unwrap();
+    let config = manager.load().unwrap();
+    assert_eq!(config.next_box_color(), BOX_COLOR_PALETTE[0]);
+    assert_eq!(config.next_box_id(), 0);
 }

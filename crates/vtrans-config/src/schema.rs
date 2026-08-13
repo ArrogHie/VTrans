@@ -8,13 +8,13 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use vtrans_core::Language;
+use vtrans_core::{Language, ScreenRegion};
 
 /// The current config file format version.
 ///
 /// Bump this constant when the schema changes and add a corresponding
 /// migration step in [`crate::migration`].
-pub const CURRENT_CONFIG_VERSION: u32 = 5;
+pub const CURRENT_CONFIG_VERSION: u32 = 6;
 
 /// Root application configuration.
 ///
@@ -65,6 +65,25 @@ pub struct AppConfig {
     /// Override directory for model files; `None` means the default path.
     #[serde(default)]
     pub model_dir: Option<PathBuf>,
+
+    /// Translation boxes for multi-box live translation mode.
+    ///
+    /// An empty list (the default) means multi-box mode is not configured.
+    /// Each box carries its own screen region and display color and is
+    /// persisted across restarts.
+    #[serde(default = "crate::defaults::default_translation_boxes")]
+    pub translation_boxes: Vec<TranslationBoxConfig>,
+
+    /// Maximum number of concurrent translation boxes allowed. Defaults to
+    /// `8`. Must be within `1..=32`.
+    #[serde(default = "crate::defaults::default_max_boxes")]
+    pub max_boxes: u32,
+
+    /// Number of active boxes at which the UI should warn the user about
+    /// potential performance impact. Defaults to `4`. Must be within
+    /// `0..=max_boxes`; `0` disables the warning.
+    #[serde(default = "crate::defaults::default_warning_threshold")]
+    pub warning_threshold: u32,
 
     /// Config file format version, used by [`crate::migration`].
     #[serde(default = "crate::defaults::default_version")]
@@ -199,6 +218,134 @@ pub struct HotkeyConfig {
     pub stop_live: String,
 }
 
+/// Default color palette for translation boxes (8 high-contrast colors).
+///
+/// When a new box is added, [`AppConfig::next_box_color`] assigns the first
+/// unused color from this list. Once all colors are in use the palette
+/// cycles from the beginning.
+pub const BOX_COLOR_PALETTE: &[&str] = &[
+    "#FF6B6B", // coral red
+    "#4ECDC4", // teal
+    "#45B7D1", // sky blue
+    "#FFA07A", // light salmon
+    "#98D8C8", // mint
+    "#F7DC6F", // yellow
+    "#BB8FCE", // purple
+    "#85C1E9", // light blue
+];
+
+/// Configuration for a single translation box in multi-box live mode.
+///
+/// Each box has a unique `id`, a screen `region` to capture, and a display
+/// `color` (hex string like `"#FF6B6B"`) used by the frontend to visually
+/// distinguish boxes.
+///
+/// # Example
+///
+/// ```
+/// use vtrans_config::TranslationBoxConfig;
+/// use vtrans_core::ScreenRegion;
+///
+/// let box_config = TranslationBoxConfig::new(
+///     0,
+///     ScreenRegion::new("monitor0", 100, 200, 300, 400),
+///     "#FF6B6B",
+/// );
+/// assert_eq!(box_config.id, 0);
+/// assert_eq!(box_config.color, "#FF6B6B");
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranslationBoxConfig {
+    /// Unique identifier for this translation box.
+    pub id: u32,
+
+    /// Screen region captured and translated for this box.
+    pub region: ScreenRegion,
+
+    /// Display color as a hex string (e.g. `"#FF6B6B"`).
+    pub color: String,
+}
+
+impl TranslationBoxConfig {
+    /// Creates a new translation box configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the box.
+    /// * `region` - Screen region to capture.
+    /// * `color` - Hex color string (e.g. `"#FF6B6B"`).
+    #[must_use]
+    pub fn new(id: u32, region: ScreenRegion, color: impl Into<String>) -> Self {
+        Self {
+            id,
+            region,
+            color: color.into(),
+        }
+    }
+}
+
+// `ScreenRegion` in `vtrans-core` does not derive `PartialEq`, so a manual
+// implementation is needed to support `AppConfig`'s derived `PartialEq`.
+impl PartialEq for TranslationBoxConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.color == other.color
+            && self.region.monitor_id == other.region.monitor_id
+            && self.region.x == other.region.x
+            && self.region.y == other.region.y
+            && self.region.width == other.region.width
+            && self.region.height == other.region.height
+    }
+}
+
+impl AppConfig {
+    /// Returns the next available color from [`BOX_COLOR_PALETTE`] that is
+    /// not already used by an existing translation box.
+    ///
+    /// When all palette colors are in use, the palette cycles from the
+    /// beginning based on the current box count.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vtrans_config::AppConfig;
+    ///
+    /// let config = AppConfig::default();
+    /// assert_eq!(config.next_box_color(), "#FF6B6B");
+    /// ```
+    #[must_use]
+    pub fn next_box_color(&self) -> &'static str {
+        for &color in BOX_COLOR_PALETTE {
+            if !self.translation_boxes.iter().any(|b| b.color == color) {
+                return color;
+            }
+        }
+        // All palette colors are in use — cycle from the beginning.
+        let index = self.translation_boxes.len() % BOX_COLOR_PALETTE.len();
+        BOX_COLOR_PALETTE[index]
+    }
+
+    /// Returns the next available box id (`max_id + 1`, or `0` if no boxes
+    /// exist yet).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use vtrans_config::AppConfig;
+    ///
+    /// let config = AppConfig::default();
+    /// assert_eq!(config.next_box_id(), 0);
+    /// ```
+    #[must_use]
+    pub fn next_box_id(&self) -> u32 {
+        self.translation_boxes
+            .iter()
+            .map(|b| b.id)
+            .max()
+            .map_or(0, |max_id| max_id + 1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,7 +360,7 @@ mod tests {
 
     #[test]
     fn missing_sections_are_filled_with_defaults() {
-        let json = r#"{"version":5}"#;
+        let json = r#"{"version":6}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config, AppConfig::default());
     }
@@ -227,14 +374,14 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_ignored() {
-        let json = r#"{"version":5,"unknown_field":123}"#;
+        let json = r#"{"version":6,"unknown_field":123}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config, AppConfig::default());
     }
 
     #[test]
     fn partial_section_keeps_present_fields() {
-        let json = r#"{"capture":{"interval_ms":1000},"version":5}"#;
+        let json = r#"{"capture":{"interval_ms":1000},"version":6}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.capture.interval_ms, 1000);
         assert!((config.capture.difference_threshold - 0.03).abs() < f32::EPSILON);
@@ -277,7 +424,7 @@ mod tests {
         let json = r#"{
             "capture": {"difference_threshold": 0.5},
             "translation": {"target_language": "en"},
-            "version": 5
+            "version": 6
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.capture.interval_ms, 500);
@@ -292,7 +439,7 @@ mod tests {
 
     #[test]
     fn translation_quality_defaults_to_fast() {
-        let json = r#"{"version":5,"translation":{"provider":"local"}}"#;
+        let json = r#"{"version":6,"translation":{"provider":"local"}}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.translation.quality, "fast");
     }
@@ -314,7 +461,7 @@ mod tests {
 
     #[test]
     fn region_and_app_id_default_to_none() {
-        let json = r#"{"version":5}"#;
+        let json = r#"{"version":6}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.translation.region, None);
         assert_eq!(config.translation.app_id, None);
@@ -373,7 +520,7 @@ mod tests {
 
     #[test]
     fn missing_result_window_fields_are_filled_with_defaults() {
-        let json = r#"{"result_window":{"always_on_top":false},"version":5}"#;
+        let json = r#"{"result_window":{"always_on_top":false},"version":6}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(!config.result_window.always_on_top);
         assert!((config.result_window.opacity - 0.95).abs() < f64::EPSILON);
@@ -383,10 +530,148 @@ mod tests {
 
     #[test]
     fn missing_floating_ball_fields_are_filled_with_defaults() {
-        let json = r#"{"floating_ball":{"enabled":true},"version":5}"#;
+        let json = r#"{"floating_ball":{"enabled":true},"version":6}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(config.floating_ball.enabled);
         assert!((config.floating_ball.opacity - 1.0).abs() < f64::EPSILON);
         assert_eq!(config.floating_ball.size_px, 48);
+    }
+
+    // ── Multi-box config ──
+
+    #[test]
+    fn translation_box_config_serde_round_trip() {
+        let region = ScreenRegion::new("monitor0", 10, 20, 300, 400);
+        let box_config = TranslationBoxConfig::new(0, region.clone(), "#FF6B6B");
+        let json = serde_json::to_string(&box_config).unwrap();
+        let back: TranslationBoxConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, box_config);
+        assert_eq!(back.region.monitor_id, region.monitor_id);
+        assert_eq!(back.region.width, region.width);
+    }
+
+    #[test]
+    fn app_config_with_translation_boxes_round_trip() {
+        let region = ScreenRegion::new("m0", 100, 200, 640, 480);
+        let config = AppConfig {
+            translation_boxes: vec![TranslationBoxConfig::new(0, region, "#FF6B6B")],
+            max_boxes: 16,
+            warning_threshold: 8,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
+        assert_eq!(back.max_boxes, 16);
+        assert_eq!(back.warning_threshold, 8);
+        assert_eq!(back.translation_boxes.len(), 1);
+        assert_eq!(back.translation_boxes[0].id, 0);
+        assert_eq!(back.translation_boxes[0].color, "#FF6B6B");
+    }
+
+    #[test]
+    fn missing_translation_boxes_defaults_to_empty() {
+        let json = r#"{"version":6}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.translation_boxes.is_empty());
+        assert_eq!(config.max_boxes, 8);
+        assert_eq!(config.warning_threshold, 4);
+    }
+
+    #[test]
+    fn box_color_palette_has_at_least_eight_colors() {
+        assert!(BOX_COLOR_PALETTE.len() >= 8);
+        // All palette entries must be distinct.
+        let mut sorted = BOX_COLOR_PALETTE.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), before, "palette has duplicate colors");
+    }
+
+    #[test]
+    fn next_box_color_returns_first_unused() {
+        let config = AppConfig::default();
+        assert_eq!(config.next_box_color(), BOX_COLOR_PALETTE[0]);
+
+        // With the first color in use, the next should be the second.
+        let config = AppConfig {
+            translation_boxes: vec![TranslationBoxConfig::new(
+                0,
+                ScreenRegion::new("m", 0, 0, 100, 100),
+                BOX_COLOR_PALETTE[0],
+            )],
+            ..Default::default()
+        };
+        assert_eq!(config.next_box_color(), BOX_COLOR_PALETTE[1]);
+    }
+
+    #[test]
+    fn next_box_color_cycles_after_palette_exhaustion() {
+        let boxes: Vec<TranslationBoxConfig> = (0..BOX_COLOR_PALETTE.len())
+            .map(|i| {
+                TranslationBoxConfig::new(
+                    u32::try_from(i).unwrap(),
+                    ScreenRegion::new("m", 0, 0, 100, 100),
+                    BOX_COLOR_PALETTE[i],
+                )
+            })
+            .collect();
+        let config = AppConfig {
+            translation_boxes: boxes,
+            ..Default::default()
+        };
+        // All colors in use → cycle back to palette[0].
+        assert_eq!(config.next_box_color(), BOX_COLOR_PALETTE[0]);
+
+        // With one more box than palette size, cycle continues to palette[1].
+        let mut boxes = config.translation_boxes.clone();
+        boxes.push(TranslationBoxConfig::new(
+            99,
+            ScreenRegion::new("m", 0, 0, 100, 100),
+            config.next_box_color(),
+        ));
+        let config = AppConfig {
+            translation_boxes: boxes,
+            ..Default::default()
+        };
+        assert_eq!(config.next_box_color(), BOX_COLOR_PALETTE[1]);
+    }
+
+    #[test]
+    fn next_box_id_returns_zero_when_empty() {
+        let config = AppConfig::default();
+        assert_eq!(config.next_box_id(), 0);
+    }
+
+    #[test]
+    fn next_box_id_returns_max_plus_one() {
+        let config = AppConfig {
+            translation_boxes: vec![
+                TranslationBoxConfig::new(2, ScreenRegion::new("m", 0, 0, 10, 10), "#FF6B6B"),
+                TranslationBoxConfig::new(5, ScreenRegion::new("m", 0, 0, 10, 10), "#4ECDC4"),
+                TranslationBoxConfig::new(1, ScreenRegion::new("m", 0, 0, 10, 10), "#45B7D1"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(config.next_box_id(), 6);
+    }
+
+    #[test]
+    fn translation_box_config_partial_eq() {
+        let r1 = ScreenRegion::new("m", 1, 2, 3, 4);
+        let r2 = ScreenRegion::new("m", 1, 2, 3, 4);
+        let r3 = ScreenRegion::new("m", 1, 2, 3, 5);
+
+        let original = TranslationBoxConfig::new(0, r1.clone(), "#FF6B6B");
+        let identical = TranslationBoxConfig::new(0, r2.clone(), "#FF6B6B");
+        let different_id = TranslationBoxConfig::new(1, r1, "#FF6B6B");
+        let different_region = TranslationBoxConfig::new(0, r3, "#FF6B6B");
+        let different_color = TranslationBoxConfig::new(0, r2, "#4ECDC4");
+
+        assert_eq!(original, identical);
+        assert_ne!(original, different_id);
+        assert_ne!(original, different_region);
+        assert_ne!(original, different_color);
     }
 }

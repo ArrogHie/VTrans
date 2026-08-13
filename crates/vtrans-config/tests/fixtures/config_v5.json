@@ -1,0 +1,16 @@
+{
+  "version": 5,
+  "capture": {
+    "interval_ms": 800
+  },
+  "ocr": {
+    "language": "ja"
+  },
+  "translation": {
+    "provider": "openai",
+    "quality": "balanced",
+    "source_language": "ja",
+    "target_language": "zh-CN",
+    "api_model": "gpt-4o-mini"
+  }
+}

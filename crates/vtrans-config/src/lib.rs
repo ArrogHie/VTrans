@@ -19,7 +19,7 @@ pub mod validation;
 pub use manager::{default_config_path, ConfigManager, CONFIG_FILE_NAME};
 pub use schema::{
     AppConfig, CaptureConfig, FloatingBallConfig, HotkeyConfig, OcrConfig, ResultWindowConfig,
-    TranslationConfig, CURRENT_CONFIG_VERSION,
+    TranslationBoxConfig, TranslationConfig, BOX_COLOR_PALETTE, CURRENT_CONFIG_VERSION,
 };
 
 use std::path::PathBuf;

@@ -39,6 +39,9 @@ const FONT_SIZE_PX_RANGE: std::ops::RangeInclusive<u32> = 12..=24;
 /// Valid range for `floating_ball.size_px`.
 const FLOATING_BALL_SIZE_PX_RANGE: std::ops::RangeInclusive<u32> = 32..=72;
 
+/// Valid range for `max_boxes`.
+const MAX_BOXES_RANGE: std::ops::RangeInclusive<u32> = 1..=32;
+
 impl AppConfig {
     /// Validates every configuration field against its documented rules.
     ///
@@ -64,6 +67,7 @@ impl AppConfig {
         self.validate_result_window()?;
         self.validate_floating_ball()?;
         self.validate_hotkeys()?;
+        self.validate_multi_box()?;
         self.validate_common()?;
         Ok(())
     }
@@ -238,6 +242,60 @@ impl AppConfig {
         Ok(())
     }
 
+    fn validate_multi_box(&self) -> Result<(), ConfigError> {
+        let max_boxes = self.max_boxes;
+        if !MAX_BOXES_RANGE.contains(&max_boxes) {
+            return Err(ConfigError::Validation(format!(
+                "max_boxes must be within {MAX_BOXES_RANGE:?}, got {max_boxes}"
+            )));
+        }
+
+        let warning_threshold = self.warning_threshold;
+        if warning_threshold > max_boxes {
+            return Err(ConfigError::Validation(format!(
+                "warning_threshold ({warning_threshold}) must not exceed max_boxes ({max_boxes})"
+            )));
+        }
+
+        let box_count = self.translation_boxes.len();
+        if box_count > max_boxes as usize {
+            return Err(ConfigError::Validation(format!(
+                "translation_boxes count ({box_count}) must not exceed max_boxes ({max_boxes})"
+            )));
+        }
+
+        // Check for duplicate IDs (nested-loop style, consistent with
+        // hotkey duplicate validation).
+        for (i, box_a) in self.translation_boxes.iter().enumerate() {
+            for box_b in self.translation_boxes.iter().skip(i + 1) {
+                if box_a.id == box_b.id {
+                    return Err(ConfigError::Validation(format!(
+                        "translation_boxes has duplicate id: {}",
+                        box_a.id
+                    )));
+                }
+            }
+        }
+
+        // Validate each box's region dimensions and color format.
+        for box_config in &self.translation_boxes {
+            if !box_config.region.is_valid() {
+                return Err(ConfigError::Validation(format!(
+                    "translation_boxes[{}].region has zero dimension",
+                    box_config.id
+                )));
+            }
+            if !is_valid_hex_color(&box_config.color) {
+                return Err(ConfigError::Validation(format!(
+                    "translation_boxes[{}].color must be a valid hex color (#RRGGBB), got {:?}",
+                    box_config.id, box_config.color
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     fn validate_common(&self) -> Result<(), ConfigError> {
         if !LOG_LEVELS.contains(&self.log_level.as_str()) {
             return Err(ConfigError::Validation(format!(
@@ -312,10 +370,22 @@ fn validate_floating_ball_size_px(size_px: u32) -> Result<(), String> {
     }
 }
 
+/// Checks whether `color` is a valid `#RRGGBB` hex color string.
+///
+/// The value must start with `#`, be exactly 7 characters long, and the
+/// remaining 6 characters must be ASCII hex digits (`0-9`, `a-f`, `A-F`).
+fn is_valid_hex_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color.chars().skip(1).all(|c| c.is_ascii_hexdigit())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::TranslationBoxConfig;
     use vtrans_core::Language;
+    use vtrans_core::ScreenRegion;
 
     fn config_with(mutator: impl FnOnce(&mut AppConfig)) -> AppConfig {
         let mut config = AppConfig::default();
@@ -645,7 +715,7 @@ mod tests {
 
     #[test]
     fn invalid_version_is_rejected() {
-        let config = config_with(|c| c.version = 6);
+        let config = config_with(|c| c.version = 7);
         assert!(matches!(
             config.validate(),
             Err(ConfigError::Validation(ref msg)) if msg.contains("version")
@@ -870,5 +940,194 @@ mod tests {
     fn ocr_schema_fields_covered() {
         let config = config_with(|c| c.ocr.min_confidence = -0.1);
         assert!(config.validate().is_err());
+    }
+
+    // ── Multi-box validation ──
+
+    /// Builds a valid [`TranslationBoxConfig`] with the given `id`.
+    fn test_box(id: u32) -> TranslationBoxConfig {
+        TranslationBoxConfig::new(id, ScreenRegion::new("m0", 0, 0, 100, 100), "#FF6B6B")
+    }
+
+    #[test]
+    fn default_multi_box_config_is_valid() {
+        assert!(AppConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    fn max_boxes_out_of_range_low() {
+        let config = config_with(|c| c.max_boxes = 0);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Validation(ref msg) if msg.contains("max_boxes")
+        ));
+    }
+
+    #[test]
+    fn max_boxes_out_of_range_high() {
+        let config = config_with(|c| c.max_boxes = 33);
+        let err = config.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::Validation(ref msg) if msg.contains("max_boxes")
+        ));
+    }
+
+    #[test]
+    fn max_boxes_boundaries_are_valid() {
+        assert!(config_with(|c| {
+            c.max_boxes = 1;
+            c.warning_threshold = 0;
+        })
+        .validate()
+        .is_ok());
+        assert!(config_with(|c| c.max_boxes = 32).validate().is_ok());
+    }
+
+    #[test]
+    fn warning_threshold_exceeds_max_boxes_is_rejected() {
+        let config = config_with(|c| {
+            c.max_boxes = 8;
+            c.warning_threshold = 9;
+        });
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => {
+                assert!(msg.contains("warning_threshold"), "message: {msg}");
+                assert!(msg.contains("max_boxes"), "message: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn warning_threshold_equal_to_max_boxes_is_valid() {
+        assert!(config_with(|c| {
+            c.max_boxes = 8;
+            c.warning_threshold = 8;
+        })
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn warning_threshold_zero_is_valid() {
+        assert!(config_with(|c| {
+            c.max_boxes = 8;
+            c.warning_threshold = 0;
+        })
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn too_many_boxes_is_rejected() {
+        let config = config_with(|c| {
+            c.max_boxes = 2;
+            c.warning_threshold = 1;
+            c.translation_boxes = vec![test_box(0), test_box(1), test_box(2)];
+        });
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => {
+                assert!(msg.contains("translation_boxes count"), "message: {msg}");
+                assert!(msg.contains("max_boxes"), "message: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_box_ids_are_rejected() {
+        let config = config_with(|c| {
+            c.translation_boxes = vec![test_box(0), test_box(0)];
+        });
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => {
+                assert!(msg.contains("duplicate id"), "message: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_box_color_is_rejected() {
+        let config = config_with(|c| {
+            c.translation_boxes = vec![TranslationBoxConfig::new(
+                0,
+                ScreenRegion::new("m", 0, 0, 10, 10),
+                "red",
+            )];
+        });
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => {
+                assert!(msg.contains("color"), "message: {msg}");
+                assert!(msg.contains("#RRGGBB"), "message: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn valid_hex_colors_are_accepted() {
+        for color in ["#FF6B6B", "#4ecdc4", "#000000", "#FFFFFF", "#abcdef"] {
+            let config = config_with(|c| {
+                c.translation_boxes = vec![TranslationBoxConfig::new(
+                    0,
+                    ScreenRegion::new("m", 0, 0, 10, 10),
+                    color,
+                )];
+            });
+            assert!(config.validate().is_ok(), "color {color:?} should be valid");
+        }
+    }
+
+    #[test]
+    fn box_region_zero_dimension_is_rejected() {
+        let config = config_with(|c| {
+            c.translation_boxes = vec![TranslationBoxConfig::new(
+                0,
+                ScreenRegion::new("m", 0, 0, 0, 100),
+                "#FF6B6B",
+            )];
+        });
+        let err = config.validate().unwrap_err();
+        match err {
+            ConfigError::Validation(msg) => {
+                assert!(msg.contains("zero dimension"), "message: {msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_valid_hex_color_function() {
+        assert!(is_valid_hex_color("#FF6B6B"));
+        assert!(is_valid_hex_color("#4ecdc4"));
+        assert!(is_valid_hex_color("#000000"));
+        assert!(is_valid_hex_color("#FFFFFF"));
+        assert!(is_valid_hex_color("#abcdef"));
+        assert!(!is_valid_hex_color("FF6B6B"));
+        assert!(!is_valid_hex_color("#FF6B6"));
+        assert!(!is_valid_hex_color("#FF6B6BB"));
+        assert!(!is_valid_hex_color("#GGGGGG"));
+        assert!(!is_valid_hex_color(""));
+        assert!(!is_valid_hex_color("#"));
+    }
+
+    #[test]
+    fn multi_box_config_with_valid_boxes_is_accepted() {
+        let config = config_with(|c| {
+            c.translation_boxes = vec![
+                test_box(0),
+                TranslationBoxConfig::new(1, ScreenRegion::new("m1", 50, 50, 200, 200), "#4ECDC4"),
+            ];
+            c.max_boxes = 16;
+            c.warning_threshold = 8;
+        });
+        assert!(config.validate().is_ok());
     }
 }
