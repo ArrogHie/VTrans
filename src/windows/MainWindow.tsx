@@ -353,9 +353,6 @@ export function MainWindow() {
               <MousePointer2 size={18} className="text-indigo-500" aria-hidden="true" />
             </div>
             <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button w-full">
-              <MousePointer2 size={16} />选择屏幕区域
-            </button>
-            <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button mt-2 w-full">
               <Play size={16} />选择并翻译
             </button>
           </section>

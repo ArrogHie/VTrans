@@ -43,9 +43,10 @@ function renderWithMode(mode: "single" | "live") {
 describe("MainWindow mode sections", () => {
   it("renders only the region section in single mode", () => {
     const html = renderWithMode("single");
-    // 「翻译区域」区块：选择屏幕区域 + 底部「选择并翻译」。
+    // 「翻译区域」区块只保留「选择并翻译」一个按钮（BUGFIX-2：删除重复的
+    // 「选择屏幕区域」，二者行为相同）。
     expect(html).toContain("翻译区域");
-    expect(html).toContain("选择屏幕区域");
+    expect(html).not.toContain("选择屏幕区域");
     expect(html).toContain("选择并翻译");
     // 多框列表整体不渲染。
     expect(html).not.toContain("新增翻译框");
