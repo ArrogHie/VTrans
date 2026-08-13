@@ -5,7 +5,7 @@
 - 需求来源：用户提出
 - 优先级：P1
 - 创建时间：2026-08-11
-- 当前状态：已整合（main 7b25bb0），待手工验收；用户决策（2026-08-13）：① 多框原文缺口纳入后续迭代（TASK-FOLLOWUP-*）② 热键保持现状（R/S 控制单框实时，多框仅 UI 按钮）③ 文档同步派单补齐（TASK-DOCSYNC.md）。遗留问题见 INTEGRATION_REPORT.md
+- 当前状态：已整合（main 9a00507），待手工验收；后续迭代 F1/F2/D1 已完成并整合（2026-08-13）。剩余：GUI 手工冒烟 + 用户推送 main。遗留问题见 INTEGRATION_REPORT.md
 
 ## 用户已确认决策（2026-08-11）
 1. 优先级：P1
@@ -129,11 +129,16 @@
 
 ### 后续迭代台账
 
-| 序号 | 模块 | 任务单 | 建议分支 | 状态 |
-|------|------|--------|----------|------|
-| F1 | 09-pipeline | TASK-FOLLOWUP-09-pipeline.md | feat/multibox-original-text-pipeline | 待分配 |
-| F2 | 11-frontend | TASK-FOLLOWUP-11-frontend.md | feat/multibox-original-text-frontend | 待分配（依赖 F1） |
-| D1 | 02/06/09/10 文档同步 | TASK-DOCSYNC.md | 按 GIT_WORKFLOW 命名 | 待分配 |
+| 序号 | 模块 | 任务单 | 分支 | 状态 |
+|------|------|--------|------|------|
+| F1 | 09-pipeline | TASK-FOLLOWUP-09-pipeline.md | feat/multibox-original-text-pipeline | 已整合（0fca96d） |
+| F2 | 11-frontend | TASK-FOLLOWUP-11-frontend.md | feat/multibox-original-text-frontend | 已整合（223f600） |
+| D1 | 02/06/09/10 文档同步 | TASK-DOCSYNC.md | docs/multibox-contract-sync | 已整合（9a00507） |
+
+### 2026-08-13 后续迭代执行完成（F1/F2/D1 派发子代理开发）
+- F1（pipeline 原文字段）：`BoxedTranslationResult` 新增 `original_text`（配对 OCR 清洗文本；空 OCR/翻译失败发布空原文+空译文以清除 overlay；取消不发布）；`with_original_text` builder 保持三参 `new` 向后兼容；README 更新；Review 通过（范围仅 pipeline、fmt/clippy 0 警告、90 测试全绿）→ --no-ff 合并 main（0fca96d）
+- F2（frontend 原文展示）：TS 类型补 `original_text`；`MultiBoxResults` 每框译文上方以次级色小字常显原文，空串不留占位；266 前端测试 + tsc 通过 → 合并 main（223f600）
+- D1（文档同步）：docs/modules/02/06/09/10 + ARCHITECTURE.md + vtrans-app README 已知限制段全部按 main 实际代码同步（含 F1/F2 落地的 original_text 契约）；统筹调整：四张子任务合并为单分支 6 个按 scope 提交（docs/multibox-contract-sync），与 GIT_WORKFLOW 线性历史偏好一致；Review 事实抽检通过 → 合并 main（9a00507）
 
 ## 整合记录（已完成）
 1. ✅ 阶段 A+B：02-config + 06-text + 09-pipeline 合并到 main，workspace 编译验证通过

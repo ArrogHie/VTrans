@@ -77,11 +77,30 @@
 | 5 | GUI 端到端冒烟（cargo tauri dev 下框选、多框实时、弹窗布局、警告、热键回归）无法在沙箱执行，需有显示环境手工验证 | 手工验证项 | 用户/验收 | 待验收 |
 | 6 | clippy 既有警告 1 处（vtrans-translation「items after a test module」），非本功能引入 | 非阻塞 | — | 观察 |
 
+## 后续迭代整合（2026-08-13 派发子代理执行）
+
+| 任务 | 模块 | 分支 | 合并提交 | Review 结果 |
+|------|------|------|----------|-------------|
+| F1 原文字段 | 09-pipeline | feat/multibox-original-text-pipeline | 0fca96d | ✅ 范围仅 pipeline；fmt/clippy 0 警告；90 测试全绿；契约：`original_text` serde 名正确、三参 `new` 保持兼容（`with_original_text` builder） |
+| F2 原文展示 | 11-frontend | feat/multibox-original-text-frontend | 223f600 | ✅ 范围仅 src/；tsc 通过；266 测试全绿；每框译文上方次级色常显原文，空串不占位 |
+| D1 文档同步 | 02/06/09/10 + ARCHITECTURE | docs/multibox-contract-sync | 9a00507 | ✅ 仅文档；关键事实抽检（8 色调色板、max_boxes 1..=32、broadcast max_boxes*2、26 命令）与代码一致 |
+
+遗留问题状态更新：
+
+| # | 问题 | 状态 |
+|---|------|------|
+| 1 | 多框结果不含原文 | **已解决**（F1 + F2 已整合，弹窗每框显示原文+译文） |
+| 2 | 热键语义 | **保持现状**（用户决策，记录为设计决策，关闭） |
+| 3 | docs/modules 与 ARCHITECTURE 未同步 | **已解决**（D1 已整合，含 vtrans-app README 已知限制段刷新） |
+| 4 | 推送提醒（本地 main 领先 origin，含 1fe7380 文档清理提交） | 待推送 |
+| 5 | GUI 端到端冒烟 | 待手工验收 |
+| 6 | clippy 既有警告（vtrans-translation） | 观察 |
+
 ## 结论
 
-- [x] 功能已整合：5 个模块分支按依赖顺序 --no-ff 合并入 main，零冲突，workspace 与前端全部质量门禁通过
-- [x] 存在遗留问题，需跟踪（见上表：1 功能缺口、2 热键语义、3 文档同步、5 手工验收）
-- [ ] 功能关闭前置：遗留问题 1/2 经用户决策后，手工冒烟（遗留 5）通过方可置「已验收 / 已关闭」
+- [x] 功能已整合：5 个模块分支 + 后续迭代 F1/F2/D1 全部合并入 main（当前 9a00507），零冲突
+- [x] 原文缺口与文档同步遗留问题已闭环
+- [ ] 功能关闭前置：GUI 手工冒烟（遗留 5）通过 + 用户推送 main（遗留 4）后，置「已验收 / 已关闭」
 
 ## 附：合并后 main 状态
 
