@@ -109,13 +109,13 @@ Phase 0 合并后、Phase 1 启动前，进行一次架构审查，确保以下�
 
 | 模块 | 内容 | 前置条件 |
 |------|------|---------|
-| 09 vtrans-pipeline | 捕获-OCR-翻译编排、帧差检测、有界通道 | Phase 0-2 |
+| 09 vtrans-pipeline | 捕获-OCR-翻译编排、帧差检测、有界通道；多框实时翻译（MultiBoxPipeline：每框独立任务/取消、结果广播、错误隔离） | Phase 0-2 |
 
 ### Phase 4：应用与前端（2 Agents 并行）
 
 | 模块 | 内容 | 前置条件 |
 |------|------|---------|
-| 10 vtrans-app | Commands/Events、AppState、全局快捷键 | Phase 0-3 |
+| 10 vtrans-app | Commands/Events、AppState、全局快捷键；多框生命周期（翻译框持久化、forwarder、状态轮询、结果窗口） | Phase 0-3 |
 | 11 frontend | React 三窗口 UI、状态管理、IPC | Phase 0-3 |
 
 ## 5. 横切标准
@@ -370,6 +370,53 @@ pipeline_error           { message: String, recoverable: bool }
 model_loading_progress   { model_id: String, progress: f32 }
 live_session_stopped     { reason: String }
 ```
+
+#### 多框实时翻译 Command（vtrans-app 定义，8 个）
+
+```
+add_translation_box(region)            -> Result<TranslationBoxInfo, AppError>
+remove_translation_box(box_id)         -> Result<(), AppError>
+update_translation_box(box_id, region) -> Result<(), AppError>
+list_translation_boxes()               -> Result<Vec<TranslationBoxInfo>, AppError>
+start_multi_realtime()                 -> Result<(), AppError>
+stop_multi_realtime()                  -> Result<(), AppError>
+stop_box(box_id)                       -> Result<(), AppError>
+open_result_window()                   -> Result<(), AppError>
+```
+
+`TranslationBoxInfo { box_id, region, color }`；`region` 复用
+`vtrans_core::ScreenRegion` 的 serde 表示。前端按 Tauri 2 默认 camelCase
+传参（如 `{ boxId }`）。
+
+#### 多框与结果窗口 Event（7 个）
+
+```
+multibox://result          BoxedTranslationResult { box_id, color, result, original_text, timestamp }
+multibox://box-added       { box_id, color, region }
+multibox://box-removed     { box_id }
+multibox://box-updated     { box_id, region }
+multibox://status          { box_id, status: "Running" | "Stopped" | {"Error": msg} }
+multibox://warning         { current_count, max_count }
+translation://single-result { original_text, translated_text, timestamp }
+```
+
+### 6.5 多框实时翻译契约要点与已知限制
+
+- **原文支持（F1/F2 已落地）**：`BoxedTranslationResult.original_text` 携带
+  清洗后的 OCR 原文（与发送给翻译 provider 的文本同源），弹窗每框显示
+  原文+译文；OCR 空文本（跳过 provider 调用）与翻译失败时发布空译文 +
+  空原文的结果以清除 overlay 残留，取消不发布。
+- **热键语义（用户确认的设计决策）**：全局热键 Alt+Shift+R / Alt+Shift+S
+  始终控制**单框**实时会话；多框实时翻译的启动/停止仅由 UI 按钮调用
+  `start_multi_realtime` / `stop_multi_realtime`，无多框热键。
+- **本地模型限制沿用**：本地翻译模型仅支持 en→zh-CN（多框使用相同限制）。
+- **图像不跨 IPC**：多框仅传输 `box_id` / `color` / `region` 坐标与文本
+  结果，`CapturedImage` 不序列化传输。
+- **配置**：多框字段 `translation_boxes` / `max_boxes`（默认 8）/ 
+  `warning_threshold`（默认 4，0 禁用）随 schema v5→v6 迁移引入
+  （`CURRENT_CONFIG_VERSION = 6`）。
+- 已知限制的完整清单以各 crate README（尤其 `crates/vtrans-app/README.md`
+  「已知限制」）为准。
 
 大图像不通过 JSON/Base64 传输，图像留在 Rust 侧。前端只接收文本、状态和缩略图。
 
