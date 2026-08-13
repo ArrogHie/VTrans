@@ -122,6 +122,9 @@ describe("MultiBoxResults", () => {
       <MultiBoxResults boxes={BOXES} results={{}} statuses={{}} />,
     );
     expect(html).toContain('data-testid="multibox-results"');
+    // min-h-0 允许 flex 子项收缩，滚动条才会出现（弹窗 body 的 overflow:hidden
+    // 会把撑高的内容裁掉）。
+    expect(html).toContain("min-h-0");
     expect(html).toContain("overflow-y-auto");
     // 无结果时不渲染任何原文区域。
     expect(html).not.toContain("multibox-original");

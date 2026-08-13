@@ -91,5 +91,20 @@ describe("ResultWindow multi-box layout", () => {
     expect(html).toContain('data-testid="result-source-toggle"');
     expect(html).toContain('data-testid="result-translation-text"');
     expect(html).not.toContain('data-testid="multibox-results"');
+    // 单框译文区独立滚动，防止 h-screen 固定视口高度后长译文被裁切。
+    expect(html).toContain("result-text min-h-0 flex-1 overflow-y-auto");
+  });
+
+  it("fixes the shell to viewport height so the multi-box stack scrolls inside", () => {
+    seedServerSnapshot({
+      translationBoxes: [BOX],
+      boxStatuses: { 0: "Running" },
+      multiBoxResults: { 0: BOXED },
+      singleResult: null,
+    });
+    const html = renderToStaticMarkup(<ResultWindow />);
+    // 根容器固定为视口高度（窗口 resize 时自适应），不再用 min-h-screen 无限撑高。
+    expect(html).toContain("h-screen");
+    expect(html).not.toContain("min-h-screen");
   });
 });

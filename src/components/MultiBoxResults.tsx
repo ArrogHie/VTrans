@@ -69,7 +69,7 @@ export function MultiBoxResults({
           .map((result) => ({ box_id: result.box_id, color: result.color }));
 
   return (
-    <div className="flex-1 overflow-y-auto" data-testid="multibox-results">
+    <div className="min-h-0 flex-1 overflow-y-auto" data-testid="multibox-results">
       {entries.map((box, index) => {
         const result = results[box.box_id];
         const status = statuses[box.box_id] ?? "Stopped";
