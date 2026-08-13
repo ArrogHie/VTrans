@@ -1,5 +1,6 @@
 //! Tauri command handlers for the `VTrans` frontend.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -8,15 +9,20 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 use vtrans_config::AppConfig;
-use vtrans_core::{Language, OcrResult, PipelineMode, ScreenRegion};
-use vtrans_pipeline::{PipelineError, PipelineEvent};
+use vtrans_config::TranslationBoxConfig;
+use vtrans_core::{Language, OcrResult, PipelineMode, ScreenRegion, TranslationResult};
+use vtrans_pipeline::{BoxStatus, MultiBoxPipeline, PipelineError, PipelineEvent, TranslationBox};
 
 use crate::debug_frame::{spawn_debug_frame_forwarder, RegionSource};
 use crate::error::AppError;
-use crate::events::{emit_model_loading_progress, emit_pipeline_event};
+use crate::events::{
+    emit_model_loading_progress, emit_multibox_box_added, emit_multibox_box_removed,
+    emit_multibox_box_updated, emit_multibox_result, emit_multibox_status, emit_multibox_warning,
+    emit_pipeline_event, emit_translation_single_result,
+};
 use crate::overlay::{
     apply_overlay, hide_region_overlay, overlay_intent, overlay_intent_for_stop, OverlayEvent,
-    OverlayIntent, StopKind,
+    OverlayIntent, StopKind, OVERLAY_WINDOW_LABEL,
 };
 use crate::state::AppStatus;
 use crate::state::{
@@ -42,6 +48,83 @@ fn default_capture_interval_ms() -> u32 {
 
 fn default_difference_threshold() -> f32 {
     0.03
+}
+
+/// Frontend-facing translation box info returned by multi-box commands.
+///
+/// Mirrors `vtrans_pipeline::TranslationBox` but uses `box_id` to match
+/// the IPC contract with the frontend TypeScript types.
+///
+/// # Example
+///
+/// ```
+/// use vtrans_app::TranslationBoxInfo;
+/// use vtrans_core::ScreenRegion;
+///
+/// let info = TranslationBoxInfo {
+///     box_id: 0,
+///     region: ScreenRegion::new("m0", 10, 20, 300, 400),
+///     color: "#FF6B6B".to_string(),
+/// };
+/// assert_eq!(info.box_id, 0);
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranslationBoxInfo {
+    /// Unique identifier for this translation box.
+    pub box_id: u32,
+    /// Screen region captured and translated for this box.
+    pub region: ScreenRegion,
+    /// Display color as a hex string (e.g. `"#FF6B6B"`).
+    pub color: String,
+}
+
+impl TranslationBoxInfo {
+    /// Creates box info from a pipeline [`TranslationBox`].
+    #[must_use]
+    pub fn from_pipeline_box(box_: &TranslationBox) -> Self {
+        Self {
+            box_id: box_.id,
+            region: box_.region.clone(),
+            color: box_.color.clone(),
+        }
+    }
+
+    /// Creates box info from a config entry.
+    #[must_use]
+    pub fn from_config(config: &TranslationBoxConfig) -> Self {
+        Self {
+            box_id: config.id,
+            region: config.region.clone(),
+            color: config.color.clone(),
+        }
+    }
+}
+
+/// Adds a translation box to the configuration and returns the new entry.
+///
+/// The id and color are assigned from the config's `next_box_id` and
+/// `next_box_color` helpers so they stay unique and follow the palette.
+fn add_box_config(config: &mut AppConfig, region: ScreenRegion) -> TranslationBoxConfig {
+    let id = config.next_box_id();
+    let color = config.next_box_color().to_string();
+    let box_config = TranslationBoxConfig::new(id, region, color);
+    config.translation_boxes.push(box_config.clone());
+    box_config
+}
+
+/// Removes a translation box from the configuration by ID.
+fn remove_box_config(config: &mut AppConfig, box_id: u32) {
+    config.translation_boxes.retain(|b| b.id != box_id);
+}
+
+/// Updates the region of a translation box in the configuration.
+///
+/// Silently does nothing when the box is not in the config (the box may
+/// have been added to the pipeline without a config entry).
+fn update_box_config_region(config: &mut AppConfig, box_id: u32, region: ScreenRegion) {
+    if let Some(entry) = config.translation_boxes.iter_mut().find(|b| b.id == box_id) {
+        entry.region = region;
+    }
 }
 
 /// Maximum accepted length of an API key, guarding against accidental
@@ -137,14 +220,25 @@ pub async fn capture_once(
     let frame_sink = state
         .debug_mode()
         .then(|| spawn_debug_frame_forwarder(app.clone(), RegionSource::Fixed(region.clone())));
+
+    let translation_result = std::sync::Arc::new(std::sync::Mutex::new(None::<TranslationResult>));
+
     // The interval and threshold are ignored for single captures; the
     // pipeline builder uses the single-mode defaults for them.
     let result = async {
+        let tr = std::sync::Arc::clone(&translation_result);
+        let app_for_closure = app.clone();
         let pipeline =
             state.build_pipeline(PipelineMode::SingleCapture, region, 0, 0.03, frame_sink)?;
         let (event_tx, event_rx) = mpsc::channel(16);
         let ocr_result = run_capture_pipeline(
-            |event| emit_pipeline_event(&app, event),
+            move |event| {
+                if let PipelineEvent::TranslationCompleted(translation) = &event {
+                    *tr.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(translation.clone());
+                }
+                emit_pipeline_event(&app_for_closure, event);
+            },
             pipeline.run(event_tx),
             event_rx,
         )
@@ -152,6 +246,24 @@ pub async fn capture_once(
         ocr_result.ok_or(AppError::NotInitialized)
     }
     .await;
+
+    // Emit single-result when both OCR text and translation are available.
+    let translation = translation_result
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Ok(ref ocr) = result {
+        if let Some(ref translation) = translation {
+            if !ocr.merged_text.is_empty() {
+                emit_translation_single_result(
+                    &app,
+                    &ocr.merged_text,
+                    &translation.translated_text,
+                );
+            }
+        }
+    }
+
     // The marker must never outlive a single capture, success or failure.
     apply_overlay(
         &app,
@@ -867,6 +979,331 @@ pub async fn get_app_status(state: State<'_, AppState>) -> Result<AppStatus, App
     Ok(state.status_snapshot(live_running))
 }
 
+// ── Multi-box translation commands ──
+
+/// Adds a translation box to the multi-box pipeline and persists it.
+///
+/// The box is assigned the next available id and color from the
+/// configuration palette. If the multi-box pipeline has not been created
+/// yet, it is lazily initialized from the current config. When the box
+/// count reaches the warning threshold, a `multibox://warning` event is
+/// emitted (non-blocking).
+///
+/// # Errors
+///
+/// Returns an application error when the region is invalid, the pipeline
+/// rejects the box (limit exceeded, duplicate id), or the config cannot be
+/// persisted.
+#[tauri::command]
+#[tracing::instrument(skip(state, region))]
+pub async fn add_translation_box(
+    region: ScreenRegion,
+    state: State<'_, AppState>,
+) -> Result<TranslationBoxInfo, AppError> {
+    let app = state.app_handle()?;
+    region.validate().map_err(AppError::from)?;
+
+    // Add to config (computes id and color from the current snapshot).
+    let mut config = state.load_config()?;
+    let box_config = add_box_config(&mut config, region.clone());
+    state.save_config(&config)?;
+
+    // Add to the multi-box pipeline (creates it lazily).
+    let pipeline = state.ensure_multi_pipeline()?;
+    let translation_box = TranslationBox::new(
+        box_config.id,
+        box_config.region.clone(),
+        box_config.color.clone(),
+    );
+    pipeline.add_box(translation_box).await?;
+
+    state.add_multi_box_id(box_config.id);
+    emit_multibox_box_added(&app, box_config.id, &box_config.color, &box_config.region);
+
+    let count = u32::try_from(config.translation_boxes.len()).unwrap_or(u32::MAX);
+    if config.warning_threshold > 0 && count >= config.warning_threshold {
+        emit_multibox_warning(&app, count, config.max_boxes);
+    }
+
+    tracing::info!(box_id = box_config.id, "translation box added");
+    Ok(TranslationBoxInfo {
+        box_id: box_config.id,
+        region: box_config.region,
+        color: box_config.color,
+    })
+}
+
+/// Removes a translation box from the pipeline and config.
+///
+/// # Errors
+///
+/// Returns an application error when the config cannot be persisted or a
+/// pipeline error other than `BoxNotFound` occurs.
+#[tauri::command]
+#[tracing::instrument(skip(state), fields(box_id))]
+pub async fn remove_translation_box(
+    box_id: u32,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+
+    if let Some(pipeline) = state.multi_pipeline() {
+        if let Err(error) = pipeline.remove_box(box_id).await {
+            if !matches!(error, PipelineError::BoxNotFound(_)) {
+                return Err(AppError::from(error));
+            }
+        }
+    }
+
+    state.update_config(|cfg| {
+        remove_box_config(cfg, box_id);
+    })?;
+
+    state.remove_multi_box_id(box_id);
+    emit_multibox_box_removed(&app, box_id);
+
+    tracing::info!(box_id, "translation box removed");
+    Ok(())
+}
+
+/// Updates the capture region of a translation box.
+///
+/// If the pipeline is running, the box's task is restarted with the new
+/// region. The config entry is updated and a `multibox://box-updated`
+/// event is emitted.
+///
+/// # Errors
+///
+/// Returns an application error when the region is invalid or a pipeline
+/// error other than `BoxNotFound` occurs.
+#[tauri::command]
+#[tracing::instrument(skip(state, region), fields(box_id))]
+pub async fn update_translation_box(
+    box_id: u32,
+    region: ScreenRegion,
+    state: State<'_, AppState>,
+) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+    region.validate().map_err(AppError::from)?;
+
+    if let Some(pipeline) = state.multi_pipeline() {
+        if let Err(error) = pipeline.update_box(box_id, region.clone()).await {
+            if !matches!(error, PipelineError::BoxNotFound(_)) {
+                return Err(AppError::from(error));
+            }
+        }
+    }
+
+    state.update_config(|cfg| {
+        update_box_config_region(cfg, box_id, region.clone());
+    })?;
+
+    emit_multibox_box_updated(&app, box_id, &region);
+
+    tracing::info!(box_id, "translation box region updated");
+    Ok(())
+}
+
+/// Lists all configured translation boxes.
+///
+/// The list is read from the persisted config so it survives restarts
+/// even when the pipeline has not been started.
+///
+/// # Errors
+///
+/// Returns an application error when the config cannot be loaded.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn list_translation_boxes(
+    state: State<'_, AppState>,
+) -> Result<Vec<TranslationBoxInfo>, AppError> {
+    let config = state.load_config()?;
+    Ok(config
+        .translation_boxes
+        .iter()
+        .map(TranslationBoxInfo::from_config)
+        .collect())
+}
+
+/// Starts real-time translation for all configured boxes.
+///
+/// Rebuilds the multi-box pipeline from the current config, spawns a
+/// forwarder task that relays results and status changes to the frontend,
+/// and starts all box tasks. If a previous session was running, it is
+/// stopped first.
+///
+/// # Errors
+///
+/// Returns an application error when the pipeline cannot be created or
+/// `start_all` fails (e.g. already running).
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn start_multi_realtime(state: State<'_, AppState>) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+
+    state.clear_multi_pipeline().await;
+
+    let pipeline = state.ensure_multi_pipeline()?;
+    let config = state.load_config()?;
+    for box_config in &config.translation_boxes {
+        let translation_box = TranslationBox::new(
+            box_config.id,
+            box_config.region.clone(),
+            box_config.color.clone(),
+        );
+        if let Err(error) = pipeline.add_box(translation_box).await {
+            tracing::warn!(
+                box_id = box_config.id,
+                error = %error,
+                "failed to add box during multi-box start"
+            );
+        }
+        state.add_multi_box_id(box_config.id);
+    }
+
+    let box_ids = state.multi_box_ids_handle();
+    let forwarder_pipeline = Arc::clone(&pipeline);
+    let forwarder_app = app.clone();
+    let task = tokio::spawn(run_multi_forwarder(
+        forwarder_app,
+        forwarder_pipeline,
+        box_ids,
+    ));
+    state.set_multi_forwarder(task).await;
+
+    pipeline.start_all().await?;
+
+    if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
+        let _ = window.show();
+    }
+
+    tracing::info!(
+        box_count = pipeline.box_count(),
+        "multi-box real-time started"
+    );
+    Ok(())
+}
+
+/// Stops all multi-box translation tasks.
+///
+/// The pipeline and forwarder are cleared, the overlay is hidden, and a
+/// `Stopped` status is emitted for every box.
+///
+/// # Errors
+///
+/// Returns an application error when no multi-box session is running or
+/// `stop_all` fails.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn stop_multi_realtime(state: State<'_, AppState>) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+    let pipeline = state.multi_pipeline().ok_or(PipelineError::NotRunning)?;
+    let box_ids = state.multi_box_ids_snapshot();
+
+    pipeline.stop_all().await?;
+    state.clear_multi_pipeline().await;
+
+    hide_region_overlay(&app);
+
+    for box_id in box_ids {
+        emit_multibox_status(&app, box_id, &BoxStatus::Stopped);
+    }
+
+    tracing::info!("multi-box real-time stopped");
+    Ok(())
+}
+
+/// Stops a single translation box, leaving it registered.
+///
+/// # Errors
+///
+/// Returns an application error when no multi-box session is running or
+/// the box does not exist / has no running task.
+#[tauri::command]
+#[tracing::instrument(skip(state), fields(box_id))]
+pub async fn stop_box(box_id: u32, state: State<'_, AppState>) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+    let pipeline = state.multi_pipeline().ok_or(PipelineError::NotRunning)?;
+
+    pipeline.stop_box(box_id).await?;
+    emit_multibox_status(&app, box_id, &BoxStatus::Stopped);
+
+    tracing::info!(box_id, "translation box stopped");
+    Ok(())
+}
+
+/// Opens the result (translation popup) window, or focuses it if visible.
+///
+/// The window is pre-declared in `tauri.conf.json` and hidden on close,
+/// so this command never creates a new window — it only shows and
+/// focuses the existing one.
+///
+/// # Errors
+///
+/// Returns an application error when the result window is not configured
+/// or cannot be shown / focused.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn open_result_window(state: State<'_, AppState>) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+    let Some(window) = app.get_webview_window("result") else {
+        return Err(AppError::Tauri(
+            "result window is not configured".to_string(),
+        ));
+    };
+    window
+        .show()
+        .and_then(|()| window.set_focus())
+        .map_err(|error| AppError::Tauri(error.to_string()))?;
+    tracing::info!("result window opened");
+    Ok(())
+}
+
+/// Background task forwarding multi-box results and status changes.
+///
+/// Subscribes to the pipeline's result stream and emits each result via
+/// `multibox://result`. A periodic poll (500 ms) checks box statuses and
+/// emits `multibox://status` when a status changes (e.g. a box erroring).
+/// The task exits when the result stream closes (pipeline dropped).
+async fn run_multi_forwarder(
+    app: AppHandle,
+    pipeline: Arc<MultiBoxPipeline>,
+    box_ids: Arc<std::sync::RwLock<Vec<u32>>>,
+) {
+    let mut rx = pipeline.subscribe_results();
+    let mut last_status: HashMap<u32, BoxStatus> = HashMap::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(500));
+    ticker.tick().await; // consume the first immediate tick
+
+    loop {
+        tokio::select! {
+            biased;
+            result = rx.recv() => {
+                if let Some(result) = result {
+                    emit_multibox_result(&app, &result);
+                } else {
+                    tracing::debug!("multi-box result stream ended; forwarder exiting");
+                    break;
+                }
+            },
+            _ = ticker.tick() => {
+                let ids = box_ids
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                for box_id in ids {
+                    if let Some(status) = pipeline.box_status(box_id) {
+                        if last_status.get(&box_id) != Some(&status) {
+                            last_status.insert(box_id, status.clone());
+                            emit_multibox_status(&app, box_id, &status);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Builds the invoke handler for all application commands.
 pub fn invoke_handler<R: tauri::Runtime>(
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
@@ -889,6 +1326,14 @@ pub fn invoke_handler<R: tauri::Runtime>(
         set_provider_credentials,
         get_app_config,
         get_app_status,
+        add_translation_box,
+        remove_translation_box,
+        update_translation_box,
+        list_translation_boxes,
+        start_multi_realtime,
+        stop_multi_realtime,
+        stop_box,
+        open_result_window,
     ]
 }
 
@@ -1272,5 +1717,101 @@ mod tests {
 
         let collected = run_capture_pipeline(|_| {}, run, rx).await.unwrap();
         assert!(collected.is_none());
+    }
+
+    // ── Multi-box config helpers ──
+
+    #[test]
+    fn add_box_config_assigns_next_id_and_color() {
+        let mut config = AppConfig::default();
+        let region = ScreenRegion::new("m0", 10, 20, 300, 400);
+        let box_config = add_box_config(&mut config, region.clone());
+        assert_eq!(box_config.id, 0);
+        assert_eq!(box_config.color, "#FF6B6B");
+        assert_eq!(config.translation_boxes.len(), 1);
+        assert_eq!(config.translation_boxes[0].id, 0);
+    }
+
+    #[test]
+    fn add_box_config_increments_id_and_uses_next_color() {
+        let mut config = AppConfig::default();
+        let region = ScreenRegion::new("m0", 10, 20, 300, 400);
+        add_box_config(&mut config, region.clone());
+        let box_config = add_box_config(&mut config, region);
+        assert_eq!(box_config.id, 1);
+        assert_eq!(box_config.color, "#4ECDC4");
+        assert_eq!(config.translation_boxes.len(), 2);
+    }
+
+    #[test]
+    fn remove_box_config_removes_by_id_and_preserves_others() {
+        let mut config = AppConfig::default();
+        let region = ScreenRegion::new("m0", 0, 0, 100, 100);
+        add_box_config(&mut config, region.clone());
+        add_box_config(&mut config, region.clone());
+        add_box_config(&mut config, region);
+        assert_eq!(config.translation_boxes.len(), 3);
+
+        remove_box_config(&mut config, 1);
+        assert_eq!(config.translation_boxes.len(), 2);
+        assert_eq!(config.translation_boxes[0].id, 0);
+        assert_eq!(config.translation_boxes[1].id, 2);
+    }
+
+    #[test]
+    fn update_box_config_region_updates_existing_box() {
+        let mut config = AppConfig::default();
+        add_box_config(&mut config, ScreenRegion::new("m0", 0, 0, 100, 100));
+        let new_region = ScreenRegion::new("m0", 10, 20, 300, 400);
+        update_box_config_region(&mut config, 0, new_region.clone());
+        assert_eq!(config.translation_boxes[0].region.x, 10);
+        assert_eq!(config.translation_boxes[0].region.width, 300);
+    }
+
+    #[test]
+    fn update_box_config_region_silently_skips_missing_id() {
+        let mut config = AppConfig::default();
+        add_box_config(&mut config, ScreenRegion::new("m0", 0, 0, 100, 100));
+        let original = config.translation_boxes[0].clone();
+        update_box_config_region(&mut config, 99, ScreenRegion::new("m0", 5, 5, 50, 50));
+        assert_eq!(config.translation_boxes[0].region.x, original.region.x);
+        assert_eq!(
+            config.translation_boxes[0].region.width,
+            original.region.width
+        );
+    }
+
+    #[test]
+    fn translation_box_info_from_config_preserves_all_fields() {
+        let config = TranslationBoxConfig::new(5, ScreenRegion::new("m0", 1, 2, 3, 4), "#FF6B6B");
+        let info = TranslationBoxInfo::from_config(&config);
+        assert_eq!(info.box_id, 5);
+        assert_eq!(info.color, "#FF6B6B");
+        assert_eq!(info.region.width, 3);
+        assert_eq!(info.region.monitor_id, "m0");
+    }
+
+    #[test]
+    fn translation_box_info_from_pipeline_box_maps_id_to_box_id() {
+        let box_ = TranslationBox::new(7, ScreenRegion::new("m0", 1, 2, 3, 4), "#4ECDC4");
+        let info = TranslationBoxInfo::from_pipeline_box(&box_);
+        assert_eq!(info.box_id, 7);
+        assert_eq!(info.color, "#4ECDC4");
+        assert_eq!(info.region.height, 4);
+    }
+
+    #[test]
+    fn translation_box_info_serde_uses_box_id_field_name() {
+        let info = TranslationBoxInfo {
+            box_id: 3,
+            region: ScreenRegion::new("m0", 10, 20, 300, 400),
+            color: "#FF6B6B".to_string(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains(r#""box_id":3"#));
+        assert!(json.contains("\"color\":\"#FF6B6B\""));
+        let back: TranslationBoxInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.box_id, 3);
+        assert_eq!(back.color, "#FF6B6B");
     }
 }

@@ -13,6 +13,7 @@ use vtrans_core::traits::{CaptureSource, OcrProvider, TranslationProvider};
 use vtrans_core::{OcrOptions, PipelineMode, PipelineStatus, ScreenRegion, TranslationRequest};
 use vtrans_models::ModelManager;
 use vtrans_ocr::PaddleOcrProvider;
+use vtrans_pipeline::{MultiBoxConfig, MultiBoxPipeline};
 use vtrans_pipeline::{Pipeline, PipelineConfig, PipelineDeps};
 use vtrans_security::{CredentialManager, CredentialTarget};
 use vtrans_translation::{
@@ -171,6 +172,22 @@ pub struct AppState {
     current_mode: std::sync::RwLock<PipelineMode>,
     /// Lazily-loaded local translation provider, cached across switches.
     local_provider_cache: LocalProviderCache,
+
+    /// Multi-box pipeline for multi-region real-time translation.
+    ///
+    /// Lazily created on the first `add_translation_box` or
+    /// `start_multi_realtime` call so config changes between calls take
+    /// effect without recreating the pipeline.
+    pub(crate) multi_pipeline: std::sync::RwLock<Option<Arc<MultiBoxPipeline>>>,
+
+    /// Background task forwarding multi-box results and box-status changes
+    /// to the frontend via Tauri events.
+    pub(crate) multi_forwarder: Mutex<Option<JoinHandle<()>>>,
+
+    /// IDs of translation boxes currently registered in the multi-box
+    /// pipeline. Shared with the forwarder task so dynamically
+    /// added/removed boxes are polled for status changes.
+    pub(crate) multi_box_ids: Arc<std::sync::RwLock<Vec<u32>>>,
 }
 
 impl AppState {
@@ -243,6 +260,9 @@ impl AppState {
             debug_mode,
             current_mode: std::sync::RwLock::new(PipelineMode::SingleCapture),
             local_provider_cache,
+            multi_pipeline: std::sync::RwLock::new(None),
+            multi_forwarder: Mutex::new(None),
+            multi_box_ids: Arc::new(std::sync::RwLock::new(Vec::new())),
         })
     }
 
@@ -565,6 +585,129 @@ impl AppState {
             let _ = task.take();
         }
         task.is_some()
+    }
+
+    // ── Multi-box pipeline lifecycle ──
+
+    /// Builds a multi-box pipeline from the current configuration.
+    ///
+    /// The pipeline is assembled with the same shared capture, OCR, and
+    /// translation providers as the single-box pipeline so provider
+    /// switches apply to both. `max_boxes` is read from the config.
+    pub(crate) fn build_multi_pipeline(&self) -> Result<MultiBoxPipeline, AppError> {
+        let config = self.load_config()?;
+        let ocr_options = OcrOptions {
+            language: config.ocr.language,
+            min_confidence: config.ocr.min_confidence,
+            detect_vertical: true,
+        };
+        let translation_request = TranslationRequest::new(
+            "",
+            config.translation.source_language,
+            config.translation.target_language,
+        );
+        let multi_config = MultiBoxConfig::with_max_boxes(
+            config.capture.interval_ms,
+            config.capture.difference_threshold,
+            ocr_options,
+            translation_request,
+            config.max_boxes,
+        );
+        let capture = Box::new(SharedCaptureSource(Arc::clone(&self.capture_source)))
+            as Box<dyn CaptureSource>;
+        let ocr = Box::new(SharedOcrProvider(
+            self.ocr_provider
+                .read()
+                .unwrap_or_else(poison_inner)
+                .clone(),
+        )) as Box<dyn OcrProvider>;
+        let translation = Box::new(SharedTranslationProvider(
+            self.translation_provider
+                .read()
+                .unwrap_or_else(poison_inner)
+                .clone(),
+        )) as Box<dyn TranslationProvider>;
+        Ok(MultiBoxPipeline::new(
+            multi_config,
+            PipelineDeps::new(capture, ocr, translation),
+        ))
+    }
+
+    /// Returns the multi-box pipeline, creating it on first access.
+    ///
+    /// The pipeline is lazily created so config changes between calls
+    /// (language, threshold, etc.) take effect without recreating it.
+    pub(crate) fn ensure_multi_pipeline(&self) -> Result<Arc<MultiBoxPipeline>, AppError> {
+        let mut guard = self.multi_pipeline.write().unwrap_or_else(poison_inner);
+        if let Some(pipeline) = guard.as_ref() {
+            return Ok(Arc::clone(pipeline));
+        }
+        let pipeline = Arc::new(self.build_multi_pipeline()?);
+        *guard = Some(Arc::clone(&pipeline));
+        Ok(pipeline)
+    }
+
+    /// Returns the current multi-box pipeline, if one has been created.
+    #[must_use]
+    pub(crate) fn multi_pipeline(&self) -> Option<Arc<MultiBoxPipeline>> {
+        self.multi_pipeline
+            .read()
+            .unwrap_or_else(poison_inner)
+            .clone()
+    }
+
+    /// Clears the multi-box pipeline and aborts the forwarder task.
+    ///
+    /// Called when the multi-box session is stopped so the next start
+    /// rebuilds the pipeline from the latest config.
+    pub(crate) async fn clear_multi_pipeline(&self) {
+        let task = self.multi_forwarder.lock().await.take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        *self.multi_pipeline.write().unwrap_or_else(poison_inner) = None;
+        self.multi_box_ids
+            .write()
+            .unwrap_or_else(poison_inner)
+            .clear();
+    }
+
+    /// Stores the forwarder task handle, aborting any previous one.
+    pub(crate) async fn set_multi_forwarder(&self, task: JoinHandle<()>) {
+        let old = self.multi_forwarder.lock().await.replace(task);
+        if let Some(old) = old {
+            old.abort();
+        }
+    }
+
+    /// Records a translation box ID for status polling.
+    pub(crate) fn add_multi_box_id(&self, box_id: u32) {
+        let mut ids = self.multi_box_ids.write().unwrap_or_else(poison_inner);
+        if !ids.contains(&box_id) {
+            ids.push(box_id);
+        }
+    }
+
+    /// Removes a translation box ID from status polling.
+    pub(crate) fn remove_multi_box_id(&self, box_id: u32) {
+        let mut ids = self.multi_box_ids.write().unwrap_or_else(poison_inner);
+        ids.retain(|&id| id != box_id);
+    }
+
+    /// Returns a snapshot of the current translation box IDs.
+    #[must_use]
+    pub(crate) fn multi_box_ids_snapshot(&self) -> Vec<u32> {
+        self.multi_box_ids
+            .read()
+            .unwrap_or_else(poison_inner)
+            .clone()
+    }
+
+    /// Returns a handle to the shared box-ID list for the forwarder task.
+    #[must_use]
+    pub(crate) fn multi_box_ids_handle(&self) -> Arc<std::sync::RwLock<Vec<u32>>> {
+        Arc::clone(&self.multi_box_ids)
     }
 }
 

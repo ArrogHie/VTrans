@@ -1,11 +1,13 @@
 use vtrans_app::events::{
-    DebugFramePayload, CAPTURE_STATUS_CHANGED, DEBUG_FRAME_UPDATED, OCR_COMPLETED, OVERLAY_HIDDEN,
-    OVERLAY_REGION_UPDATED, PIPELINE_ERROR, REGION_SELECTED,
+    DebugFramePayload, CAPTURE_STATUS_CHANGED, DEBUG_FRAME_UPDATED, MULTIBOX_BOX_ADDED,
+    MULTIBOX_BOX_REMOVED, MULTIBOX_BOX_UPDATED, MULTIBOX_RESULT, MULTIBOX_STATUS, MULTIBOX_WARNING,
+    OCR_COMPLETED, OVERLAY_HIDDEN, OVERLAY_REGION_UPDATED, PIPELINE_ERROR, REGION_SELECTED,
+    TRANSLATION_SINGLE_RESULT,
 };
-use vtrans_app::{AppError, AppStatus, LiveTranslationConfig};
+use vtrans_app::{AppError, AppStatus, LiveTranslationConfig, TranslationBoxInfo};
 use vtrans_config::AppConfig;
-use vtrans_core::{Language, PipelineMode, PipelineStatus, ScreenRegion};
-use vtrans_pipeline::PipelineError;
+use vtrans_core::{Language, PipelineMode, PipelineStatus, ScreenRegion, TranslationResult};
+use vtrans_pipeline::{BoxStatus, BoxedTranslationResult, PipelineError, TranslationBox};
 
 // IPC argument-name contract:
 //
@@ -23,6 +25,14 @@ use vtrans_pipeline::PipelineError;
 //   update_live_region        -> { region, mode }
 //   update_result_window_appearance  -> { opacity, fontSizePx }
 //   update_floating_ball_appearance  -> { opacity, sizePx }
+//   add_translation_box              -> { region }
+//   remove_translation_box           -> { boxId }
+//   update_translation_box           -> { boxId, region }
+//   list_translation_boxes           -> {}
+//   start_multi_realtime             -> {}
+//   stop_multi_realtime              -> {}
+//   stop_box                         -> { boxId }
+//   open_result_window               -> {}
 //
 // Do not add `rename_all = "snake_case"` to a command without updating
 // `src/services/tauri.ts` and `src/test/ipc.test.ts` on the frontend branch
@@ -191,4 +201,73 @@ fn api_key_validation_errors_are_frontend_safe_strings() {
         serde_json::to_string(&error).unwrap(),
         r#""invalid api key: key must not be empty""#
     );
+}
+
+#[test]
+fn multibox_event_names_are_stable() {
+    assert_eq!(MULTIBOX_RESULT, "multibox://result");
+    assert_eq!(MULTIBOX_BOX_ADDED, "multibox://box-added");
+    assert_eq!(MULTIBOX_BOX_REMOVED, "multibox://box-removed");
+    assert_eq!(MULTIBOX_BOX_UPDATED, "multibox://box-updated");
+    assert_eq!(MULTIBOX_STATUS, "multibox://status");
+    assert_eq!(MULTIBOX_WARNING, "multibox://warning");
+    assert_eq!(TRANSLATION_SINGLE_RESULT, "translation://single-result");
+}
+
+#[test]
+fn translation_box_info_serde_matches_frontend_contract() {
+    let info = TranslationBoxInfo {
+        box_id: 5,
+        region: ScreenRegion::new("display-1", 10, 20, 300, 400),
+        color: "#FF6B6B".to_string(),
+    };
+    let json = serde_json::to_string(&info).unwrap();
+    assert!(json.contains(r#""box_id":5"#));
+    assert!(json.contains("\"color\":\"#FF6B6B\""));
+    assert!(json.contains(r#""region""#));
+    let back: TranslationBoxInfo = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.box_id, 5);
+    assert_eq!(back.color, "#FF6B6B");
+    assert_eq!(back.region.width, 300);
+}
+
+#[test]
+fn box_status_serde_matches_frontend_contract() {
+    assert_eq!(
+        serde_json::to_string(&BoxStatus::Running).unwrap(),
+        r#""Running""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BoxStatus::Stopped).unwrap(),
+        r#""Stopped""#
+    );
+    let json = serde_json::to_string(&BoxStatus::Error("capture failed".to_string())).unwrap();
+    assert!(json.contains(r#""Error""#));
+    assert!(json.contains("capture failed"));
+}
+
+#[test]
+fn boxed_translation_result_serde_matches_frontend_contract() {
+    let result = TranslationResult::new("translated text", "mock", 42);
+    let boxed = BoxedTranslationResult::new(0, "#FF6B6B", result);
+    let json = serde_json::to_string(&boxed).unwrap();
+    assert!(json.contains(r#""box_id":0"#));
+    assert!(json.contains("\"color\":\"#FF6B6B\""));
+    assert!(json.contains(r#""translated_text":"translated text""#));
+    assert!(json.contains(r#""timestamp""#));
+}
+
+#[test]
+fn translation_box_serde_uses_id_not_box_id() {
+    // The pipeline's TranslationBox uses `id`, but the app layer's
+    // TranslationBoxInfo uses `box_id` for the frontend contract.
+    let box_ = TranslationBox::new(3, ScreenRegion::new("m0", 0, 0, 100, 100), "#4ECDC4");
+    let json = serde_json::to_string(&box_).unwrap();
+    assert!(json.contains(r#""id":3"#));
+    assert!(!json.contains(r#""box_id""#));
+
+    let info = TranslationBoxInfo::from_pipeline_box(&box_);
+    let info_json = serde_json::to_string(&info).unwrap();
+    assert!(info_json.contains(r#""box_id":3"#));
+    assert!(!info_json.contains(r#""id":3"#));
 }

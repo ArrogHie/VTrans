@@ -93,11 +93,45 @@ set_api_key(api_key: String) -> Result<(), AppError>
 set_provider_credentials(provider_id: String, api_key: Option<String>, app_id: Option<String>, secret: Option<String>) -> Result<(), AppError>
 get_app_config() -> Result<AppConfig, AppError>
 get_app_status() -> Result<AppStatus, AppError>
+add_translation_box(region: ScreenRegion) -> Result<TranslationBoxInfo, AppError>
+remove_translation_box(box_id: u32) -> Result<(), AppError>
+update_translation_box(box_id: u32, region: ScreenRegion) -> Result<(), AppError>
+list_translation_boxes() -> Result<Vec<TranslationBoxInfo>, AppError>
+start_multi_realtime() -> Result<(), AppError>
+stop_multi_realtime() -> Result<(), AppError>
+stop_box(box_id: u32) -> Result<(), AppError>
+open_result_window() -> Result<(), AppError>
 ~~~
 
 `capture_once` 在流水线运行期间并发消费事件通道，把 `ocr_started`、
 `translation_started` 等阶段事件推送到前端（单次捕获没有 live session，
 因此不发送 `live_session_stopped`），命令本身仍只返回最终的 `OcrResult`。
+单次翻译完成后还通过 `translation://single-result` 事件把原文和译文推送
+到翻译弹窗，不再在主页面显示结果。
+
+### 多框翻译命令（Multi-Box）
+
+多框实时翻译围绕 `MultiBoxPipeline`（vtrans-pipeline）构建：
+
+- `add_translation_box(region)`：分配下一个 id 和调色板颜色，加入 pipeline
+  （惰性创建），持久化到 config，发射 `multibox://box-added`，框数达到
+  `warning_threshold` 时发射 `multibox://warning`（非阻塞）。
+- `remove_translation_box(box_id)`：从 pipeline 和 config 移除，发射
+  `multibox://box-removed`。
+- `update_translation_box(box_id, region)`：更新区域，发射
+  `multibox://box-updated`。
+- `list_translation_boxes()`：从 config 读取当前翻译框列表。
+- `start_multi_realtime()`：清空旧 pipeline/forwarder，从 config 加载框列表，
+  创建 `MultiBoxPipeline`，spawn 结果转发+状态轮询 task，调用
+  `pipeline.start_all()`，显示 overlay。
+- `stop_multi_realtime()`：`pipeline.stop_all()`，清空 pipeline/forwarder，
+  隐藏 overlay，为每个框发射 `Stopped` 状态。
+- `stop_box(box_id)`：`pipeline.stop_box()`，发射 `Stopped` 状态。
+- `open_result_window()`：显示并聚焦 result 窗口（已存在则仅置顶不重复创建）。
+
+`TranslationBoxInfo` 使用 `box_id` 字段名（与前端 TypeScript 契约一致），
+非 pipeline `TranslationBox.id`。IPC 参数名遵循 Tauri 2 默认 camelCase
+（`{ boxId, region }`，见 `tests/contracts.rs`）。
 
 `set_source_language` / `set_target_language` 与 `set_ocr_language` 语义对称：
 实时会话运行中拒绝修改（`PipelineError::AlreadyRunning`），仅局部更新配置并
@@ -188,6 +222,24 @@ emit_pipeline_event 转发以下事件：
 - overlay_region_updated
 - overlay_hidden
 - debug_frame_updated（仅 Debug 模式开启时发射）
+
+#### Multi-box events
+
+- `multibox://result`：单框翻译结果，payload 为 `BoxedTranslationResult`
+  的 serde 序列化（含 `box_id`、`color`、`result.translated_text`、`timestamp`）。
+- `multibox://box-added`：翻译框新增，payload 含 `box_id`、`color`、`region`。
+- `multibox://box-removed`：翻译框删除，payload 含 `box_id`。
+- `multibox://box-updated`：翻译框区域更新，payload 含 `box_id`、`region`。
+- `multibox://status`：翻译框状态变更，payload 含 `box_id`、`status`
+  （`Running` / `Stopped` / `Error(string)`）。
+- `multibox://warning`：翻译框过多警告，payload 含 `current_count`、`max_count`。
+- `translation://single-result`：单次翻译结果，payload 含 `original_text`、
+  `translated_text`、`timestamp`。替代在主页面显示结果，结果推送到翻译弹窗。
+
+Multi-box 事件只包含文本和状态数据，不携带截图图像数据。结果转发 task
+（`run_multi_forwarder`）订阅 `pipeline.subscribe_results()` 并以 500ms 轮询
+box 状态变更；日志只记录 `box_id` 和事件名，不记录原文/译文完整内容
+（原文/译文在 `emit_translation_single_result` 中用 `truncate_for_log` 截断）。
 
 事件只包含标准文本/状态结构，不携带截图图像数据。敏感凭据不会进入事件或日志。
 
@@ -450,3 +502,20 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 - 悬浮球窗口默认隐藏（`visible: false`），由前端按 `floating_ball.enabled`
   配置显示；全局 hide-on-close 策略对 floater 同样生效（关闭隐藏不销毁）。
   悬浮球不点穿，未配置 `setIgnoreCursorEvents`。
+- 多框实时翻译的 `multibox://result` 事件 payload 为
+  `BoxedTranslationResult`（含 `result.translated_text`），不包含原文；
+  原文/译文配对仅在单次翻译的 `translation://single-result` 中提供。
+  如需多框原文展示，需后续在 pipeline 层将 OCR 文本与翻译结果配对
+  （`BoxedTranslationResult` 定义在 vtrans-pipeline，不可修改）。
+- 多框 overlay 渲染由前端负责：app 层显示 overlay 窗口并发射
+  `multibox://box-added` 等事件，彩色方框的实际绘制由前端 CSS 完成。
+  app 层不跨 IPC 传输图像，仅传 `box_id`、`color`、`region` 坐标。
+- 多框状态轮询间隔为 500ms：forwarder task 通过 `pipeline.box_status()`
+  轮询，运行中新增的框在下一个轮询周期纳入监控；错误状态变更最多有
+  500ms 延迟。
+- 多框与单框实时翻译互不影响：`MultiBoxPipeline` 与 `Pipeline` 是独立实例，
+  共享相同的 provider 但拥有独立的 CaptureSession。用户可同时运行单框
+  实时翻译和多框实时翻译（但资源消耗加倍）。
+- `add_translation_box` 使用 `load_config` + `save_config`（非原子）持久化
+  翻译框，因 `add_box_config` 需返回分配的 id/color。其他命令使用
+  `update_config`（原子加载-修改-保存）。桌面应用场景下并发写入概率极低。
