@@ -503,10 +503,13 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
   配置显示；全局 hide-on-close 策略对 floater 同样生效（关闭隐藏不销毁）。
   悬浮球不点穿，未配置 `setIgnoreCursorEvents`。
 - 多框实时翻译的 `multibox://result` 事件 payload 为
-  `BoxedTranslationResult`（含 `result.translated_text`），不包含原文；
-  原文/译文配对仅在单次翻译的 `translation://single-result` 中提供。
-  如需多框原文展示，需后续在 pipeline 层将 OCR 文本与翻译结果配对
-  （`BoxedTranslationResult` 定义在 vtrans-pipeline，不可修改）。
+  `BoxedTranslationResult`：含 `result.translated_text` 与 `original_text`
+  （F1/F2 落地）。`original_text` 为清洗后的 OCR 原文——与发送给翻译
+  provider 的文本同源，供弹窗每框同时显示原文+译文。降级语义：OCR 产出
+  空文本（跳过 provider 调用）或翻译失败时，仍发布译文与原文均为空串的
+  结果，前端据此清除该框 overlay 残留而非保留旧译文；取消（stop/被新
+  任务取代）不发布任何结果。单次翻译的 `translation://single-result`
+  同样携带 `original_text` / `translated_text` / `timestamp`。
 - 多框 overlay 渲染由前端负责：app 层显示 overlay 窗口并发射
   `multibox://box-added` 等事件，彩色方框的实际绘制由前端 CSS 完成。
   app 层不跨 IPC 传输图像，仅传 `box_id`、`color`、`region` 坐标。
