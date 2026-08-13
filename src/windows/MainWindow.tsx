@@ -143,7 +143,13 @@ export function MainWindow() {
   const runLive = async () => {
     setBusy(true);
     try {
-      await startLive();
+      // 「翻译区域」区块仅在单次模式渲染，实时模式无选区时先框选再启动
+      // （与悬浮球 toggleLiveFromFloater 的无选区分支一致）。
+      if (useAppStore.getState().selectedRegion) {
+        await startLive();
+      } else {
+        await selectRegionForLive();
+      }
     } finally {
       setBusy(false);
     }
@@ -337,31 +343,38 @@ export function MainWindow() {
         />
         <StatusBar status={status} error={error} />
 
-        <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-semibold">翻译区域</h2>
-              <p className="mt-1 text-xs text-slate-400">框选要翻译的屏幕区域</p>
+        {mode === "single" && (
+          <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold">翻译区域</h2>
+                <p className="mt-1 text-xs text-slate-400">框选要翻译的屏幕区域</p>
+              </div>
+              <MousePointer2 size={18} className="text-indigo-500" aria-hidden="true" />
             </div>
-            <MousePointer2 size={18} className="text-indigo-500" aria-hidden="true" />
-          </div>
-          <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button w-full">
-            <MousePointer2 size={16} />选择屏幕区域
-          </button>
-        </section>
+            <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button w-full">
+              <MousePointer2 size={16} />选择屏幕区域
+            </button>
+            <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button mt-2 w-full">
+              <Play size={16} />选择并翻译
+            </button>
+          </section>
+        )}
 
-        <TranslationBoxList
-          boxes={translationBoxes}
-          statuses={boxStatuses}
-          warningThreshold={config.warning_threshold}
-          busy={multiBusy}
-          onAdd={() => void handleAddBox()}
-          onEdit={(boxId) => void handleEditBox(boxId)}
-          onRemove={(boxId) => void handleRemoveBox(boxId)}
-          onStart={() => void handleStartMulti()}
-          onStop={() => void handleStopMulti()}
-          onStopBox={(boxId) => void handleStopBox(boxId)}
-        />
+        {mode === "live" && (
+          <TranslationBoxList
+            boxes={translationBoxes}
+            statuses={boxStatuses}
+            warningThreshold={config.warning_threshold}
+            busy={multiBusy}
+            onAdd={() => void handleAddBox()}
+            onEdit={(boxId) => void handleEditBox(boxId)}
+            onRemove={(boxId) => void handleRemoveBox(boxId)}
+            onStart={() => void handleStartMulti()}
+            onStop={() => void handleStopMulti()}
+            onStopBox={(boxId) => void handleStopBox(boxId)}
+          />
+        )}
 
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <button type="button" onClick={() => void handleOpenResult()} disabled={multiBusy} className="secondary-button w-full">
@@ -392,21 +405,17 @@ export function MainWindow() {
           )}
         </section>
 
-        <section className="grid grid-cols-2 gap-2">
-          {mode === "single" ? (
-            <button type="button" onClick={() => void selectRegion()} disabled={disabled} className="primary-button col-span-2"><Play size={16} />选择并翻译</button>
-          ) : (
-            <>
-              {livePaused ? (
-                <button type="button" onClick={() => void runLive()} disabled={busy} className="primary-button"><Play size={16} />继续实时</button>
-              ) : (
-                <button type="button" onClick={() => void togglePause()} disabled={busy || !liveConfig} className="secondary-button"><Pause size={16} />暂停</button>
-              )}
-              <button type="button" onClick={() => void runLive()} disabled={busy || Boolean(liveConfig && !livePaused)} className="secondary-button"><Play size={16} />开始实时</button>
-              <button type="button" onClick={() => void stopLive()} disabled={busy} className="secondary-button col-span-2"><Square size={16} />停止</button>
-            </>
-          )}
-        </section>
+        {mode === "live" && (
+          <section className="grid grid-cols-2 gap-2">
+            {livePaused ? (
+              <button type="button" onClick={() => void runLive()} disabled={busy} className="primary-button"><Play size={16} />继续实时</button>
+            ) : (
+              <button type="button" onClick={() => void togglePause()} disabled={busy || !liveConfig} className="secondary-button"><Pause size={16} />暂停</button>
+            )}
+            <button type="button" onClick={() => void runLive()} disabled={busy || Boolean(liveConfig && !livePaused)} className="secondary-button"><Play size={16} />开始实时</button>
+            <button type="button" onClick={() => void stopLive()} disabled={busy} className="secondary-button col-span-2"><Square size={16} />停止</button>
+          </section>
+        )}
 
         <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between">

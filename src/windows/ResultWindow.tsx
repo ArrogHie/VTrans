@@ -195,7 +195,7 @@ export function ResultWindow({
     <main
       ref={rootRef}
       data-testid="result-mini-bar"
-      className="result-mini-bar flex min-h-screen flex-col gap-1.5 rounded-xl border border-slate-200 p-2 text-slate-900 shadow-lg"
+      className="result-mini-bar flex h-screen flex-col gap-1.5 rounded-xl border border-slate-200 p-2 text-slate-900 shadow-lg"
     >
       {/* 无原生标题栏：整个顶栏都是拖动区域（deep），按钮等可交互元素仍可点击。 */}
       <header
@@ -319,7 +319,7 @@ export function ResultWindow({
           )}
 
           <p
-            className="result-text flex-1 whitespace-pre-wrap break-words leading-6 text-slate-800"
+            className="result-text min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words leading-6 text-slate-800"
             data-testid="result-translation-text"
             data-tauri-drag-region
           >
