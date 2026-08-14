@@ -58,8 +58,8 @@ t::generate_handler![
 | `remove_translation_box` | `{ boxId }` | `()` | 从 pipeline 移除（停任务、清去重/状态；`BoxNotFound` 容忍）并删配置条目；发射 `multibox://box-removed` |
 | `update_translation_box` | `{ boxId, region }` | `()` | 校验区域；pipeline `update_box`（运行中停旧任务以新区域重启）；更新配置；发射 `multibox://box-updated` |
 | `list_translation_boxes` | 无 | `Vec<TranslationBoxInfo>` | 从持久化配置读取（跨重启存活，pipeline 未启动亦可列出） |
-| `start_multi_realtime` | 无 | `()` | 清旧 pipeline，从当前配置重建并注册全部框；spawn forwarder task（结果转发 + 状态轮询）；`start_all`；显示 overlay 窗口 |
-| `stop_multi_realtime` | 无 | `()` | `stop_all`；清 pipeline + forwarder；隐藏 overlay；对每个框发射 `multibox://status`（`Stopped`） |
+| `start_multi_realtime` | 无 | `()` | 清旧 pipeline，从当前配置重建并注册全部框；spawn forwarder task（结果转发 + 状态轮询）；`start_all`；显示 overlay 窗口；`start_all` 成功后记录 `mode = live`（失败不改 mode） |
+| `stop_multi_realtime` | 无 | `()` | `stop_all`；清 pipeline + forwarder；隐藏 overlay；对每个框发射 `multibox://status`（`Stopped`）；回退 `mode = single`（单框 live 仍在运行时保持 live） |
 | `stop_box` | `{ boxId }` | `()` | 停止单框任务（框保持注册）；发射该框 `Stopped` 状态 |
 | `open_result_window` | 无 | `()` | 显示/聚焦预声明的 `result` 窗口（窗口已在 tauri.conf.json 声明、关闭即隐藏，不新建） |
 
@@ -239,9 +239,10 @@ main/result/floater 不得遮挡或混入被框选内容。生命周期契约（
   `set_ignore_cursor_events(true)`），只传输 `ScreenRegion` 坐标，不跨 IPC
   传图像。
 - `AppStatus.mode`（`"single"` / `"live"`）是后端最近会话模式的权威记录
-  （单次捕获与确认报告 `single`，实时会话运行或暂停均报告 `live`）；前端
-  启动水合只在 `mode == "live"` 时恢复常驻方框，单次模式的选择区域不会
-  在重启后显示方框。
+  （单次捕获与确认报告 `single`，实时会话运行或暂停均报告 `live`；多框
+  实时会话运行期间 mode 报告 `live`，停止且无单框 live 会话时回退
+  `single`——Bug-004 后端侧）；前端启动水合只在 `mode == "live"` 时恢复
+  常驻方框，单次模式的选择区域不会在重启后显示方框。
 
 ### 窗口清单（悬浮球窗口）
 
@@ -376,6 +377,7 @@ crates/vtrans-app/
 | Debug 帧出口 | 集成 | FrameSink 收到进入 OCR 前的帧、跳过未变化帧（pipeline 集成测试）✅ |
 | Debug 面板显示 | 手工验证 | 依赖真实显示器与模型（README 第 12 条） |
 | 错误映射 | 单元 | 各模块错误正确映射到 AppError（error.rs tests）✅ |
+| 多框状态快照 mode | 单元 | 多框启动成功记 `live` / `start_all` 失败不改 / 停止回退 `single` / 单框 live 运行中停止保持 `live`（commands/state tests，`mode_after_multi_stop` + `MultiBoxSessionHost` 注入）✅ |
 | 事件发送 | 单元 | PipelineEvent 正确转为前端事件（events.rs tests）✅ |
 
 > 说明：依赖 Windows 桌面环境的 5 项已登记为手工验证，具体步骤与验证点见
@@ -551,6 +553,28 @@ Provider 与配置 id 一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
       AppHandle 内部调用
 - [x] 真实桌面显隐登记 README 手工验证项 15；回归：fmt / clippy / app
       单测 / workspace check 全绿；未修改其他 crate 与 vtrans-core
+
+### 多框状态快照同步验收（Bug-004）
+
+- [x] `start_multi_realtime` 在 `start_all` 成功后调用
+      `set_current_mode(LiveRegion)`，多框会话运行期间 `get_app_status`
+      报告 `mode: "live"`；`start_all` 失败（错误路径 `warn!`）不改 mode
+- [x] `stop_multi_realtime` 完成停止后回退 `mode = single`；此刻单框
+      live task 仍在运行/暂停中时保持 `LiveRegion` 不覆盖并发单框会话
+      （决策集中在 `mode_after_multi_stop` 纯函数）
+- [x] 编排与状态访问分离：`start_multi_session` / `stop_multi_session`
+      泛化在 `MultiBoxSessionHost` 可注入接口上，AppState 仅做薄委托；
+      窗口/任务相关副作用（overlay 显隐、状态事件、forwarder spawn）留在
+      command 包装层
+- [x] 单测覆盖四个场景（commands/state tests：`multi_start_records_*` /
+      `multi_stop_falls_back_*` / `multi_stop_preserves_*` /
+      `failed_multi_start_leaves_*` + `mode_after_multi_stop` 两个纯函数
+      用例），用 mock host + 桩 provider 构建真实 `MultiBoxPipeline`，
+      无 Windows 采集环境依赖
+- [x] `AppStatus` serde 形状不变、无新增字段、无新增/修改 IPC 命令与
+      事件（contracts.rs 无改动）
+- [x] 回归：fmt / clippy / app 单测 / workspace check 全绿；未修改其他
+      crate 与 vtrans-core；README 与本文档同步
 
 ## 开发注意事项
 
