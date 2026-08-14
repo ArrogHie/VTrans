@@ -15,6 +15,7 @@ import {
   getIpcErrorMessage,
   showMainWindow,
 } from "../services/tauri";
+import { hydrateBoxes } from "../services/multiBoxActions";
 import {
   selectAndTranslateOnce,
   toggleLiveFromFloater,
@@ -27,6 +28,8 @@ import {
   FLOATER_OPACITY_MIN,
   FLOATER_SIZE_MAX,
   FLOATER_SIZE_MIN,
+  isAnyBoxRunning,
+  isSingleLiveRunning,
 } from "../types";
 import { createFloaterDragHandlers } from "../utils/floaterDrag";
 import { computeFloaterWindowSize, FLOATER_PADDING_PX } from "../utils/floaterLayout";
@@ -138,11 +141,20 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
   const mode = useAppStore((state) => state.mode);
   const livePaused = useAppStore((state) => state.livePaused);
   const liveConfig = useAppStore((state) => state.liveConfig);
-  const liveRunning = mode === "live" && Boolean(liveConfig);
+  const boxStatuses = useAppStore((state) => state.boxStatuses);
+  // 运行态推导（与主窗口共享同一套推导函数，禁止复制逻辑）：
+  // - 多框：任一框 Running（经 multibox://status 与 frontend_multibox_* 事件同步）。
+  // - 单框实时：live 模式且存在 liveConfig（暂停中的单框会话仍可停止）。
+  const multiBoxRunning = isAnyBoxRunning(boxStatuses);
+  const singleLiveRunning = isSingleLiveRunning(mode, liveConfig);
+  const anyLiveRunning = singleLiveRunning || multiBoxRunning;
 
   useEffect(() => {
     let disposed = false;
     let unlisten: Unlisten | undefined;
+    // 悬浮球需要知道已配置的翻译框才能「有框时启动多框会话」；与主窗口
+    // 一样在挂载时水合一次（失败仅告警，框列表事件会继续补全）。
+    void hydrateBoxes();
     const applyVisibility = (enabled: boolean) => {
       const tauriWindow = getFloaterWindow();
       if (!tauriWindow) return;
@@ -283,7 +295,9 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
 
   const expandMenu = async () => {
     setOpen(true);
-    // 打开时主动同步一次会话状态，保证菜单按钮反映真实状态。
+    // 打开时主动同步一次会话状态，保证菜单按钮反映真实状态；
+    // 多框列表也一并刷新（add/remove 事件之外的水合兜底）。
+    void hydrateBoxes();
     void getAppStatus()
       .then((snapshot) => useAppStore.getState().applyStatus(snapshot))
       .catch(() => undefined);
@@ -348,13 +362,15 @@ export function FloatingBall({ initialOpen = false }: { initialOpen?: boolean } 
             disabled={busy}
             className="floater-menu-item"
           >
-            {liveRunning ? <Square size={15} aria-hidden="true" /> : <Radio size={15} aria-hidden="true" />}
-            {liveRunning ? "停止实时翻译" : "实时翻译"}
+            {anyLiveRunning ? <Square size={15} aria-hidden="true" /> : <Radio size={15} aria-hidden="true" />}
+            {anyLiveRunning ? "停止实时翻译" : "实时翻译"}
           </button>
           <button
             type="button"
             onClick={() => void run(toggleLivePause)}
-            disabled={busy || !liveRunning}
+            // 暂停·继续只作用于单框实时会话：多框运行中保持禁用，
+            // 避免对多框会话误发单框暂停命令。
+            disabled={busy || !singleLiveRunning || multiBoxRunning}
             className="floater-menu-item"
           >
             {livePaused ? <Play size={15} aria-hidden="true" /> : <Pause size={15} aria-hidden="true" />}

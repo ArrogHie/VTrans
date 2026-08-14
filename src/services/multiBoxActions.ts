@@ -6,6 +6,8 @@ import {
   isRegionSelectionCancelled,
   listTranslationBoxes,
   openResultWindow,
+  publishFrontendMultiBoxStarted,
+  publishFrontendMultiBoxStopped,
   removeTranslationBox,
   startMultiRealtime,
   startRegionSelection,
@@ -77,7 +79,15 @@ export async function removeBox(boxId: number): Promise<MultiBoxActionResult> {
   }
 }
 
-/** Starts real-time translation for every configured box. */
+/**
+ * Starts real-time translation for every configured box.
+ *
+ * After the backend confirms the start, every session box is marked
+ * `Running` in the local store and the `frontend_multibox_started` event is
+ * published so the other webviews (floating ball, result window) derive the
+ * same running state. Failures only report the error — no fake running state
+ * is written or broadcast.
+ */
 export async function startMultiBox(): Promise<MultiBoxActionResult> {
   try {
     // 后端 start_multi_realtime 只 show overlay 窗口、不定位（BUGFIX-2 根因）。
@@ -85,6 +95,9 @@ export async function startMultiBox(): Promise<MultiBoxActionResult> {
     // 后端随后 show 时各框才能按物理坐标/dpr 对齐绘制。
     await showMultiBoxOverlay(useAppStore.getState().translationBoxes);
     await startMultiRealtime();
+    const boxIds = useAppStore.getState().translationBoxes.map((box) => box.box_id);
+    useAppStore.getState().setBoxesStatus(boxIds, "Running");
+    void publishFrontendMultiBoxStarted(boxIds);
     return succeeded;
   } catch (error) {
     reportError(error);
@@ -92,10 +105,27 @@ export async function startMultiBox(): Promise<MultiBoxActionResult> {
   }
 }
 
-/** Stops all multi-box translation tasks. */
+/**
+ * Stops all multi-box translation tasks.
+ *
+ * After the backend confirms the stop, every locally known session box
+ * (configured boxes plus any box with a recorded status, in case the box list
+ * has not hydrated yet) is marked `Stopped` and the
+ * `frontend_multibox_stopped` event is published so every webview converges.
+ * Failures only report the error — no fake stopped state is broadcast.
+ */
 export async function stopMultiBox(): Promise<MultiBoxActionResult> {
   try {
     await stopMultiRealtime();
+    const state = useAppStore.getState();
+    const boxIds = Array.from(
+      new Set([
+        ...state.translationBoxes.map((box) => box.box_id),
+        ...Object.keys(state.boxStatuses).map((boxId) => Number(boxId)),
+      ]),
+    );
+    useAppStore.getState().setBoxesStatus(boxIds, "Stopped");
+    void publishFrontendMultiBoxStopped(boxIds);
     return succeeded;
   } catch (error) {
     reportError(error);

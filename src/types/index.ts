@@ -382,6 +382,34 @@ export function isBoxError(status: BoxStatus): status is { Error: string } {
   return typeof status === "object" && status !== null && "Error" in status;
 }
 
+/**
+ * Reports whether any translation box is currently running.
+ *
+ * The multi-box session is considered running when at least one box reports
+ * `"Running"`. Error/Stopped entries never count. Shared by the main window
+ * (live-mode start/stop controls) and the floating ball (menu state), and by
+ * the store hydration path to avoid fabricating a single-live session over a
+ * running multi-box session.
+ */
+export function isAnyBoxRunning(statuses: Record<number, BoxStatus>): boolean {
+  return Object.values(statuses).some((status) => status === "Running");
+}
+
+/**
+ * Reports whether the single-region live session is running (or paused).
+ *
+ * A live config exists whenever the session has been started and not stopped,
+ * including while paused, so a paused session still counts as running here:
+ * the stop control must remain available. Multi-box sessions are deliberately
+ * excluded — their running state derives from `isAnyBoxRunning`.
+ */
+export function isSingleLiveRunning(
+  mode: Mode,
+  liveConfig: PipelineConfig | null,
+): boolean {
+  return mode === "live" && liveConfig !== null;
+}
+
 /** Maps a box status to its Chinese UI label. */
 export function boxStatusLabel(status: BoxStatus): string {
   if (isBoxError(status)) return "错误";

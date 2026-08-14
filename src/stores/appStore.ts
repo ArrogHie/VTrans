@@ -15,7 +15,7 @@ import type {
   TranslationBoxInfo,
   TranslationResult,
 } from "../types";
-import { DEFAULT_CONFIG, normalizeProviderId } from "../types";
+import { DEFAULT_CONFIG, isAnyBoxRunning, normalizeProviderId } from "../types";
 
 interface AppState {
   mode: Mode;
@@ -58,6 +58,7 @@ interface AppState {
   removeBox: (boxId: number) => void;
   updateBoxRegion: (boxId: number, region: ScreenRegion) => void;
   setBoxStatus: (boxId: number, status: BoxStatus) => void;
+  setBoxesStatus: (boxIds: number[], status: BoxStatus) => void;
   setMultiBoxResult: (result: BoxedTranslationResult) => void;
   setSingleResult: (result: SingleResultPayload | null) => void;
   resetMultiBox: () => void;
@@ -140,8 +141,17 @@ export const useAppStore = create<AppState>((set) => ({
       // a running session without a local live config, reconstruct one from
       // the backend-selected region and the capture defaults so pause/stop
       // controls work immediately. An existing live config is preserved.
+      //
+      // 防回退：本地已有多框框在 Running（经 multibox://status 或
+      // frontend_multibox_* 事件同步）时，后端快照的 live_running 可能描述
+      // 同一个多框会话（后端修复后多框运行报告 mode "live"）。此时禁止
+      // 凭空构造单框 liveConfig，否则悬浮球会误判单框实时在运行，
+      // 「暂停·继续」解禁、停止走单框路径。boxStatuses 本身永不被水合覆盖。
       const liveConfig =
-        status.live_running && status.selected_region && !state.liveConfig
+        status.live_running &&
+        status.selected_region &&
+        !state.liveConfig &&
+        !isAnyBoxRunning(state.boxStatuses)
           ? {
               region: status.selected_region,
               capture_interval_ms: state.config.capture.interval_ms,
@@ -194,6 +204,12 @@ export const useAppStore = create<AppState>((set) => ({
     })),
   setBoxStatus: (boxId, status) =>
     set((state) => ({ boxStatuses: { ...state.boxStatuses, [boxId]: status } })),
+  setBoxesStatus: (boxIds, status) =>
+    set((state) => {
+      const boxStatuses = { ...state.boxStatuses };
+      for (const boxId of boxIds) boxStatuses[boxId] = status;
+      return { boxStatuses };
+    }),
   setMultiBoxResult: (result) =>
     set((state) => ({ multiBoxResults: { ...state.multiBoxResults, [result.box_id]: result } })),
   setSingleResult: (singleResult) => set({ singleResult }),

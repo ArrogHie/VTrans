@@ -13,6 +13,12 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   WebviewWindow: { getByLabel: (...args: unknown[]) => getByLabel(...args) },
 }));
 
+// toggleLiveFromFloater 经 multiBoxActions 进入多框路径；overlay 定位/隐藏
+// 的行为由 regionOverlay.test.ts 覆盖，这里只需隔离副作用。
+const showMultiBoxOverlay = vi.fn();
+const hideRegionOverlay = vi.fn();
+vi.mock("../services/regionOverlay", () => ({ showMultiBoxOverlay, hideRegionOverlay }));
+
 const {
   selectAndTranslateOnce,
   selectRegionForLive,
@@ -24,6 +30,7 @@ const {
 
 const REGION = { monitor_id: "display-1", x: 0, y: 10, width: 80, height: 40 };
 const OCR_RESULT = { lines: [], merged_text: "hello", detected_language: null, elapsed_ms: 3 };
+const BOX = { box_id: 0, region: REGION, color: "#FF6B6B" };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -39,6 +46,10 @@ beforeEach(() => {
     hydrated: false,
     liveConfig: null,
     livePaused: false,
+    translationBoxes: [],
+    boxStatuses: {},
+    multiBoxResults: {},
+    singleResult: null,
   });
   getByLabel.mockResolvedValue({
     show: vi.fn().mockResolvedValue(undefined),
@@ -130,6 +141,49 @@ describe("toggleLiveFromFloater", () => {
     expect(useAppStore.getState().mode).toBe("single");
     expect(useAppStore.getState().liveConfig).toBeNull();
     expect(emit).toHaveBeenCalledWith("frontend_live_stopped");
+  });
+
+  it("stops the multi-box session when any box is running", async () => {
+    // BUGFIX-4：悬浮球与主窗口共享同一多框会话——任一框 Running 时点击
+    // 「停止实时翻译」走 stop_multi_realtime，而不是另起单框实时。
+    useAppStore.getState().setTranslationBoxes([BOX]);
+    useAppStore.getState().setBoxStatus(0, "Running");
+    invoke.mockResolvedValueOnce(undefined);
+
+    const result = await toggleLiveFromFloater();
+    expect(result.ok).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("stop_multi_realtime", undefined);
+    expect(invoke).not.toHaveBeenCalledWith("stop_live_translation", undefined);
+    expect(useAppStore.getState().boxStatuses).toEqual({ 0: "Stopped" });
+    expect(emit).toHaveBeenCalledWith("frontend_multibox_stopped", { box_ids: [0] });
+    // 单框会话状态不被触碰。
+    expect(useAppStore.getState().liveConfig).toBeNull();
+  });
+
+  it("starts the multi-box session when boxes exist and nothing runs", async () => {
+    // 未运行且有框：与主窗口 live 模式一致，直接启动多框会话。
+    useAppStore.getState().setTranslationBoxes([BOX]);
+    showMultiBoxOverlay.mockResolvedValue(undefined);
+    invoke.mockResolvedValueOnce(undefined);
+
+    const result = await toggleLiveFromFloater();
+    expect(result.ok).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("start_multi_realtime", undefined);
+    expect(useAppStore.getState().boxStatuses).toEqual({ 0: "Running" });
+    expect(emit).toHaveBeenCalledWith("frontend_multibox_started", { box_ids: [0] });
+    // 不触发任何单框路径。
+    expect(invoke).not.toHaveBeenCalledWith("start_region_selection", undefined);
+    expect(invoke).not.toHaveBeenCalledWith("start_live_translation", expect.any(Object));
+  });
+
+  it("keeps the region-selection start when no boxes exist", async () => {
+    // 未运行且无框：保持原单框路径（先框选再启动单框实时）。
+    invoke.mockResolvedValueOnce(REGION).mockResolvedValueOnce(undefined);
+    const result = await toggleLiveFromFloater();
+    expect(result.ok).toBe(true);
+    expect(invoke).toHaveBeenCalledWith("start_region_selection", undefined);
+    expect(invoke).toHaveBeenCalledWith("start_live_translation", expect.any(Object));
+    expect(invoke).not.toHaveBeenCalledWith("start_multi_realtime", undefined);
   });
 });
 

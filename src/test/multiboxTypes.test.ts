@@ -3,8 +3,10 @@ import {
   DEFAULT_CONFIG,
   boxCountWarningText,
   boxStatusLabel,
+  isAnyBoxRunning,
   isBoxError,
   isMultiBoxEngaged,
+  isSingleLiveRunning,
   shouldWarnBoxCount,
 } from "../types";
 
@@ -27,6 +29,28 @@ describe("multi-box type helpers", () => {
     expect(isMultiBoxEngaged({ 0: "Stopped" }, 1)).toBe(true);
     expect(isMultiBoxEngaged({ 0: "Stopped" }, 0)).toBe(false);
     expect(isMultiBoxEngaged({ 0: { Error: "x" } }, 0)).toBe(false);
+  });
+
+  it("reports a running multi-box session only when any box is Running", () => {
+    expect(isAnyBoxRunning({})).toBe(false);
+    expect(isAnyBoxRunning({ 0: "Stopped", 1: "Stopped" })).toBe(false);
+    expect(isAnyBoxRunning({ 0: "Stopped", 1: "Running" })).toBe(true);
+    expect(isAnyBoxRunning({ 0: "Running" })).toBe(true);
+    // Error 状态不视为运行中。
+    expect(isAnyBoxRunning({ 0: { Error: "capture failed" } })).toBe(false);
+  });
+
+  it("reports a single-live session from mode and live config", () => {
+    const config = {
+      region: { monitor_id: "m0", x: 0, y: 0, width: 10, height: 10 },
+      capture_interval_ms: 500,
+      difference_threshold: 0.03,
+    };
+    expect(isSingleLiveRunning("live", config)).toBe(true);
+    // 暂停中的单框会话（config 仍在）依然可停止。
+    expect(isSingleLiveRunning("live", null)).toBe(false);
+    expect(isSingleLiveRunning("single", config)).toBe(false);
+    expect(isSingleLiveRunning("single", null)).toBe(false);
   });
 
   it("warns only when the count reaches a non-zero threshold", () => {

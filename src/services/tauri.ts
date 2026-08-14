@@ -252,6 +252,27 @@ export function publishFrontendLiveStopped(): Promise<void> {
   return emit("frontend_live_stopped");
 }
 
+/**
+ * Publishes a frontend multi-box session start to the other Tauri webviews.
+ *
+ * Fired only after `start_multi_realtime` succeeds. The payload lists the
+ * session's box ids so every window can mirror the running statuses without
+ * calling the backend.
+ */
+export function publishFrontendMultiBoxStarted(boxIds: number[]): Promise<void> {
+  return emit("frontend_multibox_started", { box_ids: boxIds });
+}
+
+/**
+ * Publishes a frontend multi-box session stop to the other Tauri webviews.
+ *
+ * Fired only after `stop_multi_realtime` succeeds; receiving windows mark the
+ * listed boxes as stopped.
+ */
+export function publishFrontendMultiBoxStopped(boxIds: number[]): Promise<void> {
+  return emit("frontend_multibox_stopped", { box_ids: boxIds });
+}
+
 /** Shows and focuses the preconfigured result webview. */
 export async function showResultWindow(): Promise<void> {
   const window = await WebviewWindow.getByLabel("result");

@@ -16,6 +16,10 @@ beforeEach(() => {
     hydrated: false,
     liveConfig: null,
     livePaused: false,
+    translationBoxes: [],
+    boxStatuses: {},
+    multiBoxResults: {},
+    singleResult: null,
   });
 });
 
@@ -294,5 +298,62 @@ describe("appStore", () => {
       debug_mode: false,
     });
     expect(useAppStore.getState().mode).toBe("live");
+  });
+
+  it("does not fabricate a single-live config while a multi-box session is running", () => {
+    // BUGFIX-4：多框运行态经跨窗口事件同步进 boxStatuses。后端修复后多框
+    // 运行会报告 mode "live"（甚至 live_running），水合不得据此凭空构造
+    // 单框 liveConfig——否则悬浮球会误以为单框实时在运行（暂停按钮解禁、
+    // 停止走单框路径）。
+    useAppStore.getState().setBoxStatus(0, "Running");
+    useAppStore.getState().applyStatus({
+      mode: "live",
+      pipeline_status: "capturing",
+      ocr_provider: "pp-ocr",
+      translation_provider: "openai",
+      selected_region: region,
+      live_running: true,
+      model_progress: null,
+      debug_mode: false,
+    });
+    const state = useAppStore.getState();
+    expect(state.liveConfig).toBeNull();
+    expect(state.boxStatuses).toEqual({ 0: "Running" });
+  });
+
+  it("never overwrites multi-box statuses during hydration", () => {
+    useAppStore.getState().setBoxStatus(0, "Running");
+    useAppStore.getState().setBoxStatus(1, "Stopped");
+    useAppStore.getState().applyStatus({
+      mode: "single",
+      pipeline_status: "idle",
+      ocr_provider: "pp-ocr",
+      translation_provider: "openai",
+      selected_region: null,
+      live_running: false,
+      model_progress: null,
+      debug_mode: false,
+    });
+    expect(useAppStore.getState().boxStatuses).toEqual({ 0: "Running", 1: "Stopped" });
+  });
+
+  it("still reconstructs a hotkey live config when no box is running", () => {
+    // 保护只针对多框运行态：无框运行时的原有热键兜底行为保持不变。
+    useAppStore.getState().setBoxStatus(0, "Stopped");
+    useAppStore.getState().applyStatus({
+      mode: "live",
+      pipeline_status: "capturing",
+      ocr_provider: "pp-ocr",
+      translation_provider: "openai",
+      selected_region: region,
+      live_running: true,
+      model_progress: null,
+      debug_mode: false,
+    });
+    expect(useAppStore.getState().liveConfig).toEqual({
+      region,
+      capture_interval_ms: 500,
+      difference_threshold: 0.03,
+    });
   });
 });
