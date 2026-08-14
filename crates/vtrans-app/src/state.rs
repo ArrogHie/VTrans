@@ -119,9 +119,11 @@ pub struct AppStatus {
     ///
     /// This mirrors the last session started by a command or hotkey: single
     /// captures and their region confirmations report `single`, a live
-    /// session (running **or paused**) reports `live`. The frontend uses it
-    /// during hydration to decide whether a selected region should restore
-    /// the persistent overlay marker.
+    /// session (running **or paused**) reports `live`, and a multi-box
+    /// real-time session also reports `live` while it runs (falling back to
+    /// `single` when it stops, unless a single-box live session is still
+    /// active). The frontend uses it during hydration to decide whether a
+    /// selected region should restore the persistent overlay marker.
     pub mode: PipelineMode,
     /// Current pipeline status.
     pub pipeline_status: PipelineStatus,
@@ -285,9 +287,10 @@ impl AppState {
     /// Records the session mode of the most recent command or hotkey.
     ///
     /// The mode is a per-run mirror used by [`AppStatus::mode`]; it is never
-    /// persisted. A stop keeps the last mode so a paused live session still
-    /// reports `live`; only the next region confirmation or single capture
-    /// switches it back.
+    /// persisted. A single-box stop keeps the last mode so a paused live
+    /// session still reports `live`; only the next region confirmation,
+    /// single capture, or multi-box stop (without a concurrent single-box
+    /// live session) switches it back.
     pub(crate) fn set_current_mode(&self, mode: PipelineMode) {
         *self.current_mode.write().unwrap_or_else(poison_inner) = mode;
     }
@@ -730,6 +733,25 @@ impl AppState {
     }
 }
 
+/// Session mode recorded after a multi-box real-time session stops.
+///
+/// Multi-box sessions follow the live semantics of [`AppStatus::mode`]
+/// while they run. Once a multi-box session stops, the authoritative mode
+/// falls back to `SingleCapture` — unless a single-box live task is still
+/// running or paused, in which case the recorded mode must stay
+/// `LiveRegion` so the concurrent single-box session is never overwritten.
+///
+/// Kept as a pure function so the fallback decision is unit-testable
+/// without Windows capture state or a Tokio runtime.
+#[must_use]
+pub(crate) fn mode_after_multi_stop(single_live_running: bool) -> PipelineMode {
+    if single_live_running {
+        PipelineMode::LiveRegion
+    } else {
+        PipelineMode::SingleCapture
+    }
+}
+
 #[derive(Clone)]
 struct SharedCaptureSource(Arc<WindowsCaptureSource>);
 
@@ -1155,6 +1177,20 @@ mod tests {
         assert!(json.contains("mock-ocr"));
         assert!(json.contains(r#""translation_provider":"openai""#));
         assert!(json.contains(r#""debug_mode":false"#));
+    }
+
+    #[test]
+    fn mode_after_multi_stop_falls_back_to_single_without_single_live() {
+        // Bug-004: a stopped multi-box session falls back to `single` when
+        // no single-box live task is running or paused.
+        assert_eq!(mode_after_multi_stop(false), PipelineMode::SingleCapture);
+    }
+
+    #[test]
+    fn mode_after_multi_stop_preserves_live_with_running_single_live() {
+        // Bug-004: a concurrent single-box live session must never be
+        // overwritten by a multi-box stop.
+        assert_eq!(mode_after_multi_stop(true), PipelineMode::LiveRegion);
     }
 
     #[test]

@@ -123,9 +123,11 @@ open_result_window() -> Result<(), AppError>
 - `list_translation_boxes()`：从 config 读取当前翻译框列表。
 - `start_multi_realtime()`：清空旧 pipeline/forwarder，从 config 加载框列表，
   创建 `MultiBoxPipeline`，spawn 结果转发+状态轮询 task，调用
-  `pipeline.start_all()`，显示 overlay。
+  `pipeline.start_all()`，显示 overlay；`start_all` 成功后把
+  `AppStatus.mode` 记录为 `live`（失败不改 mode）。
 - `stop_multi_realtime()`：`pipeline.stop_all()`，清空 pipeline/forwarder，
-  隐藏 overlay，为每个框发射 `Stopped` 状态。
+  隐藏 overlay，为每个框发射 `Stopped` 状态；停止后把 `AppStatus.mode`
+  回退为 `single`（单框实时仍在运行/暂停中时保持 `live`）。
 - `stop_box(box_id)`：`pipeline.stop_box()`，发射 `Stopped` 状态。
 - `open_result_window()`：显示并聚焦 result 窗口（已存在则仅置顶不重复创建）。
 
@@ -314,10 +316,11 @@ hide-on-close 策略（prevent_close + hide）覆盖，窗口隐藏而非销毁�
 - 重新选区 / 取消 → 隐藏（事件 `overlay_hidden`）。
 
 `AppStatus.mode`（`"single"` / `"live"`）是后端最近会话模式的权威记录：
-单次捕获与确认报告 `single`，实时会话运行或暂停均报告 `live`。前端启动
-水合只在 `mode == "live"` 时恢复常驻方框，单次模式的选择区域不会在重启
-后显示方框。overlay 窗口不接收鼠标事件，也不传输任何图像数据（只传
-`ScreenRegion` 坐标）。
+单次捕获与确认报告 `single`，实时会话运行或暂停均报告 `live`；多框实时
+会话运行期间同样报告 `live`，停止且无单框 live 会话时回退 `single`
+（Bug-004）。前端启动水合只在 `mode == "live"` 时恢复常驻方框，单次模式
+的选择区域不会在重启后显示方框。overlay 窗口不接收鼠标事件，也不传输
+任何图像数据（只传 `ScreenRegion` 坐标）。
 
 ### capability 归属
 
@@ -404,7 +407,9 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 2. **save_settings 全链路**：修改捕获间隔并保存，重启应用确认配置持久化；
    API 提供者需先在凭据管理器配置 key。
 3. **get_app_status 全链路**：启动后前端状态栏显示正确的 Provider、区域和
-   pipeline 状态；启动/停止实时会话后轮询结果同步变化。
+   pipeline 状态；启动/停止实时会话后轮询结果同步变化；启动多框实时后
+   `mode` 为 `"live"`，停止多框（无单框实时时）回退 `"single"`，多框与
+   单框实时并存时停止多框仍保持 `"live"`。
 4. **Provider 切换全链路**：依次切换 openai/deepl/google/azure/baidu/local
    后调用 `get_app_status`，确认 `translation_provider` 返回对应实现 id
    （云端与配置 id 一致，本地为 `"local-onnx"`）；重启后前端引擎开关仍

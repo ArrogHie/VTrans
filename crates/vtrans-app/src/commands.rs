@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 use vtrans_config::AppConfig;
 use vtrans_config::TranslationBoxConfig;
@@ -26,7 +27,8 @@ use crate::overlay::{
 };
 use crate::state::AppStatus;
 use crate::state::{
-    store_api_key, store_provider_credentials, validate_translation_provider_id, AppState,
+    mode_after_multi_stop, store_api_key, store_provider_credentials,
+    validate_translation_provider_id, AppState,
 };
 use crate::window_visibility::{
     hide_app_windows_for_selection, restore_app_windows_after_follow_up,
@@ -1238,26 +1240,102 @@ pub async fn list_translation_boxes(
         .collect())
 }
 
-/// Starts real-time translation for all configured boxes.
+/// The subset of [`AppState`] operations used by the multi-box session
+/// orchestration helpers.
 ///
-/// Rebuilds the multi-box pipeline from the current config, spawns a
-/// forwarder task that relays results and status changes to the frontend,
-/// and starts all box tasks. If a previous session was running, it is
-/// stopped first.
+/// The trait exists so the mode-recording lifecycle around
+/// `start_multi_realtime` / `stop_multi_realtime` can be unit-tested with
+/// an in-memory host: no Windows capture environment, model files, or Tauri
+/// runtime are required to verify when the authoritative session mode is
+/// recorded and when it falls back.
+#[async_trait::async_trait]
+pub(crate) trait MultiBoxSessionHost {
+    /// Clears the current multi-box session: aborts the forwarder task and
+    /// drops the pipeline and registered box ids.
+    async fn clear_multi_pipeline(&self);
+
+    /// Creates the multi-box pipeline from the current config on first
+    /// access, or returns the existing one.
+    fn ensure_multi_pipeline(&self) -> Result<Arc<MultiBoxPipeline>, AppError>;
+
+    /// Loads the persisted application configuration.
+    fn load_config(&self) -> Result<AppConfig, AppError>;
+
+    /// Registers a box id for status polling.
+    fn add_multi_box_id(&self, box_id: u32);
+
+    /// Returns the shared box-id list handed to the forwarder task.
+    fn multi_box_ids_handle(&self) -> Arc<std::sync::RwLock<Vec<u32>>>;
+
+    /// Stores the forwarder task handle, aborting any previous one.
+    async fn set_multi_forwarder(&self, task: JoinHandle<()>);
+
+    /// Whether the single-box live task has been started and has not
+    /// finished (running or paused).
+    async fn live_task_is_running(&self) -> bool;
+
+    /// Records the authoritative session mode for [`AppStatus`].
+    fn set_current_mode(&self, mode: PipelineMode);
+}
+
+#[async_trait::async_trait]
+impl MultiBoxSessionHost for AppState {
+    async fn clear_multi_pipeline(&self) {
+        AppState::clear_multi_pipeline(self).await;
+    }
+
+    fn ensure_multi_pipeline(&self) -> Result<Arc<MultiBoxPipeline>, AppError> {
+        AppState::ensure_multi_pipeline(self)
+    }
+
+    fn load_config(&self) -> Result<AppConfig, AppError> {
+        AppState::load_config(self)
+    }
+
+    fn add_multi_box_id(&self, box_id: u32) {
+        AppState::add_multi_box_id(self, box_id);
+    }
+
+    fn multi_box_ids_handle(&self) -> Arc<std::sync::RwLock<Vec<u32>>> {
+        AppState::multi_box_ids_handle(self)
+    }
+
+    async fn set_multi_forwarder(&self, task: JoinHandle<()>) {
+        AppState::set_multi_forwarder(self, task).await;
+    }
+
+    async fn live_task_is_running(&self) -> bool {
+        AppState::live_task_is_running(self).await
+    }
+
+    fn set_current_mode(&self, mode: PipelineMode) {
+        AppState::set_current_mode(self, mode);
+    }
+}
+
+/// Drives the multi-box session start of [`start_multi_realtime`].
+///
+/// `spawn_forwarder` receives the freshly built pipeline and the shared
+/// box-id list and must return the spawned forwarder task handle; the
+/// production command spawns [`run_multi_forwarder`], tests inject a
+/// trivial task. The authoritative mode is recorded only after `start_all`
+/// succeeds, so a failed start never overwrites it.
+///
+/// Returns the registered box count for lifecycle logging.
 ///
 /// # Errors
 ///
-/// Returns an application error when the pipeline cannot be created or
-/// `start_all` fails (e.g. already running).
-#[tauri::command]
-#[tracing::instrument(skip(state))]
-pub async fn start_multi_realtime(state: State<'_, AppState>) -> Result<(), AppError> {
-    let app = state.app_handle()?;
+/// Returns an application error when the pipeline cannot be created, the
+/// config cannot be loaded, or `start_all` fails (e.g. already running).
+async fn start_multi_session<H, F>(host: &H, spawn_forwarder: F) -> Result<usize, AppError>
+where
+    H: MultiBoxSessionHost + ?Sized,
+    F: FnOnce(Arc<MultiBoxPipeline>, Arc<std::sync::RwLock<Vec<u32>>>) -> JoinHandle<()>,
+{
+    host.clear_multi_pipeline().await;
 
-    state.clear_multi_pipeline().await;
-
-    let pipeline = state.ensure_multi_pipeline()?;
-    let config = state.load_config()?;
+    let pipeline = host.ensure_multi_pipeline()?;
+    let config = host.load_config()?;
     for box_config in &config.translation_boxes {
         let translation_box = TranslationBox::new(
             box_config.id,
@@ -1271,29 +1349,80 @@ pub async fn start_multi_realtime(state: State<'_, AppState>) -> Result<(), AppE
                 "failed to add box during multi-box start"
             );
         }
-        state.add_multi_box_id(box_config.id);
+        host.add_multi_box_id(box_config.id);
     }
 
-    let box_ids = state.multi_box_ids_handle();
+    let box_ids = host.multi_box_ids_handle();
     let forwarder_pipeline = Arc::clone(&pipeline);
-    let forwarder_app = app.clone();
-    let task = tokio::spawn(run_multi_forwarder(
-        forwarder_app,
-        forwarder_pipeline,
-        box_ids,
-    ));
-    state.set_multi_forwarder(task).await;
+    host.set_multi_forwarder(spawn_forwarder(forwarder_pipeline, box_ids))
+        .await;
 
-    pipeline.start_all().await?;
+    if let Err(error) = pipeline.start_all().await {
+        // Bug-004: a failed start must leave the authoritative mode
+        // untouched, so the frontend keeps the previous hydration state.
+        tracing::warn!(error = %error, "multi-box start_all failed; session mode unchanged");
+        return Err(error.into());
+    }
+    // Multi-box sessions follow live semantics: record `live` only once the
+    // session is actually running.
+    host.set_current_mode(PipelineMode::LiveRegion);
+    Ok(pipeline.box_count())
+}
+
+/// Drives the multi-box session stop of [`stop_multi_realtime`].
+///
+/// Stops all box tasks, clears the session, and records the authoritative
+/// fallback mode: `single`, unless a single-box live task is still running
+/// or paused — in which case the recorded `live` mode is preserved so the
+/// concurrent single-box session is not overwritten.
+///
+/// # Errors
+///
+/// Returns an application error when `stop_all` fails (e.g. not running).
+async fn stop_multi_session<H>(host: &H, pipeline: &MultiBoxPipeline) -> Result<(), AppError>
+where
+    H: MultiBoxSessionHost + ?Sized,
+{
+    if let Err(error) = pipeline.stop_all().await {
+        tracing::warn!(error = %error, "failed to stop multi-box session");
+        return Err(error.into());
+    }
+    host.clear_multi_pipeline().await;
+    let single_live_running = host.live_task_is_running().await;
+    host.set_current_mode(mode_after_multi_stop(single_live_running));
+    Ok(())
+}
+
+/// Starts real-time translation for all configured boxes.
+///
+/// Rebuilds the multi-box pipeline from the current config, spawns a
+/// forwarder task that relays results and status changes to the frontend,
+/// and starts all box tasks. If a previous session was running, it is
+/// stopped first.
+///
+/// After `start_all` succeeds the authoritative session mode is recorded as
+/// `live` (multi-box sessions follow live semantics, see `AppStatus.mode`);
+/// a failed start leaves the recorded mode untouched.
+///
+/// # Errors
+///
+/// Returns an application error when the pipeline cannot be created or
+/// `start_all` fails (e.g. already running).
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn start_multi_realtime(state: State<'_, AppState>) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+    let forwarder_app = app.clone();
+    let box_count = start_multi_session(state.inner(), move |pipeline, box_ids| {
+        tokio::spawn(run_multi_forwarder(forwarder_app, pipeline, box_ids))
+    })
+    .await?;
 
     if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
         let _ = window.show();
     }
 
-    tracing::info!(
-        box_count = pipeline.box_count(),
-        "multi-box real-time started"
-    );
+    tracing::info!(box_count, "multi-box real-time started");
     Ok(())
 }
 
@@ -1301,6 +1430,11 @@ pub async fn start_multi_realtime(state: State<'_, AppState>) -> Result<(), AppE
 ///
 /// The pipeline and forwarder are cleared, the overlay is hidden, and a
 /// `Stopped` status is emitted for every box.
+///
+/// After the stop completes, the authoritative session mode falls back to
+/// `single` — unless a single-box live task is still running or paused, in
+/// which case the recorded `live` mode is preserved so the concurrent
+/// single-box session is not overwritten.
 ///
 /// # Errors
 ///
@@ -1313,8 +1447,7 @@ pub async fn stop_multi_realtime(state: State<'_, AppState>) -> Result<(), AppEr
     let pipeline = state.multi_pipeline().ok_or(PipelineError::NotRunning)?;
     let box_ids = state.multi_box_ids_snapshot();
 
-    pipeline.stop_all().await?;
-    state.clear_multi_pipeline().await;
+    stop_multi_session(state.inner(), &pipeline).await?;
 
     hide_region_overlay(&app);
 
@@ -1454,9 +1587,16 @@ pub fn invoke_handler<R: tauri::Runtime>(
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
     use vtrans_config::{ConfigError, ConfigManager};
-    use vtrans_core::{OcrLine, TranslationResult};
+    use vtrans_core::traits::{CaptureSource, OcrProvider, TranslationProvider};
+    use vtrans_core::{
+        CaptureError, CaptureSession, CapturedImage, OcrError, OcrLine, OcrOptions,
+        TranslationError, TranslationRequest, TranslationResult,
+    };
+    use vtrans_pipeline::{MultiBoxConfig, PipelineDeps};
 
     /// Isolated config directory for persistence tests, removed on drop.
     ///
@@ -1926,5 +2066,255 @@ mod tests {
         let back: TranslationBoxInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.box_id, 3);
         assert_eq!(back.color, "#FF6B6B");
+    }
+
+    // ── Multi-box session mode recording (Bug-004) ──
+
+    /// An in-memory [`MultiBoxSessionHost`] exercising the multi-box
+    /// session orchestration without Windows capture state or a Tauri
+    /// runtime.
+    struct MockMultiBoxHost {
+        mode: Mutex<PipelineMode>,
+        single_live_running: AtomicBool,
+        pipeline: std::sync::RwLock<Option<Arc<MultiBoxPipeline>>>,
+        /// A pipeline injected for the next orchestration, immune to
+        /// `clear_multi_pipeline`: seeding an already-started pipeline
+        /// makes the orchestrated `start_all` fail, which the failure test
+        /// needs.
+        seeded_pipeline: std::sync::RwLock<Option<Arc<MultiBoxPipeline>>>,
+        config: AppConfig,
+        box_ids: Arc<std::sync::RwLock<Vec<u32>>>,
+        forwarder_tasks: Mutex<Vec<JoinHandle<()>>>,
+    }
+
+    impl MockMultiBoxHost {
+        fn new() -> Self {
+            Self {
+                mode: Mutex::new(PipelineMode::SingleCapture),
+                single_live_running: AtomicBool::new(false),
+                pipeline: std::sync::RwLock::new(None),
+                seeded_pipeline: std::sync::RwLock::new(None),
+                config: AppConfig::default(),
+                box_ids: Arc::new(std::sync::RwLock::new(Vec::new())),
+                forwarder_tasks: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn mode(&self) -> PipelineMode {
+            *self.mode.lock().unwrap()
+        }
+
+        fn set_single_live_running(&self, running: bool) {
+            self.single_live_running.store(running, Ordering::Relaxed);
+        }
+
+        fn seed_pipeline(&self, pipeline: Arc<MultiBoxPipeline>) {
+            *self.seeded_pipeline.write().unwrap() = Some(pipeline);
+        }
+
+        fn pipeline(&self) -> Option<Arc<MultiBoxPipeline>> {
+            self.pipeline.read().unwrap().clone()
+        }
+
+        fn forwarder_count(&self) -> usize {
+            self.forwarder_tasks.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MultiBoxSessionHost for MockMultiBoxHost {
+        async fn clear_multi_pipeline(&self) {
+            for task in self.forwarder_tasks.lock().unwrap().drain(..) {
+                task.abort();
+            }
+            *self.pipeline.write().unwrap() = None;
+            self.box_ids.write().unwrap().clear();
+        }
+
+        fn ensure_multi_pipeline(&self) -> Result<Arc<MultiBoxPipeline>, AppError> {
+            if let Some(pipeline) = self.seeded_pipeline.read().unwrap().as_ref() {
+                return Ok(Arc::clone(pipeline));
+            }
+            if let Some(pipeline) = self.pipeline.read().unwrap().as_ref() {
+                return Ok(Arc::clone(pipeline));
+            }
+            let pipeline = Arc::new(MultiBoxPipeline::new(
+                MultiBoxConfig::with_max_boxes(
+                    250,
+                    0.03,
+                    OcrOptions::default(),
+                    TranslationRequest::new("", Language::Auto, Language::ChineseSimplified),
+                    8,
+                ),
+                PipelineDeps::new(
+                    Box::new(MockCaptureSource),
+                    Box::new(MockOcrProvider),
+                    Box::new(MockTranslationProvider),
+                ),
+            ));
+            *self.pipeline.write().unwrap() = Some(Arc::clone(&pipeline));
+            Ok(pipeline)
+        }
+
+        fn load_config(&self) -> Result<AppConfig, AppError> {
+            Ok(self.config.clone())
+        }
+
+        fn add_multi_box_id(&self, box_id: u32) {
+            let mut ids = self.box_ids.write().unwrap();
+            if !ids.contains(&box_id) {
+                ids.push(box_id);
+            }
+        }
+
+        fn multi_box_ids_handle(&self) -> Arc<std::sync::RwLock<Vec<u32>>> {
+            Arc::clone(&self.box_ids)
+        }
+
+        async fn set_multi_forwarder(&self, task: JoinHandle<()>) {
+            self.forwarder_tasks.lock().unwrap().push(task);
+        }
+
+        async fn live_task_is_running(&self) -> bool {
+            self.single_live_running.load(Ordering::Relaxed)
+        }
+
+        fn set_current_mode(&self, mode: PipelineMode) {
+            *self.mode.lock().unwrap() = mode;
+        }
+    }
+
+    /// A capture source that never captures: the session-mode tests never
+    /// start a box task against real capture state, so the stub only has
+    /// to exist.
+    struct MockCaptureSource;
+
+    #[async_trait::async_trait]
+    impl CaptureSource for MockCaptureSource {
+        async fn capture_once(
+            &self,
+            _region: &ScreenRegion,
+        ) -> Result<CapturedImage, CaptureError> {
+            Err(CaptureError::InitFailed(
+                "mock capture disabled".to_string(),
+            ))
+        }
+
+        async fn start_session(
+            &self,
+            _region: &ScreenRegion,
+        ) -> Result<Box<dyn CaptureSession>, CaptureError> {
+            Err(CaptureError::InitFailed(
+                "mock capture disabled".to_string(),
+            ))
+        }
+    }
+
+    /// An OCR provider stub that never runs inference; see
+    /// [`MockCaptureSource`].
+    struct MockOcrProvider;
+
+    #[async_trait::async_trait]
+    impl OcrProvider for MockOcrProvider {
+        fn id(&self) -> &'static str {
+            "mock-ocr"
+        }
+
+        async fn recognize(
+            &self,
+            _image: &CapturedImage,
+            _region: &ScreenRegion,
+            _options: &OcrOptions,
+            _cancel: CancellationToken,
+        ) -> Result<OcrResult, OcrError> {
+            Err(OcrError::Inference("mock ocr disabled".to_string()))
+        }
+
+        fn supported_languages(&self) -> &[Language] {
+            &[Language::English]
+        }
+    }
+
+    /// A translation provider stub that never translates; see
+    /// [`MockCaptureSource`].
+    struct MockTranslationProvider;
+
+    #[async_trait::async_trait]
+    impl TranslationProvider for MockTranslationProvider {
+        fn id(&self) -> &'static str {
+            "mock-translation"
+        }
+
+        async fn translate(
+            &self,
+            _request: &TranslationRequest,
+            _cancel: CancellationToken,
+        ) -> Result<TranslationResult, TranslationError> {
+            Err(TranslationError::Inference(
+                "mock translation disabled".to_string(),
+            ))
+        }
+
+        fn supported_pairs(&self) -> &[(Language, Language)] {
+            &[(Language::English, Language::ChineseSimplified)]
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_start_records_live_mode_after_start_all() {
+        let host = MockMultiBoxHost::new();
+        let box_count = start_multi_session(&host, |_, _| tokio::spawn(async {}))
+            .await
+            .unwrap();
+        assert_eq!(box_count, 0);
+        assert_eq!(host.mode(), PipelineMode::LiveRegion);
+        assert_eq!(host.forwarder_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_stop_falls_back_to_single_without_single_live() {
+        let host = MockMultiBoxHost::new();
+        start_multi_session(&host, |_, _| tokio::spawn(async {}))
+            .await
+            .unwrap();
+        let pipeline = host.pipeline().expect("multi-box session is running");
+
+        stop_multi_session(&host, &pipeline).await.unwrap();
+        assert_eq!(host.mode(), PipelineMode::SingleCapture);
+        assert!(host.pipeline().is_none(), "stop clears the session");
+    }
+
+    #[tokio::test]
+    async fn multi_stop_preserves_live_mode_with_concurrent_single_live() {
+        let host = MockMultiBoxHost::new();
+        start_multi_session(&host, |_, _| tokio::spawn(async {}))
+            .await
+            .unwrap();
+        host.set_single_live_running(true);
+        let pipeline = host.pipeline().expect("multi-box session is running");
+
+        stop_multi_session(&host, &pipeline).await.unwrap();
+        assert_eq!(host.mode(), PipelineMode::LiveRegion);
+    }
+
+    #[tokio::test]
+    async fn failed_multi_start_leaves_mode_unchanged() {
+        let host = MockMultiBoxHost::new();
+        // A pipeline started before the orchestration makes the
+        // orchestrated `start_all` fail with `AlreadyRunning`; the
+        // pre-existing mode must survive the failed start.
+        let pipeline = host.ensure_multi_pipeline().unwrap();
+        pipeline.start_all().await.unwrap();
+        host.seed_pipeline(Arc::clone(&pipeline));
+        host.set_current_mode(PipelineMode::SingleCapture);
+
+        let error = start_multi_session(&host, |_, _| tokio::spawn(async {}))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Pipeline(PipelineError::AlreadyRunning)
+        ));
+        assert_eq!(host.mode(), PipelineMode::SingleCapture);
     }
 }
