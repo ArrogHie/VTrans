@@ -123,7 +123,28 @@ Review：范围仅 src/（10 文件）；pnpm 282 测试（39 文件）+ tsc 通
 
 - [x] 功能已整合：5 个模块分支 + 后续迭代 F1/F2/D1 + 两轮 UI 缺陷修复（B1-B3、B2-1..4）全部合并入 main（当前 e781c40），零冲突
 - [x] 原文缺口、文档同步、两轮共 7 处 UI/交互缺陷均已闭环
-- [ ] 功能关闭前置：GUI 手工冒烟（遗留 5）通过 + 用户推送 main（遗留 4）后，置「已验收 / 已关闭」
+- [x] 功能关闭前置之 GUI 手工冒烟：已于 2026-08-14 第三轮缺陷修复冒烟中通过（A1-A3 / B1-B4 / C1-C3 / D1-D2 全部符合预期，用户确认「正常」）；遗留 4（推送 main）由用户授权执行中
+
+## 第三轮缺陷修复整合（2026-08-14，用户 bug 报告：窗口隐藏 / 状态同步 / 自捕获排除）
+
+| Bug | 描述 | 修复分支（合并提交） | 门禁与验证 |
+|-----|------|---------------------|-----------|
+| Bug-004 | 悬浮球与主页面「实时翻译」状态不同步 | fix/11-floater-live-sync（9425647）+ fix/10-multibox-status-snapshot（2fa4226） | 各分支 fmt/clippy/test 全绿；GUI 冒烟 B1-B4 通过 |
+| Bug-005 | 框选期间未隐藏 VTrans 自身窗口 | fix/10-hide-windows-on-selection（5b87f03） | 门禁全绿；GUI 冒烟 A1-A3 通过 |
+| Bug-006 | 翻译框捕获 VTrans 自身窗口 | fix/10-window-capture-exclusion（5749f64）+ fix/11-overlay-border-outside（58432d6）+ fix/04-wgc-wda-verification（4698999） | 门禁全绿；WDA 实机验证 + GUI 冒烟 C1-C3 通过 |
+
+要点：
+
+- Bug-005：框选开始隐藏 main/result/floater（快照「框选前可见集合」）；取消/超时立即恢复；确认成功延迟到
+  `capture_once` / `start_live_translation` / `add_translation_box` / `update_translation_box` 完成后恢复（成败都恢复）；
+  floater 恢复受 `floating_ball.enabled` 约束；连续框选不覆盖首次快照。
+- Bug-004：前端新增纯前端事件 `frontend_multibox_started/stopped` 广播多框会话状态；悬浮球运行态 = 单框 live ∪
+  任一框 Running（共享推导函数，无复制逻辑），按钮与主页面统一驱动多框；后端 `start/stop_multi_realtime` 同步
+  `current_mode`（停止时并发单框 live 保护，`mode_after_multi_stop` 纯函数）。
+- Bug-006：`WDA_EXCLUDEFROMCAPTURE` 实机验证对 WGC 显示器捕获**生效**（wda_probe：红色窗口 398‰→0‰、露出背景）；
+  main/result/floater 设置 WDA 排除捕获；overlay 描边外移出捕获区域（区域贴屏边时该侧描边内缩，已知限制 18）。
+  副作用：VTrans 窗口在一切第三方捕获（含用户截图工具）中不可见——用户已接受该权衡。
+- 数量：前端测试 312（+30）、vtrans-app 108+14、vtrans-capture 55；六分支合并零冲突；未触碰 vtrans-core（冻结契约）。
 
 ## 附：合并后 main 状态
 
