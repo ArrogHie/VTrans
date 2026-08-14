@@ -22,6 +22,7 @@ use vtrans_translation::{
 };
 
 use crate::error::AppError;
+use crate::window_visibility::SelectionVisibilityState;
 
 /// The `model_id` used for translation provider loading progress events.
 ///
@@ -188,6 +189,14 @@ pub struct AppState {
     /// pipeline. Shared with the forwarder task so dynamically
     /// added/removed boxes are polled for status changes.
     pub(crate) multi_box_ids: Arc<std::sync::RwLock<Vec<u32>>>,
+
+    /// Pre-selection visibility snapshot of the main/result/floater windows.
+    ///
+    /// Recorded when a region selection starts (first snapshot wins) and
+    /// consumed by the restore after a follow-up action completes, or
+    /// immediately when the selection is aborted. The lifecycle decisions
+    /// live in the pure state machine `window_visibility::SelectionVisibilityState`.
+    selection_visibility: SelectionVisibilityState,
 }
 
 impl AppState {
@@ -263,6 +272,7 @@ impl AppState {
             multi_pipeline: std::sync::RwLock::new(None),
             multi_forwarder: Mutex::new(None),
             multi_box_ids: Arc::new(std::sync::RwLock::new(Vec::new())),
+            selection_visibility: SelectionVisibilityState::new(),
         })
     }
 
@@ -708,6 +718,15 @@ impl AppState {
     #[must_use]
     pub(crate) fn multi_box_ids_handle(&self) -> Arc<std::sync::RwLock<Vec<u32>>> {
         Arc::clone(&self.multi_box_ids)
+    }
+
+    /// Returns the pre-selection window visibility state machine.
+    ///
+    /// Commands feed selection lifecycle transitions into it and execute the
+    /// returned window action; see `window_visibility` for the contract.
+    #[must_use]
+    pub(crate) fn selection_visibility(&self) -> &SelectionVisibilityState {
+        &self.selection_visibility
     }
 }
 
