@@ -13,6 +13,7 @@ pub mod overlay;
 pub mod setup;
 pub mod state;
 pub mod tray;
+pub mod window_exclusion;
 pub mod window_visibility;
 
 pub use commands::{LiveTranslationConfig, TranslationBoxInfo};

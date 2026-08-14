@@ -5707,6 +5707,7 @@ dependencies = [
  "vtrans-pipeline",
  "vtrans-security",
  "vtrans-translation",
+ "windows 0.61.3",
 ]
 
 [[package]]
