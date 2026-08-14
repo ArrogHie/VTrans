@@ -115,3 +115,5 @@ crates/vtrans-capture/
 - HDR 屏幕需正确转换为 8-bit SDR
 - 窗口最小化、锁屏、显示器断开时暂停或安全重建会话
 - 所有 unsafe 代码块必须有 // SAFETY: 注释
+- **WGC 显示器级捕获包含桌面合成的一切窗口，无逐窗口排除 API**：本项目使用 `GraphicsCaptureItem::CreateForMonitor` 的显示器级捕获，桌面上合成的一切窗口（含 VTrans 自身的叠加层/结果窗口）都会进入捕获帧，不存在"排除某窗口"的参数。落入捕获区域的 VTrans 自身窗口会出现在帧中，需配合其他手段排除（见下一条）。
+- **WDA_EXCLUDEFROMCAPTURE 与 WGC 显示器捕获的交互（2026-08-14 实机验证）**：`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` **会被本项目使用的 WGC 显示器级捕获尊重**——被标记窗口从捕获帧中完全消失，帧中该区域露出其背后的桌面内容（而非黑块）。验证方式：`cargo run -p vtrans-capture --example wda_probe`（Windows 11 桌面，2880x1800@200%；探针在无 WDA 时捕获到 398‰ 红色像素，设置 WDA 后两次捕获均为 0‰，且 `GetWindowDisplayAffinity` 回读确认）。据此，组合方案中"用 WDA 排除 VTrans 自身窗口"的系统级手段在本机环境有效；该行为依赖系统版本（Win10 2004+），换机或系统大版本升级后应重跑探针复核。

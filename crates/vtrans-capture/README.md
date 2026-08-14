@@ -144,6 +144,8 @@ serde 表示：`ScreenRegion` 可序列化为 JSON 且字段名与结构体一�
 | 待后续 Phase | HDR 精确颜色转换 | 帧池固定请求 `B8G8R8A8UIntNormalized`，由系统转换为 8-bit SDR |
 | 待后续 Phase | `MonitorInfo` serde 支持 | 应用层自行转换后再通过 IPC 发送 |
 | 设计使然 | 仅支持 Windows | 平台代码全部限制在本 crate，其他平台由应用层降级 |
+| 设计使然 | WGC 显示器级捕获包含桌面合成的一切窗口（含 VTrans 自身），无逐窗口排除 API | 系统级用 `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` 标记自身窗口；实测（2026-08-14，Windows 11）该标记被本 crate 的显示器级捕获尊重，窗口从捕获帧中消失并露出背景，复测方式见 `examples/wda_probe.rs` |
+| 平台相关 | `WDA_EXCLUDEFROMCAPTURE` 依赖系统版本（Win10 2004+），不同版本行为有矛盾记载 | 上线前或换机后运行 `cargo run -p vtrans-capture --example wda_probe` 实机复核，勿凭文档臆断 |
 | 设计使然 | 构造时枚举显示器一次 | 热插拔后重新创建 `WindowsCaptureSource` |
 | 设计使然 | 静态屏幕复用缓存帧 | 30 秒上限并配合消费方去重 |
 | 设计使然 | 全帧复制到 CPU 后再裁剪 | 超大显示器开销较高，后续可评估 GPU 裁剪 |
@@ -156,6 +158,7 @@ cargo test -p vtrans-capture
 cargo clippy -p vtrans-capture --all-targets -- -D warnings
 cargo fmt -p vtrans-capture -- --check
 cargo run -p vtrans-capture --example capture_demo
+cargo run -p vtrans-capture --example wda_probe
 ```
 
 `tests/capture_integration.rs` 会真实枚举显示器、截取小区域并验证会话停止语义，需要交互式 Windows 桌面会话；纯逻辑测试在无桌面环境也能通过。
