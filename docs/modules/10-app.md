@@ -115,6 +115,8 @@ pub struct AppState {
     multi_pipeline: RwLock<Option<Arc<MultiBoxPipeline>>>, // 懒初始化
     multi_forwarder: Mutex<Option<JoinHandle<()>>>,        // 结果/状态 forwarder task
     multi_box_ids: Arc<RwLock<Vec<u32>>>,                  // 注册框 id（供状态轮询）
+    // ── 框选窗口可见性 ──
+    selection_visibility: SelectionVisibilityState, // 框选前可见快照（首次优先，恢复即清）
 }
 
 impl AppState {
@@ -193,6 +195,29 @@ pub fn register_hotkeys(app: &AppHandle) -> Result<(), AppError>;
 - 关闭主窗口 → 隐藏到系统托盘（进程、实时会话、全局快捷键继续运行）；
 - 托盘左键 / 菜单「显示主窗口」→ 恢复主窗口；菜单「退出」→ `app.exit(0)`；
 - 单实例插件拦截第二个进程实例并恢复已有实例主窗口。
+
+### 框选期间的窗口隐藏与恢复（Bug-005）
+
+框选开始到后续动作完成之间，屏幕应只保留透明选区窗口（selector），
+main/result/floater 不得遮挡或混入被框选内容。生命周期契约（实现于
+`window_visibility.rs`，决策集中在纯函数/纯状态机，均有单测）：
+
+- **框选开始**（`select_region` 进入时）：隐藏 main/result/floater 中当前
+  可见的窗口，并记录「框选前可见集合」快照。已有未恢复快照时**保留首次
+  快照、不覆盖**（避免恢复时丢失窗口），但仍隐藏此刻可见的窗口。
+- **立即恢复**：框选取消（`cancel_region_selection`）、超时、selector 不可用
+  等失败路径调用 `restore_app_windows_immediately`。
+- **延迟恢复**：框选成功后保持隐藏，直到后续动作命令完成——`capture_once`、
+  `start_live_translation`、`add_translation_box`、`update_translation_box`
+  的包装函数在**成功与失败**后都调用 `restore_app_windows_after_follow_up`
+  （恢复后清空快照）。`start_live_translation` 同时被「恢复/热键 R」路径
+  调用：仅当存在未恢复快照时才恢复，无快照时为 no-op，不影响正常启停。
+- **恢复规则**：只恢复快照中记录的窗口；floater 额外受
+  `floating_ball.enabled` 配置约束（配置禁用则不恢复显示）；result / main
+  仅当快照中可见才恢复（`PreSelectionVisibility::restore_plan` 纯函数）。
+- **容错**：窗口可见性查询失败按「不可见」处理；hide/show 失败仅 `warn!`
+  记录，不破坏框选主流程；不新增 IPC 命令，全部为 AppHandle 内部窗口调用。
+- selector/overlay 显隐逻辑不受本机制影响（overlay_intent 等既有逻辑不变）。
 
 ### 选区 overlay
 
@@ -344,6 +369,7 @@ crates/vtrans-app/
 | 快捷键注册 | 手工验证 | 依赖真实全局快捷键注册环境（README 第 5 条）；动作分派枚举有单测 |
 | 托盘与窗口生命周期 | 手工验证 | 依赖系统托盘与真实窗口环境（README 第 9 条）；菜单 id 与事件名有单测 |
 | 选区 overlay | 手工验证 + 单元 | 依赖真实显示器（README 第 10 条）；显隐决策纯函数（单次确认不显示/实时启动显示/实时停止隐藏/暂停保留）与坐标换算有单测 |
+| 框选窗口隐藏/恢复 | 手工验证 + 单元 | 真实窗口显隐登记 README 手工验证项 15；快照状态机（首次优先/立即恢复/延迟恢复）与恢复计划纯函数有单测（window_visibility.rs tests）✅ |
 | 单实例保护 | 手工验证 | 依赖进程级行为（README 第 11 条） |
 | Debug 模式开关 | 单元 | `parse_debug_env_value` 值域解析（setup.rs tests）✅ |
 | 缩略图编码 | 单元 | 尺寸缩放/JPEG 有效/格式与缓冲校验（debug_frame.rs tests）✅ |
@@ -504,6 +530,27 @@ Provider 与配置 id 一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
 - [x] 单框链路（capture_once / live / 热键）与设置、provider、托盘、悬浮球
       回归无变化
 - [x] 未修改 vtrans-core 与其它 crate；README 与本文档同步
+
+### 框选窗口隐藏/恢复验收（Bug-005）
+
+- [x] 框选开始（`select_region` 进入）隐藏 main/result/floater 中当前可见
+      窗口并记录「框选前可见集合」快照；已有未恢复快照时保留首次快照
+- [x] 立即恢复：取消（`cancel_region_selection`）、超时、selector 不可用
+      等失败路径调用 `restore_app_windows_immediately`
+- [x] 延迟恢复：`capture_once` / `start_live_translation` /
+      `add_translation_box` / `update_translation_box` 包装函数在成功与失败
+      后均调用 `restore_app_windows_after_follow_up`；恢复后清空快照
+- [x] `start_live_translation` 被「恢复/热键 R」路径调用时仅在有未恢复
+      快照时才恢复，不影响正常启停（无快照 no-op）
+- [x] 恢复规则：只恢复快照中窗口；floater 受 `floating_ball.enabled`
+      约束；result/main 仅当快照可见才恢复（`restore_plan` 纯函数）
+- [x] 决策与窗口 API 分离：纯状态机 `SelectionVisibilityState` +
+      `restore_plan`（window_visibility.rs tests 覆盖五个要求场景）；窗口
+      操作失败容忍并 `warn!`，不破坏框选主流程
+- [x] selector/overlay 显隐逻辑保持不变；不新增 IPC 命令；窗口操作均为
+      AppHandle 内部调用
+- [x] 真实桌面显隐登记 README 手工验证项 15；回归：fmt / clippy / app
+      单测 / workspace check 全绿；未修改其他 crate 与 vtrans-core
 
 ## 开发注意事项
 

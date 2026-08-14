@@ -28,6 +28,10 @@ use crate::state::AppStatus;
 use crate::state::{
     store_api_key, store_provider_credentials, validate_translation_provider_id, AppState,
 };
+use crate::window_visibility::{
+    hide_app_windows_for_selection, restore_app_windows_after_follow_up,
+    restore_app_windows_immediately, VisibilityTransition,
+};
 
 /// Input accepted by `start_live_translation`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +139,11 @@ const MAX_API_KEY_LEN: usize = 4096;
 ///
 /// The frontend completes the pending request by calling `update_live_region`.
 ///
+/// While the selector covers the screen, the `main`, `result`, and `floater`
+/// windows are hidden so they cannot cover or leak into the selection; they
+/// are restored after the follow-up capture/live command completes, or
+/// immediately when the selection is cancelled.
+///
 /// # Errors
 ///
 /// Returns an application error when the selector is unavailable, another
@@ -146,13 +155,23 @@ pub async fn start_region_selection(state: State<'_, AppState>) -> Result<Screen
     select_region(app, state.inner()).await
 }
 
+/// Shared selection driver used by commands and the select hotkey.
+///
+/// See [`start_region_selection`] for the window-visibility contract: the
+/// application windows hidden here are restored by the follow-up action
+/// commands ([`capture_once`], [`start_live_translation`],
+/// [`add_translation_box`], [`update_translation_box`]) on success and
+/// failure alike; cancel, timeout, and selector failures restore them
+/// immediately.
 pub(crate) async fn select_region(
     app: AppHandle,
     state: &AppState,
 ) -> Result<ScreenRegion, AppError> {
     let receiver = state.begin_region_selection().await?;
+    hide_app_windows_for_selection(&app, state);
     let Some(window) = app.get_webview_window("selector") else {
         state.cancel_region_selection().await;
+        restore_app_windows_immediately(&app, state);
         tracing::warn!("selector window is not configured");
         return Err(AppError::NotInitialized);
     };
@@ -160,23 +179,39 @@ pub(crate) async fn select_region(
     hide_region_overlay(&app);
     if let Err(error) = window.show().and_then(|()| window.set_focus()) {
         state.cancel_region_selection().await;
+        restore_app_windows_immediately(&app, state);
         return Err(AppError::Tauri(error.to_string()));
     }
     match timeout(Duration::from_secs(300), receiver).await {
         Ok(Ok(region)) => {
             let _ = window.hide();
+            // Keep the app windows hidden: a follow-up action command
+            // restores them once the screen no longer needs to stay clear.
+            // `SelectionSucceeded` always yields `KeepHidden`; the snapshot
+            // itself remains pending.
+            let _ = state
+                .selection_visibility()
+                .apply(VisibilityTransition::SelectionSucceeded);
             Ok(region)
         }
-        Ok(Err(_)) => Err(AppError::NotInitialized),
+        Ok(Err(_)) => {
+            restore_app_windows_immediately(&app, state);
+            Err(AppError::NotInitialized)
+        }
         Err(_) => {
             state.cancel_region_selection().await;
             let _ = window.hide();
+            restore_app_windows_immediately(&app, state);
             Err(AppError::Tauri("region selection timed out".to_string()))
         }
     }
 }
 
 /// Cancels the pending region selection and hides the selector window.
+///
+/// The application windows hidden by the selection are restored immediately:
+/// a cancelled selection has no follow-up capture/live command to restore
+/// them later.
 ///
 /// # Errors
 ///
@@ -192,6 +227,7 @@ pub async fn cancel_region_selection(state: State<'_, AppState>) -> Result<(), A
             .map_err(|error| AppError::Tauri(error.to_string()))?;
     }
     hide_region_overlay(&app);
+    restore_app_windows_immediately(&app, state.inner());
     Ok(())
 }
 
@@ -200,6 +236,10 @@ pub async fn cancel_region_selection(state: State<'_, AppState>) -> Result<(), A
 /// Stage events (`ocr_started`, `translation_started`, ...) are forwarded to
 /// the frontend while the pipeline runs so single captures can show progress;
 /// the command still returns the final [`OcrResult`] as its only payload.
+///
+/// When the capture follows a region selection, the application windows
+/// hidden during the selection are restored here, on success and failure
+/// alike.
 ///
 /// # Errors
 ///
@@ -212,6 +252,23 @@ pub async fn capture_once(
     state: State<'_, AppState>,
 ) -> Result<OcrResult, AppError> {
     let app = state.app_handle()?;
+    let result = run_single_capture(app.clone(), state.inner(), region).await;
+    // A successful selection keeps the app windows hidden until the capture
+    // finishes; restore them now, on success and failure alike. Without a
+    // pending selection snapshot this is a no-op.
+    restore_app_windows_after_follow_up(&app, state.inner());
+    result
+}
+
+/// Drives the single-capture pipeline pass of [`capture_once`].
+///
+/// Kept separate so the window restore in [`capture_once`] runs
+/// unconditionally, whatever this helper returns.
+async fn run_single_capture(
+    app: AppHandle,
+    state: &AppState,
+    region: ScreenRegion,
+) -> Result<OcrResult, AppError> {
     // A single capture never shows the persistent marker: hide it on entry
     // (defensive against a stale selector or hotkey path) and record the
     // single mode for hydration. The final hide below also covers failures.
@@ -349,8 +406,27 @@ pub async fn start_live_translation(
 }
 
 /// Shared live task starter used by both commands and global shortcuts.
+///
+/// When the start follows a region selection (live mode), the application
+/// windows hidden during the selection are restored here, on success and
+/// failure alike. Starts from other paths (resume hotkey, pause resume)
+/// have no pending snapshot and are unaffected.
 pub(crate) async fn start_live_task(
     app: AppHandle,
+    state: &AppState,
+    config: LiveTranslationConfig,
+) -> Result<(), AppError> {
+    let result = start_live_inner(&app, state, config).await;
+    restore_app_windows_after_follow_up(&app, state);
+    result
+}
+
+/// Drives the live task startup of [`start_live_task`].
+///
+/// Kept separate so the window restore in [`start_live_task`] runs
+/// unconditionally, whatever this helper returns.
+async fn start_live_inner(
+    app: &AppHandle,
     state: &AppState,
     config: LiveTranslationConfig,
 ) -> Result<(), AppError> {
@@ -365,7 +441,7 @@ pub(crate) async fn start_live_task(
     // so the calls converge on an identical window placement.
     state.set_current_mode(PipelineMode::LiveRegion);
     apply_overlay(
-        &app,
+        app,
         overlay_intent(OverlayEvent::LiveStarted),
         Some(&config.region),
     );
@@ -384,7 +460,7 @@ pub(crate) async fn start_live_task(
     )?;
     let pipeline = state.set_pipeline(pipeline);
     let (event_tx, event_rx) = mpsc::channel(32);
-    let task = tokio::spawn(run_live_task(app, pipeline, event_tx, event_rx));
+    let task = tokio::spawn(run_live_task(app.clone(), pipeline, event_tx, event_rx));
     *state.live_task.lock().await = Some(task);
     tracing::info!("live translation started");
     Ok(())
@@ -989,6 +1065,10 @@ pub async fn get_app_status(state: State<'_, AppState>) -> Result<AppStatus, App
 /// count reaches the warning threshold, a `multibox://warning` event is
 /// emitted (non-blocking).
 ///
+/// When the add follows a region selection (frontend add-box flow), the
+/// application windows hidden during the selection are restored here, on
+/// success and failure alike.
+///
 /// # Errors
 ///
 /// Returns an application error when the region is invalid, the pipeline
@@ -1001,6 +1081,20 @@ pub async fn add_translation_box(
     state: State<'_, AppState>,
 ) -> Result<TranslationBoxInfo, AppError> {
     let app = state.app_handle()?;
+    let result = add_translation_box_inner(&app, state.inner(), region).await;
+    restore_app_windows_after_follow_up(&app, state.inner());
+    result
+}
+
+/// Drives the multi-box add of [`add_translation_box`].
+///
+/// Kept separate so the window restore in [`add_translation_box`] runs
+/// unconditionally, whatever this helper returns.
+async fn add_translation_box_inner(
+    app: &AppHandle,
+    state: &AppState,
+    region: ScreenRegion,
+) -> Result<TranslationBoxInfo, AppError> {
     region.validate().map_err(AppError::from)?;
 
     // Add to config (computes id and color from the current snapshot).
@@ -1018,11 +1112,11 @@ pub async fn add_translation_box(
     pipeline.add_box(translation_box).await?;
 
     state.add_multi_box_id(box_config.id);
-    emit_multibox_box_added(&app, box_config.id, &box_config.color, &box_config.region);
+    emit_multibox_box_added(app, box_config.id, &box_config.color, &box_config.region);
 
     let count = u32::try_from(config.translation_boxes.len()).unwrap_or(u32::MAX);
     if config.warning_threshold > 0 && count >= config.warning_threshold {
-        emit_multibox_warning(&app, count, config.max_boxes);
+        emit_multibox_warning(app, count, config.max_boxes);
     }
 
     tracing::info!(box_id = box_config.id, "translation box added");
@@ -1072,6 +1166,10 @@ pub async fn remove_translation_box(
 /// region. The config entry is updated and a `multibox://box-updated`
 /// event is emitted.
 ///
+/// When the update follows a region selection (frontend edit-box flow), the
+/// application windows hidden during the selection are restored here, on
+/// success and failure alike.
+///
 /// # Errors
 ///
 /// Returns an application error when the region is invalid or a pipeline
@@ -1084,6 +1182,21 @@ pub async fn update_translation_box(
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
     let app = state.app_handle()?;
+    let result = update_translation_box_inner(&app, state.inner(), box_id, region).await;
+    restore_app_windows_after_follow_up(&app, state.inner());
+    result
+}
+
+/// Drives the multi-box region update of [`update_translation_box`].
+///
+/// Kept separate so the window restore in [`update_translation_box`] runs
+/// unconditionally, whatever this helper returns.
+async fn update_translation_box_inner(
+    app: &AppHandle,
+    state: &AppState,
+    box_id: u32,
+    region: ScreenRegion,
+) -> Result<(), AppError> {
     region.validate().map_err(AppError::from)?;
 
     if let Some(pipeline) = state.multi_pipeline() {
@@ -1098,7 +1211,7 @@ pub async fn update_translation_box(
         update_box_config_region(cfg, box_id, region.clone());
     })?;
 
-    emit_multibox_box_updated(&app, box_id, &region);
+    emit_multibox_box_updated(app, box_id, &region);
 
     tracing::info!(box_id, "translation box region updated");
     Ok(())
