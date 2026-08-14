@@ -11,13 +11,20 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
   水合 `get_app_config`，重启后保持用户保存值，不依赖主窗口。
 - 悬浮球（默认关闭）：可拖动、位置记忆，点击展开框选翻译/实时翻译/暂停继续/打开主窗口
   菜单；支持透明度（0.3–1.0）与直径（32–72px）外观调节，即时生效并持久化。
+- 悬浮球与主窗口共享同一实时会话：任一翻译框运行中时悬浮球显示
+  「停止实时翻译」并可停止多框会话；未运行且已配置翻译框时点击「实时翻译」
+  直接启动多框会话，未配置翻译框时沿用单框框选启动；暂停·继续只作用于
+  单框实时会话（多框运行中禁用）。单框实时的全局热键（Alt+Shift+R/S）
+  语义不变。
 - 通过拖动框选生成物理像素坐标的 `ScreenRegion`。
 - 监听后端 pipeline/model 事件，并在多个 Tauri WebView 间同步结果和实时会话状态。
 - 展示 OCR 原文和翻译结果，支持重新翻译、暂停/继续、置顶和窗口拖动。
 - 多框实时翻译：主窗口提供翻译框列表（颜色色块 + 编号 + 运行/停止/错误状态 +
   编辑/删除按钮，不显示坐标/大小/形状信息）与「新增翻译框」；多框会话由
   live 模式底部「开始实时」「停止」按钮统一启停（无框或已有框运行中时
-  「开始实时」禁用，无框运行中时「停止」禁用）；翻译弹窗按框由上到下堆叠
+  「开始实时」禁用，无框运行中时「停止」禁用）；会话运行态经
+  `frontend_multibox_started` / `frontend_multibox_stopped` 纯前端事件同步到
+  全部窗口，悬浮球据此与主窗口显示同一多框会话状态；翻译弹窗按框由上到下堆叠
   展示结果（每框以各自颜色的 border 包裹，
   框间用分隔线分隔，整体可滚动）；每框展示该框的 OCR 原文与译文——原文为
   次级色小字、位于译文上方，原文为空时不渲染原文区域（不留空占位），译文
@@ -118,10 +125,18 @@ export interface BoxedTranslationResult {
 }
 export function isBoxError(status: BoxStatus): status is { Error: string };
 export function boxStatusLabel(status: BoxStatus): string;      // 运行中/已停止/错误
+export function isAnyBoxRunning(statuses: Record<number, BoxStatus>): boolean;
+export function isSingleLiveRunning(mode: Mode, liveConfig: PipelineConfig | null): boolean;
 export function isMultiBoxEngaged(statuses, resultCount): boolean;
 export function shouldWarnBoxCount(count, threshold): boolean;
 export function boxCountWarningText(threshold): string;
 ```
+
+`isAnyBoxRunning` 是「任一多框框运行中」的共享推导，主窗口 live 模式底部
+启停按钮与悬浮球菜单共用（禁止复制逻辑）；`isSingleLiveRunning` 是单框实时
+会话（live 模式 + liveConfig 存在，含暂停中）的共享推导，悬浮球的
+「停止实时翻译」按钮取两者或（多框优先），「暂停·继续」只在
+`isSingleLiveRunning` 且无框运行时可用。
 
 `AppConfig` 新增 `translation_boxes`（`TranslationBoxConfigEntry[]`，配置 schema
 字段名为 `id` 而非 `box_id`）、`max_boxes` 与 `warning_threshold`，
@@ -180,6 +195,23 @@ export function listenToFrontendFloaterEnabled(
 ): Promise<Unlisten>;
 ```
 
+多框会话状态事件（纯前端内部事件，不经过 Rust）：`startMultiBox` /
+`stopMultiBox` 在后端命令成功后才发布，payload 为会话框 id 列表，所有窗口
+据此把对应框的 `boxStatuses` 镜像为 `"Running"` / `"Stopped"`——悬浮球与主
+窗口因此共享同一多框运行态（失败路径不发布任何假状态）：
+
+```ts
+export const FRONTEND_MULTIBOX_STARTED = "frontend_multibox_started";
+export const FRONTEND_MULTIBOX_STOPPED = "frontend_multibox_stopped";
+export interface FrontendMultiBoxSessionPayload { box_ids: number[]; }
+export function listenToFrontendMultiBoxStarted(
+  callback: (payload: FrontendMultiBoxSessionPayload) => void,
+): Promise<Unlisten>;
+export function listenToFrontendMultiBoxStopped(
+  callback: (payload: FrontendMultiBoxSessionPayload) => void,
+): Promise<Unlisten>;
+```
+
 ### 翻译动作服务（主窗口与悬浮球共用）
 
 ```ts
@@ -190,6 +222,11 @@ export function toggleLivePause(): Promise<TranslateActionResult>;
 export function stopLive(): Promise<TranslateActionResult>;
 export function toggleLiveFromFloater(): Promise<TranslateActionResult>;
 ```
+
+`toggleLiveFromFloater` 的悬浮球语义：多框有框 Running → `stopMultiBox()`；
+单框实时运行中 → `stopLive()`；未运行且已配置翻译框 → `startMultiBox()`；
+未运行且无框 → 沿用单框路径（有选区则 `startLive()`，否则
+`selectRegionForLive()` 先框选）。
 
 ### 外观与浮球工具
 
@@ -252,6 +289,14 @@ interface AppState {
 下拉框并显示进度反馈（spinner + `model_loading_progress` 事件驱动的百分比），
 `finally` 中复位；失败走既有 `setStatus({ error })` 路径并恢复可用态。
 切换开始时清空 `modelProgress`，避免命中缓存时闪烁上次残留的百分比。
+
+`setBoxesStatus(boxIds, status)` 批量镜像多框会话状态（
+`frontend_multibox_started` / `frontend_multibox_stopped` 事件与
+`startMultiBox` / `stopMultiBox` 本地落库共用）。`applyStatus` 水合从不覆盖
+`boxStatuses`，且在本地已有多框框 Running 时跳过单框 `liveConfig` 的
+兜底构造，避免后端多框运行快照（修复后报告 `mode: "live"`）让悬浮球误判
+单框实时在运行——主窗口/结果窗口的水合行为不受影响（其水合时点
+`boxStatuses` 为空或该保护不改变其语义）。
 
 ## 构建与测试
 
@@ -329,7 +374,15 @@ pnpm tauri dev
 - 多框动作与 store：`addBox`/`editBox`/`removeBox`/`startMultiBox`/
   `stopMultiBox`/`stopSingleBox`/`hydrateBoxes` 经 mock IPC 覆盖；store 的
   `upsertBox`（按 box_id 去重）、`removeBox`（级联清理 status/result）、
-  `updateBoxRegion`、`setBoxStatus`/`setMultiBoxResult`/`resetMultiBox`。
+  `updateBoxRegion`、`setBoxStatus`/`setBoxesStatus`/`setMultiBoxResult`/
+  `resetMultiBox`。
+- 多框会话跨窗口同步（悬浮球与主窗口统一，Bug-004）：`startMultiBox`/
+  `stopMultiBox` 成功后本地落库 + 发布 `frontend_multibox_started`/
+  `frontend_multibox_stopped`（失败路径不发布假状态）；`toggleLiveFromFloater`
+  按「多框 Running 停止 / 单框运行停止 / 有框启动多框 / 无框单框路径」分支；
+  悬浮球菜单在任一框 Running 或单框实时运行中显示「停止实时翻译」，
+  多框运行中「暂停·继续」禁用；`applyStatus` 水合不覆盖 `boxStatuses`，
+  且多框运行中不构造单框 `liveConfig` 兜底。
 - 翻译框列表组件：列表渲染（色块 + 编号 + 编辑/删除）、空态引导、状态徽标、
   运行中框的停止按钮、阈值上下警告条显隐、**不渲染坐标/大小/形状信息**。
 - 多框结果组件：由上到下堆叠、彩色边框（`2px solid <color>`）、框间分隔线、
@@ -428,3 +481,10 @@ pnpm tauri dev
 16. 多框警告文案中的「建议不超过 N 个」的 N 取前端 `config.warning_threshold`
     （`multibox://warning` 事件 payload 仅含 `current_count`/`max_count`，不含
     阈值本身），与列表顶部持久警告条使用同一阈值，二者文案一致。
+17. 多框会话运行态跨窗口同步依赖两层事件：`frontend_multibox_started`/
+    `frontend_multibox_stopped`（纯前端，启停成功后立即广播）与后端
+    `multibox://status`（每框状态，含 500ms 轮询兜底）。任一窗口在事件到达前
+    短暂显示旧状态属预期；悬浮球展开菜单时会再水合一次 `getAppStatus` 与
+    框列表（`hydrateBoxes`）收敛。若后端版本未把多框运行报告为
+    `mode: "live"`，`applyStatus` 会保留本地经事件同步的 `boxStatuses`
+    运行态，不依赖后端修复。

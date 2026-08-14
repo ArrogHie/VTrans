@@ -68,6 +68,8 @@ export const FRONTEND_LIVE_CONFIG = "frontend_live_config";
 export const FRONTEND_LIVE_PAUSED = "frontend_live_paused";
 export const FRONTEND_LIVE_STOPPED = "frontend_live_stopped";
 export const FRONTEND_FLOATER_ENABLED = "frontend_floater_enabled";
+export const FRONTEND_MULTIBOX_STARTED = "frontend_multibox_started";
+export const FRONTEND_MULTIBOX_STOPPED = "frontend_multibox_stopped";
 
 /** Stable multi-box event names emitted by `vtrans-app`. */
 export const MULTIBOX_RESULT = "multibox://result";
@@ -167,6 +169,18 @@ export interface FloaterEnabledPayload {
 }
 
 /**
+ * Payload of the frontend multi-box session events.
+ *
+ * Both `frontend_multibox_started` and `frontend_multibox_stopped` carry the
+ * ids of the boxes that belong to the session. Receivers mirror the payload
+ * into their own `boxStatuses` so every webview derives the same running
+ * state without querying the backend.
+ */
+export interface FrontendMultiBoxSessionPayload {
+  box_ids: number[];
+}
+
+/**
  * Tells every webview whether the floating ball should be visible.
  *
  * This is a frontend-only event: the main window setting panel publishes it
@@ -183,6 +197,35 @@ export function listenToFrontendFloaterEnabled(
   callback: (payload: FloaterEnabledPayload) => void,
 ): Promise<Unlisten> {
   return listen<FloaterEnabledPayload>(FRONTEND_FLOATER_ENABLED, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
+
+/**
+ * Listens for a frontend multi-box session start.
+ *
+ * Published by `multiBoxActions.startMultiBox` after `start_multi_realtime`
+ * succeeds; every window marks the payload's boxes as running so the floating
+ * ball and the main window derive the same session state.
+ */
+export function listenToFrontendMultiBoxStarted(
+  callback: (payload: FrontendMultiBoxSessionPayload) => void,
+): Promise<Unlisten> {
+  return listen<FrontendMultiBoxSessionPayload>(FRONTEND_MULTIBOX_STARTED, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
+}
+
+/**
+ * Listens for a frontend multi-box session stop.
+ *
+ * Published by `multiBoxActions.stopMultiBox` after `stop_multi_realtime`
+ * succeeds; every window marks the payload's boxes as stopped.
+ */
+export function listenToFrontendMultiBoxStopped(
+  callback: (payload: FrontendMultiBoxSessionPayload) => void,
+): Promise<Unlisten> {
+  return listen<FrontendMultiBoxSessionPayload>(FRONTEND_MULTIBOX_STOPPED, (eventPayload) =>
     callback(eventPayload.payload),
   );
 }

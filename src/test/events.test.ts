@@ -6,8 +6,12 @@ vi.mock("@tauri-apps/api/event", () => ({ emit, listen }));
 
 const {
   FRONTEND_FLOATER_ENABLED,
+  FRONTEND_MULTIBOX_STARTED,
+  FRONTEND_MULTIBOX_STOPPED,
   listenToEvent,
   listenToFrontendFloaterEnabled,
+  listenToFrontendMultiBoxStarted,
+  listenToFrontendMultiBoxStopped,
   onOcrCompleted,
   onPipelineError,
   onTranslationCompleted,
@@ -88,5 +92,34 @@ describe("event service", () => {
     );
     await listenToFrontendFloaterEnabled(callback);
     expect(callback).toHaveBeenCalledWith({ enabled: false });
+  });
+
+  it("exposes stable frontend multi-box session event names", () => {
+    expect(FRONTEND_MULTIBOX_STARTED).toBe("frontend_multibox_started");
+    expect(FRONTEND_MULTIBOX_STOPPED).toBe("frontend_multibox_stopped");
+  });
+
+  it("forwards the frontend multi-box start payload", async () => {
+    const callback = vi.fn();
+    listen.mockImplementationOnce(
+      async (_name: string, handler: (event: { payload: unknown }) => void) => {
+        handler({ payload: { box_ids: [1, 2] } });
+        return vi.fn();
+      },
+    );
+    await listenToFrontendMultiBoxStarted(callback);
+    expect(callback).toHaveBeenCalledWith({ box_ids: [1, 2] });
+  });
+
+  it("forwards the frontend multi-box stop payload", async () => {
+    const callback = vi.fn();
+    listen.mockImplementationOnce(
+      async (_name: string, handler: (event: { payload: unknown }) => void) => {
+        handler({ payload: { box_ids: [3] } });
+        return vi.fn();
+      },
+    );
+    await listenToFrontendMultiBoxStopped(callback);
+    expect(callback).toHaveBeenCalledWith({ box_ids: [3] });
   });
 });

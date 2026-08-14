@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores/appStore";
+import { startMultiBox, stopMultiBox } from "./multiBoxActions";
 import { hideRegionOverlay } from "./regionOverlay";
 import {
   captureOnce,
@@ -13,7 +14,7 @@ import {
   startRegionSelection,
   stopLiveTranslation,
 } from "./tauri";
-import type { PipelineConfig } from "../types";
+import { isAnyBoxRunning, isSingleLiveRunning, type PipelineConfig } from "../types";
 
 /** Outcome of a translate action, letting callers distinguish a cancelled selection. */
 export interface TranslateActionResult {
@@ -211,13 +212,25 @@ export async function stopLive(): Promise<TranslateActionResult> {
 }
 
 /**
- * Toggles the live session: starts it (selecting a region first when none
- * exists) or stops it when already running. Used by the floating ball.
+ * Toggles the live session from the floating ball.
+ *
+ * The ball shows and controls the same session as the main window:
+ *
+ * - Running multi-box session (any box `Running`) → stop the multi-box
+ *   session. The floating ball and the main window share one multi-box
+ *   session, so stopping from the ball affects the main window controls too.
+ * - Running single-live session → stop the single live session
+ *   (Alt+Shift+R/S remain the only hotkey controls for single-live).
+ * - Nothing running with configured boxes → start the multi-box session.
+ * - Nothing running without boxes → single-live path: resume on the selected
+ *   region when available, otherwise select a region first. This mirrors the
+ *   main window, where "开始实时" also has no session to start without boxes.
  */
 export async function toggleLiveFromFloater(): Promise<TranslateActionResult> {
   const state = useAppStore.getState();
-  const liveRunning = state.mode === "live" && Boolean(state.liveConfig);
-  if (liveRunning) return stopLive();
+  if (isAnyBoxRunning(state.boxStatuses)) return stopMultiBox();
+  if (isSingleLiveRunning(state.mode, state.liveConfig)) return stopLive();
+  if (state.translationBoxes.length > 0) return startMultiBox();
   if (state.selectedRegion) return startLive();
   return selectRegionForLive();
 }

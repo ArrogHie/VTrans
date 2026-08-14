@@ -123,10 +123,66 @@ describe("start/stop/open", () => {
     expect(invoke).toHaveBeenCalledWith("start_multi_realtime", undefined);
   });
 
+  it("marks every session box running and broadcasts the start after success", async () => {
+    useAppStore.getState().setTranslationBoxes([BOX_INFO]);
+    showMultiBoxOverlay.mockResolvedValue(undefined);
+    invoke.mockResolvedValueOnce(undefined);
+
+    await startMultiBox();
+    // BUGFIX-4：成功启动后本地 store 立即进入运行态，并向其它窗口广播
+    // 纯前端事件，悬浮球据此显示「停止实时翻译」。
+    expect(useAppStore.getState().boxStatuses).toEqual({ 0: "Running" });
+    expect(emit).toHaveBeenCalledWith("frontend_multibox_started", { box_ids: [0] });
+  });
+
+  it("publishes no fake running state when starting fails", async () => {
+    useAppStore.getState().setTranslationBoxes([BOX_INFO]);
+    showMultiBoxOverlay.mockResolvedValue(undefined);
+    invoke.mockRejectedValueOnce("backend unavailable");
+
+    const result = await startMultiBox();
+    expect(result.ok).toBe(false);
+    expect(useAppStore.getState().boxStatuses).toEqual({});
+    expect(emit).not.toHaveBeenCalled();
+    expect(useAppStore.getState().status).toEqual({ error: "backend unavailable" });
+  });
+
   it("stops multi-box realtime", async () => {
     invoke.mockResolvedValueOnce(undefined);
     expect((await stopMultiBox()).ok).toBe(true);
     expect(invoke).toHaveBeenCalledWith("stop_multi_realtime", undefined);
+  });
+
+  it("marks session boxes stopped and broadcasts the stop after success", async () => {
+    useAppStore.getState().setTranslationBoxes([BOX_INFO]);
+    useAppStore.getState().setBoxStatus(0, "Running");
+    invoke.mockResolvedValueOnce(undefined);
+
+    await stopMultiBox();
+    expect(useAppStore.getState().boxStatuses).toEqual({ 0: "Stopped" });
+    expect(emit).toHaveBeenCalledWith("frontend_multibox_stopped", { box_ids: [0] });
+  });
+
+  it("stops boxes known only through their status when the box list is stale", async () => {
+    // 悬浮球可能尚未水合框列表，但已从事件拿到 Running 状态：停止时仍要
+    // 把本地已知的 Running 框标为 Stopped 并广播其 id。
+    useAppStore.getState().setBoxStatus(7, "Running");
+    invoke.mockResolvedValueOnce(undefined);
+
+    await stopMultiBox();
+    expect(useAppStore.getState().boxStatuses).toEqual({ 7: "Stopped" });
+    expect(emit).toHaveBeenCalledWith("frontend_multibox_stopped", { box_ids: [7] });
+  });
+
+  it("publishes no fake stopped state when stopping fails", async () => {
+    useAppStore.getState().setTranslationBoxes([BOX_INFO]);
+    useAppStore.getState().setBoxStatus(0, "Running");
+    invoke.mockRejectedValueOnce("backend unavailable");
+
+    const result = await stopMultiBox();
+    expect(result.ok).toBe(false);
+    expect(useAppStore.getState().boxStatuses).toEqual({ 0: "Running" });
+    expect(emit).not.toHaveBeenCalled();
   });
 
   it("stops a single box", async () => {

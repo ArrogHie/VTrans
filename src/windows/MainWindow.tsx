@@ -43,7 +43,7 @@ import {
 } from "../services/multiBoxActions";
 import { useAppStore } from "../stores/appStore";
 import { shouldRestoreOverlay } from "../utils/overlayVisibility";
-import { boxCountWarningText, isLocalPairSupported } from "../types";
+import { boxCountWarningText, isAnyBoxRunning, isLocalPairSupported } from "../types";
 import type { LanguageCode, Mode, ProviderId } from "../types";
 
 const OCR_LANGUAGES = [
@@ -259,8 +259,9 @@ export function MainWindow() {
 
   const disabled = busy || status === "ocr_in_progress" || status === "translating";
   // 多框会话控制：任一框运行中即视为会话进行中。列表组件不再持有会话级
-  // 启停按钮，统一由 live 模式底部控制行驱动（BUGFIX-2）。
-  const anyRunning = translationBoxes.some((box) => boxStatuses[box.box_id] === "Running");
+  // 启停按钮，统一由 live 模式底部控制行驱动（BUGFIX-2）。推导复用
+  // types 的 isAnyBoxRunning，与悬浮球/水合共享同一语义（BUGFIX-4）。
+  const anyRunning = isAnyBoxRunning(boxStatuses);
 
   return (
     <main className="min-h-screen bg-slate-50 px-5 py-6 text-slate-900">

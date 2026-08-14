@@ -3,6 +3,8 @@ import {
   listenToFrontendLiveConfig,
   listenToFrontendLivePaused,
   listenToFrontendLiveStopped,
+  listenToFrontendMultiBoxStarted,
+  listenToFrontendMultiBoxStopped,
   listenToFrontendOcrResult,
   onMultiBoxBoxAdded,
   onMultiBoxBoxRemoved,
@@ -47,6 +49,7 @@ function useBackendEvents() {
   const removeBox = useAppStore((state) => state.removeBox);
   const updateBoxRegion = useAppStore((state) => state.updateBoxRegion);
   const setBoxStatus = useAppStore((state) => state.setBoxStatus);
+  const setBoxesStatus = useAppStore((state) => state.setBoxesStatus);
   const setMultiBoxResult = useAppStore((state) => state.setMultiBoxResult);
   const setSingleResult = useAppStore((state) => state.setSingleResult);
 
@@ -120,6 +123,14 @@ function useBackendEvents() {
         onMultiBoxBoxRemoved((payload) => removeBox(payload.box_id)),
         onMultiBoxBoxUpdated((payload) => updateBoxRegion(payload.box_id, payload.region)),
         onMultiBoxStatus((payload) => setBoxStatus(payload.box_id, payload.status)),
+        // 纯前端多框会话事件：任一窗口成功启/停多框会话后广播，所有窗口
+        // 镜像同一份运行态（悬浮球与主窗口共用同一多框会话，BUGFIX-4）。
+        listenToFrontendMultiBoxStarted(({ box_ids }) => {
+          setBoxesStatus(box_ids, "Running");
+        }),
+        listenToFrontendMultiBoxStopped(({ box_ids }) => {
+          setBoxesStatus(box_ids, "Stopped");
+        }),
         onMultiBoxResult((result) => setMultiBoxResult(result)),
         onSingleTranslationResult((payload) => setSingleResult(payload)),
       ]);
@@ -137,7 +148,7 @@ function useBackendEvents() {
       disposed = true;
       cleanup?.();
     };
-  }, [removeBox, setBoxStatus, setError, setLiveConfig, setLivePaused, setMode, setModelProgress, setMultiBoxResult, setOcrResult, setSelectedRegion, setSingleResult, setStatus, setTranslationResult, updateBoxRegion, upsertBox]);
+  }, [removeBox, setBoxStatus, setBoxesStatus, setError, setLiveConfig, setLivePaused, setMode, setModelProgress, setMultiBoxResult, setOcrResult, setSelectedRegion, setSingleResult, setStatus, setTranslationResult, updateBoxRegion, upsertBox]);
 }
 
 export default App;
