@@ -28,6 +28,12 @@ base64 = "0.22"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
+# Windows-only (like the rest of the workspace). Pinned to the same 0.61
+# line tauri 2.11.5 uses so the `HWND` returned by `WebviewWindow::hwnd()`
+# is type-identical to the one `SetWindowDisplayAffinity` accepts; the
+# workspace `windows` 0.58 dependency cannot be reused for this call.
+# Features are limited to what the capture-exclusion code needs.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [lints]
 workspace = true

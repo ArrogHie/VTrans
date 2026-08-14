@@ -16,6 +16,7 @@ use crate::hotkeys::register_hotkeys;
 use crate::overlay::OVERLAY_WINDOW_LABEL;
 use crate::state::AppState;
 use crate::tray::{setup_tray, show_main_window};
+use crate::window_exclusion::exclude_app_windows_from_capture;
 
 /// Environment variable that enables Debug mode when set to `1`/`true`.
 const DEBUG_ENV_VAR: &str = "VTRANS_DEBUG";
@@ -101,6 +102,11 @@ pub fn init_app(app: &mut App<tauri::Wry>) -> Result<(), AppError> {
             tracing::warn!(error = %error, "failed to enable overlay click-through");
         }
     }
+    // Bug-006: VTrans captures whole monitors with WGC, so its own windows
+    // must be excluded from capture or the translator translates its own
+    // UI. Runs once after all configured windows exist; best-effort only
+    // (failures are logged inside and never fail startup).
+    exclude_app_windows_from_capture(app.handle());
     register_hotkeys(app.handle())?;
     Ok(())
 }
