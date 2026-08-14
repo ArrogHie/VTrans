@@ -265,6 +265,28 @@ floater（悬浮球）：
 - 关闭请求被全局 hide-on-close（prevent_close + hide）覆盖，隐藏而非销毁；
 - 默认 `visible: false`，启动不产生可见窗口。
 
+**WDA 捕获排除（Bug-006）**：VTrans 用 WGC 显示器级捕获（
+`CreateForMonitor`），屏幕上一切窗口都会进帧。应用启动、窗口创建完成后
+（`init_app`，在 `window_exclusion.rs` 实现），对 **main/result/floater**
+三个窗口调用 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`
+（值 0x11），被标记窗口从所有捕获表面消失、露出背景（2026-08-14 本机
+Windows 11 实测：红色测试窗口在捕获中占比 398‰ → 0‰）。
+
+- 决策集中在纯函数 `capture_exclusion_windows()`（= main/result/floater，
+  单测锁定集合）。**selector 与 overlay 不设置 WDA**：selector 全屏选区
+  只在框选瞬间显示、期间无捕获；overlay 方框描边已外移出捕获区域（模块
+  11 `fix/11-overlay-border-outside` 配合）。
+- HWND 经 Tauri 2 `WebviewWindow::hwnd()`（Windows）获取；vtrans-app 依赖
+  `windows` 0.61（与锁定 tauri 2.11.5 同版本线，HWND 类型一致；仅
+  `Win32_Foundation` + `Win32_UI_WindowsAndMessaging` 特性）。
+- 容错：窗口缺失 / 句柄失败 / Win32 调用失败仅 `warn!` 记录 label（不
+  记录窗口内容），逐窗口独立、不中断其余窗口、不影响启动；Win32 调用与
+  决策分离（`apply_capture_exclusions` 可注入设置器，单测覆盖「单窗失败
+  不中断」）。
+- 已知副作用（用户已接受）：VTrans 窗口在一切第三方捕获（截图/录屏/
+  共享）中不可见；依赖 Windows 10 2004+，换机/上线前建议
+  `cargo run -p vtrans-capture --example wda_probe` 复核。
+
 ### capability 归属
 
 `src-tauri/capabilities/default.json` 由模块 10 统一维护，`windows` 覆盖
@@ -378,6 +400,7 @@ crates/vtrans-app/
 | Debug 面板显示 | 手工验证 | 依赖真实显示器与模型（README 第 12 条） |
 | 错误映射 | 单元 | 各模块错误正确映射到 AppError（error.rs tests）✅ |
 | 多框状态快照 mode | 单元 | 多框启动成功记 `live` / `start_all` 失败不改 / 停止回退 `single` / 单框 live 运行中停止保持 `live`（commands/state tests，`mode_after_multi_stop` + `MultiBoxSessionHost` 注入）✅ |
+| 捕获排除（WDA） | 手工验证 + 单元 | 真实桌面截图验证登记 README 手工验证项 16；排除集合纯函数（{main,result,floater}、不含 selector/overlay）与「单窗失败不中断其余窗口」（mock 设置器）有单测（window_exclusion.rs tests）✅ |
 | 事件发送 | 单元 | PipelineEvent 正确转为前端事件（events.rs tests）✅ |
 
 > 说明：依赖 Windows 桌面环境的 5 项已登记为手工验证，具体步骤与验证点见
@@ -575,6 +598,24 @@ Provider 与配置 id 一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
       事件（contracts.rs 无改动）
 - [x] 回归：fmt / clippy / app 单测 / workspace check 全绿；未修改其他
       crate 与 vtrans-core；README 与本文档同步
+
+### 窗口捕获排除验收（Bug-006）
+
+- [x] 启动、窗口创建完成后（`init_app`）对 main/result/floater 调用
+      `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`（0x11）；
+      selector/overlay 不设置 WDA（selector 框选瞬间无捕获、overlay 描边
+      已外移，模块 11 配合）
+- [x] HWND 经 Tauri 2 `WebviewWindow::hwnd()` 获取；`windows` 0.61 依赖
+      （与锁定 tauri 2.11.5 同版本线）仅启用 `Win32_Foundation` +
+      `Win32_UI_WindowsAndMessaging`，仅在 vtrans-app 的 Cargo.toml 声明
+- [x] 容错：窗口缺失/句柄失败/Win32 调用失败仅 `warn!` 记录 label（不
+      记录窗口内容），不中断其余窗口、不影响启动；unsafe 块带 SAFETY 注释
+- [x] 决策可测：`capture_exclusion_windows()` 纯函数单测锁定集合
+      {main, result, floater}（不含 selector/overlay）；可注入设置器
+      `apply_capture_exclusions` 单测覆盖「单窗失败不中断其余窗口」
+- [x] 不新增 IPC 命令与事件；未修改 capture crate、vtrans-core 与其他
+      crate；README（手工验证项 16 + 已知限制）与本文档同步
+- [x] 回归：fmt / clippy / app 单测 / workspace check 全绿
 
 ## 开发注意事项
 

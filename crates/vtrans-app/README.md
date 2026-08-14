@@ -42,6 +42,10 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - tauri-plugin-single-instance：阻止多实例并存，避免全局快捷键冲突。
 - image：捕获帧缩放与 JPEG 编码（Debug 模式）。
 - base64：调试缩略图 Base64 编码（跨 IPC 事件 payload）。
+- windows 0.61：Win32 `SetWindowDisplayAffinity`（窗口捕获排除）。与 tauri
+  2.11.5 使用同一 0.61 版本线，保证 `WebviewWindow::hwnd()` 返回的
+  `HWND` 与 Win32 调用参数类型一致；仅启用 `Win32_Foundation` 与
+  `Win32_UI_WindowsAndMessaging` 两个特性。
 
 所有依赖使用 MIT 或 Apache-2.0 兼容许可证；新增依赖仅在本 crate 的 Cargo.toml 中声明。
 
@@ -295,6 +299,31 @@ floater 由前端按配置（`floating_ball.enabled`，vtrans-config 默认 fals
 （与 overlay 不同，不做 `setIgnoreCursorEvents`）。关闭请求被全局
 hide-on-close 策略（prevent_close + hide）覆盖，窗口隐藏而非销毁。
 
+### 窗口捕获排除（Bug-006）
+
+VTrans 用 WGC **显示器级**捕获（`CreateForMonitor`），屏幕上的一切窗口
+（含 VTrans 自己的 main/result/floater）都会进入捕获帧，导致翻译框把
+VTrans 自己的窗口翻译进去。修复方式：应用启动、窗口创建完成后，对
+**main/result/floater** 三个窗口调用 Win32
+`SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`（值 0x11），被
+标记窗口从所有捕获表面（含 WGC 帧）中完全消失、露出背景（2026-08-14
+本机 Windows 11 实测：红色测试窗口在 WGC 显示器捕获中的占比
+398‰ → 0‰）。
+
+- **决策可测**：哪些窗口需要 WDA 集中在纯函数
+  `capture_exclusion_windows()`（= main/result/floater，单测锁定集合）。
+  selector 全屏选区只在框选瞬间显示、期间无捕获；overlay 方框描边已外移
+  到捕获区域之外（模块 11 配合），二者**不设置** WDA。
+- **HWND 获取**：Tauri 2 `WebviewWindow::hwnd()`（Windows，锁定版本
+  2.11.5；依赖 windows 0.61 与 tauri 一致，避免 HWND 类型跨版本）。
+- **容错**：窗口缺失 / 句柄获取失败 / Win32 调用失败都只 `warn!` 记录
+  label（不记录窗口内容），逐窗口独立处理——一个窗口失败不中断其余窗口，
+  且不影响应用启动。
+- **副作用（用户已接受）**：被标记窗口在**一切第三方捕获**（系统截图、
+  OBS 录屏、屏幕共享等）中都不可见；依赖 Windows 10 2004+。换机/上线前
+  建议用 `cargo run -p vtrans-capture --example wda_probe` 复核 WDA 在
+  WGC 显示器捕获上的有效性。
+
 ### 选区 overlay
 
 一个无边框、透明、置顶、可点穿的全屏 overlay 窗口覆盖在区域所在显示器上
@@ -469,6 +498,19 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
       框选的快照为准，不丢失窗口；
     - 框选结束后按 Alt+Shift+R 恢复实时（非框选后续路径）不应影响悬浮球
       等窗口的正常启停。
+16. **WDA 捕获排除（Bug-006）**：启动 VTrans（确认 main 可见；做一次
+    翻译后 result 弹出；开启 `floating_ball.enabled` 显示悬浮球），然后
+    用第三方捕获工具（Win+Shift+S 系统截图、OBS、PowerToys 等）截图：
+    - main、result、floater 三个窗口**不出现**在任何捕获画面中，其位置
+      露出背后的桌面内容；
+    - 预期副作用：VTrans 所有窗口在所有第三方捕获中都不可见（用户已
+      接受该权衡）；
+    - 对照检查：selector 框选瞬间与 overlay 常驻方框仍可正常操作/可见
+      （它们不设置 WDA；overlay 方框描边位于捕获区域之外，与模块 11
+      fix/11-overlay-border-outside 配合）；
+    - 换机或升级 Windows 后建议先运行
+      `cargo run -p vtrans-capture --example wda_probe` 复核 WDA 在 WGC
+      显示器捕获上的有效性（探针位于 vtrans-capture 的验证分支）。
 
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
@@ -551,3 +593,11 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
   `add_translation_box` / `update_translation_box` 之一，窗口保持隐藏，直到
   下一个这些命令完成（无论成败）或下一次框选被取消/超时。窗口可见性查询
   失败时按「不可见」处理（不隐藏也不恢复该窗口），保证不会把窗口弄丢。
+- 捕获排除副作用（Bug-006）：main/result/floater 在启动时被设置
+  `WDA_EXCLUDEFROMCAPTURE`（`SetWindowDisplayAffinity`，值 0x11），因此
+  VTrans 窗口在**一切第三方捕获**（系统截图、录屏、屏幕共享、远程工具）
+  中不可见——用户已接受该权衡。该 API 依赖 Windows 10 2004+；换机/上线前
+  建议用 `cargo run -p vtrans-capture --example wda_probe` 复核 WDA 在
+  WGC 显示器捕获上的有效性。WDA 排除仅对「整屏/显示器级」捕获生效时才能
+  完全移除窗口（本项目已实测生效）；若未来捕获实现改为窗口级
+  （CreateForWindow）或使用 BitBlt，行为以实测为准。
