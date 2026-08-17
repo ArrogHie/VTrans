@@ -10,14 +10,17 @@
 //! invariants that make the call sound.
 //!
 //! [`CredentialStore`] decouples [`crate::CredentialManager`] from the
-//! concrete backend. Two backends ship with the crate:
+//! concrete backend. Three backends ship with the crate:
 //!
-//! - [`WindowsCredentialStore`] — production backend backed by the Windows
-//!   Credential Manager (`advapi32.dll`). Credentials are stored with
+//! - [`WindowsCredentialStore`] — legacy production backend backed by the
+//!   Windows Credential Manager (`advapi32.dll`). Credentials are stored with
 //!   `CRED_TYPE_GENERIC`, persisted locally, and the blob is never written to
 //!   disk by this crate (the OS vault handles persistence).
 //! - [`InMemoryCredentialStore`] — test/development backend that keeps
 //!   secrets in process memory only.
+//! - [`crate::DpapiFileStore`] (in [`crate::dpapi`]) — installation-local
+//!   backend that keeps user-bound DPAPI-encrypted secrets in one
+//!   caller-provided file.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -334,7 +337,9 @@ fn read_blob(credential: &CREDENTIALW) -> Result<Vec<u8>, SecurityError> {
 }
 
 /// Maps a `windows` crate error to [`SecurityError::WindowsApi`].
-fn map_windows_error(error: &Win32Error, operation: &str) -> SecurityError {
+///
+/// Shared with [`crate::dpapi`], which maps the DPAPI FFI errors the same way.
+pub(crate) fn map_windows_error(error: &Win32Error, operation: &str) -> SecurityError {
     let message = format!("{operation} failed: {error} (hr=0x{:08X})", error.code().0);
     warn!(error = %message, "windows credential api call failed");
     SecurityError::WindowsApi(message)

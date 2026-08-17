@@ -16,18 +16,27 @@
 //!   [`load_for_provider`](CredentialManager::load_for_provider); the legacy
 //!   string-based methods remain for backward compatibility.
 //! - [`CredentialStore`] is a small trait that decouples the manager from the
-//!   concrete backend. [`WindowsCredentialStore`] is the production backend
-//!   backed by the Windows Credential Manager; [`InMemoryCredentialStore`]
-//!   exists for tests and non-Windows development.
+//!   concrete backend. [`WindowsCredentialStore`] is the legacy backend backed
+//!   by the Windows Credential Manager; [`InMemoryCredentialStore`] exists for
+//!   tests and non-Windows development; [`DpapiFileStore`] is the
+//!   installation-local backend that keeps user-bound DPAPI-encrypted
+//!   credentials in a single caller-provided file (see
+//!   [`migrate_windows_to_dpapi`] for the one-time migration from the legacy
+//!   vault backend).
 //!
 //! See `docs/modules/03-security.md` for the full module specification.
 
 pub mod credential_store;
+pub mod dpapi;
 pub mod manager;
 pub mod mask;
 pub mod target;
 
+#[cfg(test)]
+mod test_log;
+
 pub use credential_store::{CredentialStore, InMemoryCredentialStore, WindowsCredentialStore};
+pub use dpapi::{migrate_windows_to_dpapi, DpapiFileStore};
 pub use manager::CredentialManager;
 pub use mask::mask_key;
 pub use target::CredentialTarget;
@@ -54,4 +63,20 @@ pub enum SecurityError {
     /// The underlying Windows API call failed.
     #[error("windows api error: {0}")]
     WindowsApi(String),
+
+    /// An IO operation on the credential file failed (open, read, write or
+    /// rename of the [`DpapiFileStore`](crate::DpapiFileStore) container).
+    #[error("credential file io error: {0}")]
+    FileIo(#[from] std::io::Error),
+
+    /// The credential file is structurally invalid: truncated, not a
+    /// `VTrans` container, or carrying an unsupported version. The stored
+    /// secrets cannot be recovered from such a file.
+    #[error("credential file is corrupted: {0}")]
+    CorruptedFile(String),
+
+    /// A stored DPAPI blob could not be decrypted, e.g. because it was
+    /// tampered with or was protected under a different Windows user account.
+    #[error("credential decryption failed: {0}")]
+    DecryptionFailed(String),
 }

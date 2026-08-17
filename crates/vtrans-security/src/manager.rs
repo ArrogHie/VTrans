@@ -405,67 +405,13 @@ fn qualify_target(target: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, OnceLock};
+    use std::sync::Arc;
 
     use mockall::predicate::eq;
-    use tracing_subscriber::fmt;
 
     use super::*;
     use crate::credential_store::{InMemoryCredentialStore, MockCredentialStore};
-
-    /// A `MakeWriter` that records everything written to it so tests can
-    /// assert on log output.
-    #[derive(Clone, Default)]
-    struct CapturingWriter(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturingWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .expect("capture lock should not be poisoned")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl fmt::MakeWriter<'_> for CapturingWriter {
-        type Writer = Self;
-
-        fn make_writer(&self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// Process-wide buffer that receives every test log event.
-    static TEST_LOG_BUFFER: OnceLock<Arc<std::sync::Mutex<Vec<u8>>>> = OnceLock::new();
-
-    /// Installs a process-global tracing subscriber exactly once and returns
-    /// the shared log buffer.
-    ///
-    /// A thread-local `with_default` subscriber is not used here because
-    /// `tracing` caches callsite interest globally: while a capture is active,
-    /// another test thread may register the same callsite against the no-op
-    /// dispatcher and permanently cache `Interest::never()` for it, silently
-    /// dropping the events we want to assert on. A global default is shared by
-    /// every thread, so callsite interest is always computed against the
-    /// capturing subscriber and the assertions are deterministic.
-    fn install_test_log_subscriber() -> &'static Arc<std::sync::Mutex<Vec<u8>>> {
-        TEST_LOG_BUFFER.get_or_init(|| {
-            let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let subscriber = fmt()
-                .with_writer(CapturingWriter(Arc::clone(&buffer)))
-                .with_max_level(tracing::Level::DEBUG)
-                .without_time()
-                .finish();
-            tracing::subscriber::set_global_default(subscriber)
-                .expect("test subscriber should be installed exactly once");
-            buffer
-        })
-    }
+    use crate::test_log::{captured_log, clear_captured_log};
 
     fn in_memory_manager() -> (CredentialManager, Arc<InMemoryCredentialStore>) {
         let store = Arc::new(InMemoryCredentialStore::new());
@@ -815,23 +761,13 @@ mod tests {
             .store_for_provider(CredentialTarget::OpenAI, key)
             .unwrap();
 
-        let buffer = install_test_log_subscriber();
-        buffer
-            .lock()
-            .expect("capture lock should not be poisoned")
-            .clear();
+        clear_captured_log();
 
         manager
             .load_for_provider(CredentialTarget::OpenAI)
             .expect("load should succeed");
 
-        let log = String::from_utf8(
-            buffer
-                .lock()
-                .expect("capture lock should not be poisoned")
-                .clone(),
-        )
-        .expect("captured log should be valid UTF-8");
+        let log = captured_log();
         assert!(
             log.contains("sk-s****6789"),
             "log should contain the masked key, got: {log}"
