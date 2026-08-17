@@ -20,6 +20,9 @@ beforeEach(() => {
     boxStatuses: {},
     multiBoxResults: {},
     singleResult: null,
+    modelStatus: null,
+    modelDownloadProgress: null,
+    translationModelDownloading: false,
   });
 });
 
@@ -127,6 +130,25 @@ describe("appStore", () => {
     // 切换完成/失败后清空，避免下次切换闪烁旧百分比。
     useAppStore.getState().setModelProgress(null);
     expect(useAppStore.getState().modelProgress).toBeNull();
+  });
+
+  it("stores the model status snapshot, download progress and in-flight marker immutably", () => {
+    const report = {
+      entries: [{ id: "opus-mt-en-zh-int8", state: "missing" as const, optional: true }],
+      ocr_ready: true,
+      translation_ready: false,
+    };
+    const progress = { bytes: 10, total: 20, fraction: 0.5 };
+    useAppStore.getState().setModelStatus(report);
+    expect(useAppStore.getState().modelStatus).toEqual(report);
+    useAppStore.getState().setModelDownloadProgress(progress);
+    expect(useAppStore.getState().modelDownloadProgress).toEqual(progress);
+    useAppStore.getState().setTranslationModelDownloading(true);
+    expect(useAppStore.getState().translationModelDownloading).toBe(true);
+    useAppStore.getState().setTranslationModelDownloading(false);
+    expect(useAppStore.getState().translationModelDownloading).toBe(false);
+    useAppStore.getState().setModelStatus(null);
+    expect(useAppStore.getState().modelStatus).toBeNull();
   });
 
   it("hydrates the selected translation provider from backend status", () => {
