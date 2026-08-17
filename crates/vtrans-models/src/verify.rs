@@ -16,14 +16,25 @@ use crate::ModelError;
 /// Report from a batch integrity verification pass.
 ///
 /// Produced by [`ModelManager::verify_integrity`](crate::manager::ModelManager::verify_integrity).
-/// Each checked file contributes to `checked`; matching files increment
-/// `passed`; failures are recorded as human-readable strings in `failed`.
+/// Every examined entry contributes to `checked`; matching files increment
+/// `passed`; missing optional entries are recorded as ids in `skipped`
+/// (not failures); failures are recorded as human-readable strings in
+/// `failed`.
+///
+/// Invariant: `checked == passed + skipped.len() + failed.len()`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct VerifyReport {
     /// Total number of files checked.
     pub checked: usize,
     /// Number of files that passed verification.
     pub passed: usize,
+    /// Ids of optional entries that are not installed and were skipped.
+    ///
+    /// A skipped entry is not a failure: consumers treat these as
+    /// "not installed" (e.g. eligible for download) rather than "corrupted".
+    /// Absent in older serialized reports: defaults to empty.
+    #[serde(default)]
+    pub skipped: Vec<String>,
     /// Human-readable descriptions of failures.
     pub failed: Vec<String>,
 }
@@ -35,7 +46,10 @@ impl VerifyReport {
         Self::default()
     }
 
-    /// Returns `true` if every checked file passed.
+    /// Returns `true` if no failures were recorded.
+    ///
+    /// Skipped optional entries do not count as failures, so a report with
+    /// only skipped entries is still `Ok`.
     #[must_use]
     pub fn is_ok(&self) -> bool {
         self.failed.is_empty()
@@ -125,6 +139,9 @@ mod tests {
             path: std::path::PathBuf::from(rel_path),
             sha256: sha,
             size_bytes: content.len() as u64,
+            optional: false,
+            download_url: None,
+            download_size_bytes: None,
         };
         (entry, full)
     }
@@ -154,6 +171,29 @@ mod tests {
             path: std::path::PathBuf::from("nonexistent.onnx"),
             sha256: "abc".to_string(),
             size_bytes: 0,
+            optional: false,
+            download_url: None,
+            download_size_bytes: None,
+        };
+        let result = verify_entry(dir.path(), &entry);
+        assert!(matches!(result, Err(ModelError::FileNotFound(_))));
+    }
+
+    #[test]
+    fn verify_entry_missing_optional_entry_still_fails() {
+        // `verify_entry` itself does not implement the optional/skipped
+        // semantics: it verifies a single file and reports a missing file
+        // as an error regardless of `optional`. The skipped classification
+        // is applied by the batch verifier (ModelManager::verify_integrity).
+        let dir = tempdir().unwrap();
+        let entry = ModelEntry {
+            id: "optional-missing".to_string(),
+            path: std::path::PathBuf::from("nonexistent.onnx"),
+            sha256: "abc".to_string(),
+            size_bytes: 0,
+            optional: true,
+            download_url: Some("https://example.com/model.onnx".to_string()),
+            download_size_bytes: Some(42),
         };
         let result = verify_entry(dir.path(), &entry);
         assert!(matches!(result, Err(ModelError::FileNotFound(_))));
@@ -212,6 +252,7 @@ mod tests {
         let report = VerifyReport::new();
         assert_eq!(report.checked, 0);
         assert_eq!(report.passed, 0);
+        assert!(report.skipped.is_empty());
         assert!(report.failed.is_empty());
         assert!(report.is_ok());
     }
@@ -221,8 +262,48 @@ mod tests {
         let report = VerifyReport {
             checked: 3,
             passed: 2,
+            skipped: Vec::new(),
             failed: vec!["bad file".to_string()],
         };
+        assert!(!report.is_ok());
+    }
+
+    #[test]
+    fn verify_report_is_ok_with_only_skipped() {
+        // Missing optional entries are not failures.
+        let report = VerifyReport {
+            checked: 3,
+            passed: 2,
+            skipped: vec!["optional-missing".to_string()],
+            failed: Vec::new(),
+        };
+        assert!(report.is_ok());
+    }
+
+    #[test]
+    fn verify_report_serde_roundtrip_with_skipped() {
+        let report = VerifyReport {
+            checked: 5,
+            passed: 3,
+            skipped: vec!["optional-a".to_string(), "optional-b".to_string()],
+            failed: vec!["sha256 mismatch for det".to_string()],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let back: VerifyReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, report);
+        assert_eq!(back.skipped.len(), 2);
+    }
+
+    #[test]
+    fn verify_report_older_json_without_skipped_deserializes() {
+        // Reports serialized before the `skipped` field existed must still
+        // deserialize, with an empty skipped list.
+        let json = r#"{"checked": 3, "passed": 2, "failed": ["bad file"]}"#;
+        let report: VerifyReport = serde_json::from_str(json).unwrap();
+        assert_eq!(report.checked, 3);
+        assert_eq!(report.passed, 2);
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.failed, vec!["bad file".to_string()]);
         assert!(!report.is_ok());
     }
 }

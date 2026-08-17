@@ -296,3 +296,148 @@ fn shared_rec_path_verifies_with_single_file() {
     assert!(report.failed.is_empty());
     assert!(report.is_ok());
 }
+
+/// Build a models directory with an optional translation model entry that
+/// carries download metadata. The translation model file is present only
+/// when `install_trans_model` is set.
+fn build_optional_trans_dir(install_trans_model: bool) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let det_sha = write_file(dir.path(), "ocr/det.onnx", b"det");
+    let rec_ja_sha = write_file(dir.path(), "ocr/rec_ja.onnx", b"rj");
+    let rec_en_sha = write_file(dir.path(), "ocr/rec_en.onnx", b"re");
+    let tokenizer_sha = write_file(dir.path(), "translation/tokenizer.json", b"{}");
+    let trans_model_sha = write_file(dir.path(), "translation/model.onnx", b"trans model");
+    if !install_trans_model {
+        std::fs::remove_file(dir.path().join("translation/model.onnx")).unwrap();
+    }
+
+    let manifest = format!(
+        r#"{{
+  "version": 1,
+  "ocr": {{
+    "det": {{ "id": "det", "path": "ocr/det.onnx", "sha256": "{det_sha}", "size_bytes": 3 }},
+    "rec_ja": {{ "id": "rj", "path": "ocr/rec_ja.onnx", "sha256": "{rec_ja_sha}", "size_bytes": 2 }},
+    "rec_en": {{ "id": "re", "path": "ocr/rec_en.onnx", "sha256": "{rec_en_sha}", "size_bytes": 2 }},
+    "rec_multi": null,
+    "dicts": {{}},
+    "preprocess_params": {{
+      "image_size": [960, 960],
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "det_threshold": 0.3,
+      "unclip_ratio": 2.0
+    }}
+  }},
+  "translation": {{
+    "model": {{ "id": "tm", "path": "translation/model.onnx", "sha256": "{trans_model_sha}", "size_bytes": 11, "optional": true, "download_url": "https://example.com/translation-model.onnx", "download_size_bytes": 11 }},
+    "tokenizer": {{ "id": "tk", "path": "translation/tokenizer.json", "sha256": "{tokenizer_sha}", "size_bytes": 2 }},
+    "supported_pairs": [["en", "zh-CN"]],
+    "max_length": 512,
+    "inference_params": {{ "max_batch_size": 1, "num_beams": 4 }}
+  }}
+}}"#
+    );
+    std::fs::write(dir.path().join("manifest.json"), manifest).unwrap();
+    dir
+}
+
+#[test]
+fn optional_entry_missing_is_skipped_not_failed() {
+    let dir = build_optional_trans_dir(false);
+    let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+    let report = manager.verify_integrity().unwrap();
+
+    // 4 model entries (det, rec_ja, rec_en, translation model, tokenizer = 5)
+    // checked; the missing optional translation model is skipped.
+    assert_eq!(report.checked, 5);
+    assert_eq!(report.passed, 4);
+    assert_eq!(report.skipped, vec!["tm".to_string()]);
+    assert!(report.failed.is_empty());
+    assert!(report.is_ok());
+}
+
+#[test]
+fn optional_entry_present_passes() {
+    let dir = build_optional_trans_dir(true);
+    let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+    let report = manager.verify_integrity().unwrap();
+
+    assert_eq!(report.checked, 5);
+    assert_eq!(report.passed, 5);
+    assert!(report.skipped.is_empty());
+    assert!(report.failed.is_empty());
+    assert!(report.is_ok());
+}
+
+#[test]
+fn optional_entry_present_but_corrupted_is_failed() {
+    let dir = build_optional_trans_dir(true);
+    std::fs::write(dir.path().join("translation/model.onnx"), b"corrupted!").unwrap();
+    let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+    let report = manager.verify_integrity().unwrap();
+
+    assert_eq!(report.checked, 5);
+    assert_eq!(report.passed, 4);
+    assert!(report.skipped.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert!(report.failed[0].contains("sha256 mismatch"));
+    assert!(!report.is_ok());
+}
+
+#[test]
+fn legacy_manifest_entry_fields_default() {
+    // A manifest without the new optional-entry fields must deserialize
+    // with `optional == false` and no download metadata.
+    let dir = tempfile::tempdir().unwrap();
+    let det_sha = write_file(dir.path(), "ocr/det.onnx", b"det");
+    let rec_ja_sha = write_file(dir.path(), "ocr/rec_ja.onnx", b"rj");
+    let rec_en_sha = write_file(dir.path(), "ocr/rec_en.onnx", b"re");
+    let manifest = format!(
+        r#"{{
+  "version": 1,
+  "ocr": {{
+    "det": {{ "id": "det", "path": "ocr/det.onnx", "sha256": "{det_sha}", "size_bytes": 3 }},
+    "rec_ja": {{ "id": "rj", "path": "ocr/rec_ja.onnx", "sha256": "{rec_ja_sha}", "size_bytes": 2 }},
+    "rec_en": {{ "id": "re", "path": "ocr/rec_en.onnx", "sha256": "{rec_en_sha}", "size_bytes": 2 }},
+    "rec_multi": null,
+    "dicts": {{}},
+    "preprocess_params": {{
+      "image_size": [960, 960],
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "det_threshold": 0.3,
+      "unclip_ratio": 2.0
+    }}
+  }},
+  "translation": null
+}}"#
+    );
+    std::fs::write(dir.path().join("manifest.json"), manifest).unwrap();
+
+    let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+    let det = &manager.manifest().ocr.det;
+    assert!(!det.optional);
+    assert_eq!(det.download_url, None);
+    assert_eq!(det.download_size_bytes, None);
+}
+
+#[test]
+fn bundled_manifest_template_parses_with_optional_translation_model() {
+    // The shipped template must stay in sync with the schema: it parses,
+    // and the translation model entry carries the optional/download fields.
+    let template = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/manifest.json"),
+    )
+    .unwrap();
+    let manifest = vtrans_models::manifest::ModelManifest::from_json_str(&template).unwrap();
+    assert_eq!(manifest.version, 1);
+    let model = &manifest.translation.as_ref().unwrap().model;
+    assert!(model.optional);
+    assert_eq!(
+        model.download_url.as_deref(),
+        Some("https://github.com/ArrogHie/VTrans/releases/download/v0.1.0/translation-model.onnx")
+    );
+    assert_eq!(model.download_size_bytes, Some(403_368_390));
+    // The tokenizer ships with the installer and is not optional.
+    assert!(!manifest.translation.as_ref().unwrap().tokenizer.optional);
+}

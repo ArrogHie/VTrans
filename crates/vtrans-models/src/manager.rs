@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::manifest::{ModelEntry, ModelManifest};
 use crate::path::resolve_model_path;
@@ -84,8 +84,14 @@ impl ModelManager {
     /// (they have no hash in the manifest). Results are aggregated into a
     /// [`VerifyReport`].
     ///
-    /// All failures (missing files, hash mismatches, I/O errors) are
-    /// recorded as human-readable strings in the report's `failed` list.
+    /// Missing entries with [`ModelEntry::optional`] set are recorded in
+    /// [`VerifyReport::skipped`] (by entry id) instead of `failed`: an
+    /// optional model that has not been installed yet is not corruption.
+    /// An optional entry that exists but has a wrong hash is still recorded
+    /// in `failed`.
+    ///
+    /// All failures (missing required files, hash mismatches, I/O errors)
+    /// are recorded as human-readable strings in the report's `failed` list.
     /// The method always returns `Ok(report)`; it never returns `Err`.
     ///
     /// # Errors
@@ -100,6 +106,18 @@ impl ModelManager {
 
         for entry in self.manifest.all_entries() {
             report.checked += 1;
+            if entry.optional && !self.model_path(entry).exists() {
+                // Optional entries are allowed to be absent: record as
+                // skipped (not installed) rather than failed. No warn-level
+                // log here — this is an expected, benign state.
+                debug!(
+                    entry_id = %entry.id,
+                    path = %entry.path.display(),
+                    "optional model entry not installed; skipping"
+                );
+                report.skipped.push(entry.id.clone());
+                continue;
+            }
             match verify_entry(&self.manifest_dir, entry) {
                 Ok(()) => {
                     report.passed += 1;
@@ -130,6 +148,7 @@ impl ModelManager {
         info!(
             checked = report.checked,
             passed = report.passed,
+            skipped = report.skipped.len(),
             failed = report.failed.len(),
             "integrity verification complete"
         );
@@ -226,6 +245,73 @@ mod tests {
         dir
     }
 
+    /// Build a manifest JSON string with an optional translation entry.
+    ///
+    /// `optional` controls the `translation.model.optional` flag; the entry
+    /// always carries placeholder download metadata.
+    fn manifest_json_with_optional_trans(
+        det_sha: &str,
+        rec_ja_sha: &str,
+        rec_en_sha: &str,
+        trans_sha: &str,
+        tokenizer_sha: &str,
+        optional: bool,
+    ) -> String {
+        format!(
+            r#"{{
+  "version": 1,
+  "ocr": {{
+    "det": {{ "id": "det", "path": "ocr/det.onnx", "sha256": "{det_sha}", "size_bytes": 10 }},
+    "rec_ja": {{ "id": "rj", "path": "ocr/rec_ja.onnx", "sha256": "{rec_ja_sha}", "size_bytes": 20 }},
+    "rec_en": {{ "id": "re", "path": "ocr/rec_en.onnx", "sha256": "{rec_en_sha}", "size_bytes": 30 }},
+    "rec_multi": null,
+    "dicts": {{ "ja": "ocr/dict_ja.txt", "en": "ocr/dict_en.txt" }},
+    "preprocess_params": {{
+      "image_size": [960, 960],
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225],
+      "det_threshold": 0.3,
+      "unclip_ratio": 2.0
+    }}
+  }},
+  "translation": {{
+    "model": {{ "id": "tm", "path": "translation/model.onnx", "sha256": "{trans_sha}", "size_bytes": 17, "optional": {optional}, "download_url": "https://example.com/translation-model.onnx", "download_size_bytes": 17 }},
+    "tokenizer": {{ "id": "tk", "path": "translation/tokenizer.json", "sha256": "{tokenizer_sha}", "size_bytes": 2 }},
+    "supported_pairs": [["en", "zh-CN"]],
+    "max_length": 512,
+    "inference_params": {{ "max_batch_size": 1, "num_beams": 4 }}
+  }}
+}}"#
+        )
+    }
+
+    /// Create a models directory with OCR files, dicts, tokenizer, and a
+    /// translation model. The translation model file is removed when
+    /// `remove_trans_model` is set (to simulate "not installed").
+    fn setup_optional_trans_dir(remove_trans_model: bool) -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let det_sha = write_file(dir.path(), "ocr/det.onnx", b"det model");
+        let rec_ja_sha = write_file(dir.path(), "ocr/rec_ja.onnx", b"ja model");
+        let rec_en_sha = write_file(dir.path(), "ocr/rec_en.onnx", b"en model");
+        write_file(dir.path(), "ocr/dict_ja.txt", b"ja dict");
+        write_file(dir.path(), "ocr/dict_en.txt", b"en dict");
+        let tokenizer_sha = write_file(dir.path(), "translation/tokenizer.json", b"{}");
+        let trans_sha = write_file(dir.path(), "translation/model.onnx", b"trans model");
+        if remove_trans_model {
+            std::fs::remove_file(dir.path().join("translation/model.onnx")).unwrap();
+        }
+        let json = manifest_json_with_optional_trans(
+            &det_sha,
+            &rec_ja_sha,
+            &rec_en_sha,
+            &trans_sha,
+            &tokenizer_sha,
+            true,
+        );
+        std::fs::write(dir.path().join("manifest.json"), json).unwrap();
+        dir
+    }
+
     #[test]
     fn from_manifest_dir_valid() {
         let dir = setup_models_dir();
@@ -293,6 +379,8 @@ mod tests {
         assert_eq!(report.checked, 5);
         assert_eq!(report.passed, 4);
         assert_eq!(report.failed.len(), 1);
+        // Required (non-optional) entries must never land in skipped.
+        assert!(report.skipped.is_empty());
         assert!(!report.is_ok());
     }
 
@@ -319,6 +407,49 @@ mod tests {
         assert_eq!(report.passed, 4);
         assert_eq!(report.failed.len(), 1);
         assert!(report.failed[0].contains("dict file not found"));
+    }
+
+    #[test]
+    fn verify_integrity_optional_missing_is_skipped() {
+        let dir = setup_optional_trans_dir(true);
+        let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+        let report = manager.verify_integrity().unwrap();
+        // 5 model entries (det, rec_ja, rec_en, translation model, tokenizer)
+        // + 2 dicts = 7 checked. The missing optional translation model is
+        // skipped, not failed.
+        assert_eq!(report.checked, 7);
+        assert_eq!(report.passed, 6);
+        assert_eq!(report.skipped, vec!["tm".to_string()]);
+        assert!(report.failed.is_empty());
+        assert!(report.is_ok());
+    }
+
+    #[test]
+    fn verify_integrity_optional_present_passes() {
+        let dir = setup_optional_trans_dir(false);
+        let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+        let report = manager.verify_integrity().unwrap();
+        assert_eq!(report.checked, 7);
+        assert_eq!(report.passed, 7);
+        assert!(report.skipped.is_empty());
+        assert!(report.failed.is_empty());
+        assert!(report.is_ok());
+    }
+
+    #[test]
+    fn verify_integrity_optional_present_but_corrupted_fails() {
+        // An optional entry that exists must still be hash-checked:
+        // corruption is reported in `failed`, never `skipped`.
+        let dir = setup_optional_trans_dir(false);
+        std::fs::write(dir.path().join("translation/model.onnx"), b"corrupted").unwrap();
+        let manager = ModelManager::from_manifest_dir(dir.path()).unwrap();
+        let report = manager.verify_integrity().unwrap();
+        assert_eq!(report.checked, 7);
+        assert_eq!(report.passed, 6);
+        assert!(report.skipped.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert!(report.failed[0].contains("sha256 mismatch"));
+        assert!(!report.is_ok());
     }
 
     #[test]

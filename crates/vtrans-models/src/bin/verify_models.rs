@@ -2,8 +2,10 @@
 //!
 //! Loads `manifest.json` from a models directory and verifies the SHA-256
 //! hash of every referenced model file, mirroring the verification run by
-//! the `load_local_models` Tauri command. Exits non-zero when any file is
-//! missing or corrupted.
+//! the `load_local_models` Tauri command. Exits non-zero when any required
+//! file is missing or corrupted. Optional entries (`"optional": true`) that
+//! are not installed are reported as skipped — not failures — and do not
+//! affect the exit code.
 //!
 //! ```powershell
 //! # 默认目录（仓库根目录下）
@@ -18,6 +20,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use vtrans_models::ModelManager;
+use vtrans_models::VerifyReport;
 
 const DEFAULT_MODELS_DIR: &str = "src-tauri/resources/models";
 
@@ -56,17 +59,35 @@ fn main() -> ExitCode {
         }
     };
 
+    print_report(&report, &models_dir)
+}
+
+/// Prints the verification summary and returns the process exit code.
+///
+/// Skipped optional entries are printed to stdout as informational lines;
+/// failures are printed to stderr and cause a non-zero exit code.
+fn print_report(report: &VerifyReport, models_dir: &std::path::Path) -> ExitCode {
     println!(
         "verified {}/{} model files under {}",
         report.passed,
         report.checked,
         models_dir.display()
     );
+    for skipped_id in &report.skipped {
+        println!("skipped: {skipped_id} (optional, not installed)");
+    }
     for failure in &report.failed {
         eprintln!("failed: {failure}");
     }
     if report.failed.is_empty() {
-        println!("all model files are valid");
+        if report.skipped.is_empty() {
+            println!("all model files are valid");
+        } else {
+            println!(
+                "all required model files are valid ({} optional entries not installed)",
+                report.skipped.len()
+            );
+        }
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
