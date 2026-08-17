@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Save } from "lucide-react";
+import { ModelDownloadCard } from "./ModelDownloadCard";
 import { ProviderToggle } from "./ProviderToggle";
 import { publishFrontendFloaterEnabled } from "../services/events";
 import { getIpcErrorMessage, saveSettings, setProviderCredentials } from "../services/tauri";
@@ -508,6 +509,8 @@ export function SettingsPanel({ config, onSaved, onClose }: SettingsPanelProps) 
             )}
           </div>
         </fieldset>
+
+        <ModelDownloadCard />
 
         <fieldset className="rounded-lg border border-slate-100 p-3">
           <legend className="px-1 text-xs font-semibold text-slate-400">快捷键</legend>
