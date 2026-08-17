@@ -30,11 +30,19 @@
 - 操作按钮：选择区域、开始、暂停、停止
 - 识别语言选择：自动、日语、英语、简体中文（同时作为 OCR 识别语言与翻译源语言，二者经后端联动恒相等）
 - 目标语言选择：中文、日语、英语
-- 翻译引擎切换：OpenAI / DeepL / Google / Azure / 百度 / 本地（切换即经
-  `set_translation_provider` 保存；`AppStatus.translation_provider` 返回的运行时
-  id 经 `normalizeProviderId` 映射到前端配置标识符域）
+- 翻译引擎切换（`ProviderSelect`）：OpenAI / DeepL / Google / Azure / 百度 /
+  本地（切换即经 `set_translation_provider` 保存；`AppStatus.translation_provider`
+  返回的运行时 id 经 `normalizeProviderId` 映射到前端配置标识符域）。
+  **本地引擎禁用联动**：`localProviderBlockReason` 由 `get_model_status` +
+  下载在途标记推导——翻译模型缺失/校验失败/下载中时**仅禁用 local 选项**
+  （云端选项不受影响）并显示原因提示（「请先在设置中下载本地翻译模型」等），
+  下载中提示始终可见；后端切换守卫是第二道保险
 - 当前状态与简要错误信息
 - 设置入口
+- 模型就位错误横幅（`ModelSetupBanner`，R6）：`get_model_status` 报告
+  `ocr_ready === false` 或存在非 optional 条目 `invalid` 时显示「OCR 模型未
+  就位，翻译功能不可用」+「重试」按钮；重试走 `retry_model_setup`，刷新后
+  状态健康则自动消失；横幅不阻断主窗口其余功能（optional 条目不触发横幅）
 
 ### 选区窗口 (RegionSelector.tsx)
 
@@ -90,6 +98,15 @@
   并显式携带草稿 provider id；百度用 `{ appId, secret }` 双字段
 - 校验规则与 `vtrans-config` 对齐：本地忽略端点/模型/区域；远程端点必须
   http(s)；OpenAI 模型名必填；Azure 区域非空即校验；百度 APP ID 必填
+- 「本地翻译模型」卡片（`ModelDownloadCard`）：
+  - 挂载时经 `get_model_status` 水合条目状态（`ready` 已安装 / `missing`
+    未安装 / `invalid` 校验失败），下载进度经 `model_download_progress`
+    事件实时更新（进度条百分比 + role=progressbar）
+  - 状态与下载标记存于 Zustand store：**设置面板关闭不中断后端下载**，
+    重新挂载按最新状态与持续推送的进度事件水合；前端不保存任何模型内容
+  - 按钮按状态切换：下载/重新下载（invalid）/ 删除（ready，二次确认）/
+    取消下载（下载中）/ 刷新（状态未知）；取消/删除后重新拉取终态，
+    用户主动取消的错误不作为失败展示
 
 ## 公开 API（前端内部）
 
@@ -128,6 +145,27 @@ export function clampFloaterSizePx(value: number): number;
 export function applyFloaterAppearance(root, opacity, sizePx): void;
 export function persistFloaterAppearance(opacity, sizePx): Promise<void>;
 
+// tauri.ts：翻译模型下载/状态 IPC（5 个命令均无参数）
+export function downloadTranslationModel(): Promise<void>;
+export function cancelTranslationModelDownload(): Promise<void>;
+export function deleteTranslationModel(): Promise<void>;
+export function getModelStatus(): Promise<ModelStatusReport>;
+export function retryModelSetup(): Promise<ModelStatusReport>;
+
+// modelActions.ts：下载/状态动作（设置卡片与主窗口共用，终态进 Zustand store）
+export function refreshModelStatus(): Promise<ModelStatusReport>;
+export function applyModelDownloadProgress(progress: ModelDownloadProgress): void;
+export function downloadModel(): Promise<ModelStatusReport>;
+export function cancelModelDownload(): Promise<ModelStatusReport>;
+export function deleteModel(): Promise<ModelStatusReport>;
+export function retryModelSetup(): Promise<ModelStatusReport>;
+
+// events.ts：下载进度监听
+export const MODEL_DOWNLOAD_PROGRESS = "model_download_progress";
+export function onModelDownloadProgress(
+  callback: (progress: ModelDownloadProgress) => void,
+): Promise<Unlisten>;
+
 export function onOcrCompleted(cb: (result: OcrResult) => void): Unlisten;
 export function onTranslationCompleted(cb: (result: TranslationResult) => void): Unlisten;
 export function onPipelineError(cb: (msg: string) => void): Unlisten;
@@ -153,13 +191,40 @@ export interface TranslationConfig {
 // local-onnx -> local；openai/deepl/google/azure/baidu 原样透传；
 // 未知值（含已废弃的 "api"）回退默认 provider "openai"
 export function normalizeProviderId(raw: string): ProviderId;
+
+// ── 模型下载/状态（发行部署，字段与 Rust DTO 一一对应，snake_case）──
+export type ModelState = 'ready' | 'missing' | 'invalid';
+export interface ModelEntryStatus {
+  id: string;
+  state: ModelState;
+  optional: boolean;   // optional 条目缺失是「未安装」（missing），非校验失败
+}
+export interface ModelStatusReport {
+  entries: ModelEntryStatus[];
+  ocr_ready: boolean;
+  translation_ready: boolean;
+}
+export interface ModelDownloadProgress {
+  bytes: number;
+  total: number;
+  fraction: number;    // [0,1]，total 未知时为 0
+}
+
+export const TRANSLATION_MODEL_ENTRY_ID = "opus-mt-en-zh-int8"; // 与 manifest translation.model.id 一致
+export function findTranslationModelEntry(report): ModelEntryStatus | null; // 精确 id → 首个 optional 兜底
+export function hasModelSetupProblems(report: ModelStatusReport): boolean;   // ocr_ready false 或非 optional 条目 invalid（R6 横幅条件）
+export type LocalProviderBlockReason = 'missing' | 'invalid' | 'downloading';
+export function localProviderBlockReason(
+  report: ModelStatusReport | null,
+  downloading: boolean,
+): LocalProviderBlockReason | null; // null = local 可选；null 报告不阻断（防闪烁）
 ```
 
 `AppStatus.translation_provider` 由 `vtrans-app` 返回 provider 运行时实现 id，
 云端 provider 与其配置 id 相同，仅本地 ONNX provider 报告 `"local-onnx"`，因此
 前端只做这一个映射，其余原样透传。`TranslationConfig` 的 `region` / `app_id`
 随整包 `save_settings` 持久化；Secret 与 API Key 一律不进入前端 store、配置、
-事件或日志。
+事件或日志。模型下载进度仅进内存 store，模型内容不进入前端任何状态。
 
 ### Stores (stores/)
 
@@ -172,6 +237,13 @@ interface AppState {
   error: string | null;
   setMode: (mode: 'single' | 'live') => void;
   setStatus: (status: PipelineStatus) => void;
+  // ── 模型下载/状态（发行部署）──
+  modelStatus: ModelStatusReport | null;             // get_model_status / retry 快照
+  modelDownloadProgress: ModelDownloadProgress | null; // 最近一次下载进度事件
+  translationModelDownloading: boolean;              // 下载在途标记（store 常驻，关闭面板不中断）
+  setModelStatus: (report: ModelStatusReport) => void;
+  setModelDownloadProgress: (progress: ModelDownloadProgress | null) => void;
+  setTranslationModelDownloading: (downloading: boolean) => void;
 }
 ```
 
@@ -191,11 +263,16 @@ src/
     ModeToggle.tsx
     LanguageSelector.tsx
     ProviderToggle.tsx
+    ProviderSelect.tsx       # 主窗口引擎下拉（local 禁用联动）
+    ModelSetupBanner.tsx     # 模型未就位错误横幅 + 重试（R6）
+    ModelDownloadCard.tsx    # 设置面板「本地翻译模型」下载卡片
     SettingsPanel.tsx
     DebugPanel.tsx
     ErrorBanner.tsx
     StatusBar.tsx
     ResultCard.tsx
+    MultiBoxResults.tsx
+    TranslationBoxList.tsx
   hooks/
     useDebugFrame.ts
   stores/
@@ -206,6 +283,7 @@ src/
     translateActions.ts    # 主窗口与悬浮球共用翻译状态机
     resultAppearance.ts    # 迷你条外观应用与持久化
     floaterAppearance.ts   # 悬浮球外观应用与持久化
+    modelActions.ts        # 模型下载/状态动作（设置卡片与主窗口共用）
   utils/
     floaterPosition.ts     # 悬浮球位置 clamp 与 localStorage 记忆
     floaterVisibility.ts   # 悬浮球显隐
@@ -234,6 +312,11 @@ src/
 | Provider 切换表单 | 单元 | 设置面板按 provider 条件渲染端点/模型/区域/APP ID/Secret 字段；本地隐藏云端字段 |
 | 凭据 IPC | 单元 | `set_provider_credentials` 只发送提供的字段；百度 `appId` + `secret` 双字段载荷 |
 | ProviderToggle | 单元 | 六个选项、标签、选中态与 `aria-pressed` |
+| 本地引擎禁用联动 | 单元 | `localProviderBlockReason`：下载中 / 模型缺失 / 校验失败 → 仅 local 选项禁用 + 提示；云端不受影响；null 报告不阻断 |
+| 模型状态水合 | 单元 | `refreshModelStatus` 镜像快照进 store；翻译模型 `ready` 时清除在途标记与陈旧进度 |
+| 下载进度事件 | 单元 | `onModelDownloadProgress` 监听 `model_download_progress`；`applyModelDownloadProgress` 镜像进 store（模型已 ready 的迟到事件不改标记） |
+| 下载卡片 | 单元 | 按状态渲染下载/重新下载/删除（二次确认）/取消/刷新按钮；百分比取 `fraction` clamp 到 [0,1] |
+| 模型错误横幅 | 单元 | `hasModelSetupProblems`：`ocr_ready === false` 或非 optional 条目 invalid 显示；optional 条目不触发；重试按钮回调 |
 | 选区交互 | 手动 | 拖动生成矩形，Esc 取消，Enter 确认 |
 | 结果展示 | 手动 | OCR/翻译结果正确显示 |
 | 状态同步 | 手动 | 后端事件正确更新前端状态 |
@@ -261,6 +344,28 @@ src/
 - [ ] 窗口可置顶、拖动、缩放
 - [ ] 图标使用 Lucide React
 - [ ] README.md 完整
+
+### 发行部署验收（本任务：模型下载卡片 + 本地引擎联动）
+
+- [x] 设置面板「本地翻译模型」卡片：`get_model_status` 水合 + 下载/取消/
+      删除/刷新按钮 + `model_download_progress` 进度条；下载状态存 store，
+      关闭设置面板不中断后端下载
+- [x] `ProviderSelect` 本地引擎禁用联动：`localProviderBlockReason`
+      （missing/invalid/downloading）只禁用 local 选项并显示原因提示，云端
+      选项不受影响；下载中切换 local 另有后端守卫
+- [x] `ModelSetupBanner`（R6）：`hasModelSetupProblems` 条件显示 + 重试
+      （`retry_model_setup`），状态健康自动消失，不阻断主窗口
+- [x] services 新封装：`tauri.ts` 5 个无参数命令
+      （`download_translation_model` / `cancel_translation_model_download` /
+      `delete_translation_model` / `get_model_status` / `retry_model_setup`）+
+      `modelActions.ts`（refresh/download/cancel/delete/retry/
+      applyModelDownloadProgress）+ `events.ts` 的
+      `MODEL_DOWNLOAD_PROGRESS` / `onModelDownloadProgress`
+- [x] types 新契约：`ModelState` / `ModelEntryStatus` / `ModelStatusReport` /
+      `ModelDownloadProgress`（snake_case，与 Rust DTO 一致）+
+      `findTranslationModelEntry` / `hasModelSetupProblems` /
+      `localProviderBlockReason` / `TRANSLATION_MODEL_ENTRY_ID`
+- [x] 前端不保存任何模型内容；进度只进内存 store
 
 ## 开发注意事项
 

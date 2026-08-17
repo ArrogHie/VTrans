@@ -11,8 +11,16 @@
 
 ## 职责
 
-通过 Windows Credential Manager 安全存储和读取 API Key 等敏感凭据，支持按云端 Provider（OpenAI / DeepL /
-Google / Azure / 百度 / 预留腾讯）独立存取。禁止将凭据写入明文配置文件或日志。
+通过 Windows Credential Manager 或安装目录内的 DPAPI 加密文件安全存储和读取
+API Key 等敏感凭据，支持按云端 Provider（OpenAI / DeepL / Google / Azure /
+百度 / 预留腾讯）独立存取。禁止将凭据写入明文配置文件或日志。
+
+自发行部署（v0.1.0）起，**凭据本地化为默认后端**：应用层把凭据存进便携
+数据根内的单容器文件 `{exe}/data/credentials.bin`（[`DpapiFileStore`]，写入
+前经 Windows DPAPI `CryptProtectData` 加密，绑定 Windows 用户），替代系统
+凭据管理器作为默认。`WindowsCredentialStore`（Windows Credential Manager）
+保留为**迁移来源**与不可用时的兼容回退实现（容器路径由调用方传入，本
+crate 不假定固定位置）。
 
 ## 公开 API
 
@@ -69,6 +77,34 @@ impl CredentialTarget {
     pub const ALL: [Self; 7];                  // 全部目标，稳定顺序
     pub const fn as_str(self) -> &'static str; // 逻辑目标名
 }
+
+/// 安装目录内 DPAPI 加密文件凭据存储（发行部署默认后端）
+///
+/// 所有凭据存于单个容器文件，路径由调用方传入（应用层决定 data/ 根，
+/// 本 crate 不假定固定位置）。写入前经 CryptProtectData（DPAPI，绑定
+/// Windows 用户 + 应用熵常量）加密，容器文件永不包含明文 Key；每次变更
+/// 原子替换（同目录临时文件 + rename），并发调用经内部 mutex 串行化。
+pub struct DpapiFileStore { /* ... */ }
+
+impl DpapiFileStore {
+    /// 打开或创建容器文件（存在则保留已有凭据，父目录必须已存在）
+    pub fn new(path: &Path) -> Result<Self, SecurityError>;
+    /// 返回构造时传入的容器路径
+    pub fn path(&self) -> &Path;
+}
+
+impl CredentialStore for DpapiFileStore {
+    fn store(&self, target: &str, secret: &[u8]) -> Result<(), SecurityError>;
+    fn load(&self, target: &str) -> Result<Option<Vec<u8>>, SecurityError>;
+    fn delete(&self, target: &str) -> Result<(), SecurityError>;
+    fn list_targets(&self) -> Result<Vec<String>, SecurityError>;
+}
+
+/// 一次性迁移：把 Windows 凭据管理器中所有 `VTrans:` 前缀凭据逐条迁入
+/// `new_store`（读旧 → 写新 → 删旧，写失败不删旧，可安全重跑）。
+/// 返回成功迁移条数（无可迁移为 0，非错误）；仅当旧库整体不可枚举时
+/// 返回 Err，单条失败容忍并记录日志。
+pub fn migrate_windows_to_dpapi(new_store: &DpapiFileStore) -> Result<usize, SecurityError>;
 ```
 
 历史字符串 API（`store` / `load` / `delete` / `list_targets`）保持兼容，现有 `translation` 目标不受影响；
@@ -87,8 +123,30 @@ pub enum SecurityError {
     OperationFailed(String),
     #[error("windows api error: {0}")]
     WindowsApi(String),
+    #[error("credential file io error: {0}")]
+    FileIo(#[from] std::io::Error),      // DpapiFileStore 容器 open/read/write/rename
+    #[error("credential file is corrupted: {0}")]
+    CorruptedFile(String),               // 容器结构损坏（坏 magic/版本/截断/越界长度）
+    #[error("credential decryption failed: {0}")]
+    DecryptionFailed(String),            // DPAPI 解密失败（篡改/其他用户上下文保护）
 }
 ```
+
+## 已知限制
+
+- **DPAPI 用户绑定**：`DpapiFileStore` 的密文绑定创建时的 Windows 用户与
+  应用熵常量。把 `credentials.bin` 复制到其他用户/其他机器后读取会得到
+  `DecryptionFailed`（视为不可信密文，绝不静默当空库）；卸载重装**同一
+  用户**下凭据仍可读。
+- **路径由调用方传入**：本 crate 不假定容器位置；发行部署下由应用层固定
+  为 `{exe}/data/credentials.bin`（`CREDENTIAL_FILE_NAME`）。移到无写权限
+  目录（如 Program Files）会导致 store/delete 失败（`FileIo`）。
+- **迁移语义**：`migrate_windows_to_dpapi` 只迁移 `VTrans:` 前缀条目；
+  单条失败（含非 UTF-8 值）跳过并继续，返回值为成功条数；重跑安全
+  （已迁条目覆盖写入并再次删除遗留旧条目）。`WindowsCredentialStore`
+  保留为迁移来源与回退实现，未移除。
+- 应用层回退链（见 10-app.md）：DPAPI 文件存储不可用 → 系统凭据管理器；
+  再不可用 → 内存存储（凭据不持久化，使用时报明确错误）。
 
 ## 内部文件结构
 
@@ -99,7 +157,8 @@ crates/vtrans-security/
 └── src/
     ├── lib.rs            # re-export
     ├── manager.rs        # CredentialManager 实现
-    ├── credential_store.rs # Windows Credential Manager FFI 封装
+    ├── credential_store.rs # CredentialStore trait + Windows Credential Manager FFI 封装
+    ├── dpapi.rs          # DpapiFileStore（DPAPI 文件容器）+ migrate_windows_to_dpapi
     ├── mask.rs           # 日志掩码工具
     └── target.rs         # CredentialTarget 枚举（凭据目标唯一事实来源）
 ```
@@ -120,6 +179,10 @@ crates/vtrans-security/
 | 腾讯预留目标 | 单元 | `tencent` 目标可用（存储/读取通过） |
 | 非 UTF-8 blob | 单元 | 经 `load_for_provider` 返回 `OperationFailed` |
 | 日志掩码 | 单元 | 捕获 manager 日志，断言只含 `mask_key` 掩码形式、不含原始 Key |
+| DPAPI 文件存储往返 | 集成 | 真实 DPAPI：store/load/delete 往返、覆盖写、空密钥、容器文件不含明文（需 Windows 环境） |
+| 容器格式 | 单元 | 坏 magic / 不支持的版本 / 截断 / 越界长度 / 尾随垃圾 → `CorruptedFile`；空文件 = 空容器 |
+| 篡改密文 | 集成 | 结构合法但 blob 非 DPAPI → `DecryptionFailed`（Windows） |
+| 迁移 | 单元/集成 | mock 旧库：只迁 `VTrans:` 前缀、单条失败继续、写失败不删旧、非 UTF-8 跳过、返回成功条数 |
 
 ## 验收标准
 
@@ -134,7 +197,10 @@ crates/vtrans-security/
 
 ## 开发注意事项
 
-- 使用 windows crate 的 CredWriteW/CredReadW/CredDeleteW API
+- 使用 windows crate 的 CredWriteW/CredReadW/CredDeleteW API（WindowsCredentialStore）
+- `DpapiFileStore` 使用 `crypt32.dll` 的 CryptProtectData/CryptUnprotectData
+  （`CRYPTPROTECT_UI_FORBIDDEN` + 应用熵常量），unsafe 块附 SAFETY 注释；
+  容器格式 magic `VTRANCRD`、版本 1，改格式必须升版本
 - target 前缀统一为 "VTrans:" 避免与其他应用冲突
 - CredentialType 使用 CRED_TYPE_GENERIC
 - 测试中如无 Windows Credential Manager 可用，mock store 行为

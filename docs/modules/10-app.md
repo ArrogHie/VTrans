@@ -20,6 +20,7 @@
 ```rust
 t::generate_handler![
     start_region_selection,
+    cancel_region_selection,
     capture_once,
     start_live_translation,
     stop_live_translation,
@@ -44,8 +45,40 @@ t::generate_handler![
     stop_multi_realtime,      // ()
     stop_box,                 // (boxId)
     open_result_window,       // ()
+    download_translation_model,        // ()（无参数）
+    cancel_translation_model_download, // ()（无参数）
+    delete_translation_model,          // ()（无参数）
+    get_model_status,                  // () -> ModelStatusReport
+    retry_model_setup,                 // () -> ModelStatusReport
 ]
 ```
+
+### 翻译模型下载与状态 Commands（5 个，均无参数）
+
+`ModelStatusReport`（IPC DTO）与单条目状态
+`ModelState`（serde 小写 `"ready" | "missing" | "invalid"`）：
+
+```
+ModelStatusReport {
+  entries: [{ id, state, optional }], // manifest 每个条目（OCR + 翻译，optional 含）
+  ocr_ready: bool,                    // 全部 OCR 模型 + 字典就位
+  translation_ready: bool,            // 翻译模型 + tokenizer 就位
+}
+```
+
+分类语义与 `ModelManager::verify_integrity` 一致：optional 条目缺失是
+`missing`（「未安装」，非失败）；存在但校验失败是 `invalid`。
+
+| Command | 参数 | 返回 | 行为 |
+|---------|------|------|------|
+| `download_translation_model` | 无 | `()` | 从 manifest `translation.model.download_url` 流式下载到 `{data}/models/translation/model.onnx.part`（已有 `.part` 用 `Range` 头续传；`206` 追加、`200` 从头重下）；节流发射 `model_download_progress`；完成后在阻塞池做 SHA-256 校验，通过则原子 rename 为 `model.onnx`，不匹配则删除 `.part`（**损坏字节绝不覆盖已装模型**）；成功后刷新模型状态并重建本地 provider。已在下载中 → `AppError::ModelDownload`（"下载已在进行中"）；无下载 URL → `ModelDownload`；manifest 不可用 → `ModelNotReady`。promise 在完成/失败/取消时结算 |
+| `cancel_translation_model_download` | 无 | `()` | 取消在途下载（CancellationToken），下载 promise 以「下载已取消」结算；`.part` **保留**供下次续传；无活动下载时 no-op |
+| `delete_translation_model` | 无 | `()` | 先取消在途下载并**有界等待**（5s）槽位释放；删除 `model.onnx` 与残留 `.part`（已不存在容忍）；刷新状态并重建本地 provider（配置为 `local` 时退化到「未安装」占位）。无 manifest / 未配置翻译条目时 no-op |
+| `get_model_status` | 无 | `ModelStatusReport` | **严格只读**：用与 `verify_integrity` 相同的分类重跑校验（optional 缺失 = 未安装，存在但坏 = 失败），不复制、不删除、不修复；manifest 不可用时回退启动时记录的快照（含修复错误）。前端启动错误横幅由此派生 |
+| `retry_model_setup` | 无 | `ModelStatusReport` | 重跑自愈配置 pass `ensure_data_models`（manifest 与缺失/损坏的**必选**文件从包内只读源重拷，optional 条目永不复制）；有修复错误时返回 `AppError::ModelNotReady`（附原因），状态快照仍可经 `get_model_status` 获取；OCR/本地 provider 若此前退化且现已就位则重建（免重启生效） |
+
+下载中切换 provider 到 `"local"` 被双重拒绝（后端 `reject_local_switch_during_download`
++ 前端禁用选项），避免加载半写文件；`save_settings` 也走同一守卫。
 
 ### 多框实时翻译 Commands（8 个）
 
@@ -105,12 +138,16 @@ vtrans-config 校验一致；旧 id `"api"` 已废弃（v4→v5 迁移重命名�
 ```rust
 pub struct AppState {
     config: RwLock<ConfigManager>,
-    credentials: CredentialManager,
+    credentials: Arc<CredentialManager>,
     pipeline: RwLock<Option<Pipeline>>,          // 单框流水线
     ocr_provider: RwLock<Box<dyn OcrProvider>>,
     translation_provider: RwLock<Box<dyn TranslationProvider>>,
     capture_source: WindowsCaptureSource,
-    model_manager: ModelManager,
+    model_manager: Option<Arc<ModelManager>>,   // {data}/models 的清单；加载失败为 None（降级启动）
+    data_models_dir: PathBuf,                   // 运行时模型目录（默认 {exe}/data/models，可被 config.model_dir 覆盖）
+    bundled_models_dir: Option<PathBuf>,        // 包内只读模型源 resource_dir()/resources/models
+    model_status: RwLock<ModelStatusReport>,    // 模型就位快照（启动/下载/删除/重试后更新）
+    model_download: RwLock<Option<CancellationToken>>, // 在途翻译模型下载槽（Some = 下载占用）
     // ── 多框实时翻译 ──
     multi_pipeline: RwLock<Option<Arc<MultiBoxPipeline>>>, // 懒初始化
     multi_forwarder: Mutex<Option<JoinHandle<()>>>,        // 结果/状态 forwarder task
@@ -128,6 +165,12 @@ impl AppState {
     fn add_multi_box_id(&self, box_id: u32);    // 去重登记
     fn remove_multi_box_id(&self, box_id: u32);
     fn multi_box_ids_snapshot(&self) -> Vec<u32>;
+    // ── 模型下载槽（commands.rs 下载流程持有 CancellationToken）──
+    fn try_start_model_download(&self, token: CancellationToken) -> bool; // 占用槽位，已在下载返回 false
+    fn finish_model_download(&self);              // 下载任务结束后释放槽位
+    fn model_download_active(&self) -> bool;      // 在途下载标记（provider 切换守卫用）
+    fn cancel_model_download(&self);              // 请求取消在途下载
+    async fn cancel_and_wait_model_download(&self, wait: Duration); // 取消并有界等待槽位释放
 }
 ```
 
@@ -145,6 +188,39 @@ impl AppState {
   再清 pipeline 与 id 列表，保证下次 `start_multi_realtime` 从最新配置重建。
 - 单框与多框互不影响：`Pipeline` 与 `MultiBoxPipeline` 独立实例，共享
   provider 但各持独立 CaptureSession（可同时运行，资源消耗加倍）。
+
+### 数据目录锚定与启动容错（发行部署 R1–R6）
+
+- **数据根**：`paths.rs::resolve_data_root` = `{exe_dir}/data`（纯路径运算
+  `resolve_data_root_for` + 启动时 `create_dir_all`）。安装版与开发版都不再
+  写 `%APPDATA%`；目录创建失败仅 `warn!` 并继续（下游 `ConfigManager` 会给
+  出明确错误）。数据根内布局：`config.json` / `credentials.bin` / `logs/` /
+  `models/`（详见 DEVELOPMENT.md §9）。
+- **旧配置一次性迁移**：`migrate_legacy_config_if_needed` 在首次启动时把
+  `%APPDATA%\com.vtrans.app\config.json` 复制进便携数据根（仅当便携文件尚
+  不存在），失败仅 `warn!` 不阻断启动。
+- **包内模型源**：`bundled_models_dir` = `resource_dir()/resources/models`
+  （安装版与 dev 均在 exe 目录旁），缺失时回退源码检出
+  `src-tauri/resources/models`；两者皆无则模型自愈禁用（启动继续、状态
+  快照记录错误）。
+- **启动自愈**：`ensure_data_models`（model_setup.rs）每次启动与
+  `retry_model_setup` 时执行——manifest 与缺失/校验失败的**必选**文件从
+  包内源重拷（幂等、自愈，删除/损坏 `{data}/models` 后重启即恢复）；
+  optional 条目（翻译模型）**永不复制**，只分类（missing 保持 missing）。
+- **启动容错**：配置或采集初始化失败才终止启动；**模型问题永不阻断启动**：
+  manifest 不可用 → `model_manager: None`；OCR 加载失败 →
+  `UnavailableOcrProvider`（id `unavailable-ocr`）；配置的翻译 provider
+  组装失败 → `UnavailableTranslationProvider`（id `unavailable-translation`），
+  均以明确中文错误应答。翻译入口命令（`capture_once` / `start_live_translation` /
+  `start_multi_realtime`）经 `ocr_ready_gate` 在 OCR 未就位时直接返回
+  `AppError::ModelNotReady`（"OCR 模型未就位，请重试模型修复"），而非运行
+  中静默失败；修复后（重试/重启）OCR 与本地 provider 按需重建，免重启生效。
+- **DpapiFileStore 构造点**：`state.rs::build_credential_manager` 在
+  `AppState::new_with_debug` 内构造 `DpapiFileStore::new(data_root/credentials.bin)`
+  ；（容器尚不存在 = 本数据根首启）时调用 `migrate_windows_to_dpapi` 一次性
+  迁移旧 Windows 凭据管理器条目。回退链：DPAPI 文件存储不可用 → 系统凭据
+  管理器；再不可用 → 内存存储（凭据不持久化）。迁移/构造失败均不阻断启动，
+  需要凭据时报明确错误。
 
 ### Events
 
@@ -170,6 +246,15 @@ pub fn emit_debug_frame(app: &AppHandle, payload: DebugFramePayload);
 日志纪律：`emit_multibox_result` 只记 `box_id`，译文不落日志；
 `emit_translation_single_result` 的原文/译文仅以 `truncate_for_log` 截断形式
 进入 debug 日志。
+
+### 模型下载进度 Event（1 个）
+
+| 事件名 | payload 形状 | 触发时机 |
+|--------|-------------|----------|
+| `model_download_progress` | `{ bytes: u64, total: u64, fraction: f32 }`（snake_case） | `download_translation_model` 期间节流发射：至少每 500ms 或每 1MiB 一次，完成时必发（`fraction = 1.0`）。`bytes` 含续传前缀；`total` 未知时为 0、`fraction` 为 0；发射失败仅 warn（设置面板关闭不影响下载） |
+
+下载流程日志只记录 URL 主机名（不落完整下载地址），下载完成的 sha256 校验
+失败会删除 `.part` 回滚。
 
 `original_text` 语义（与 pipeline 一致）：多框 `multibox://result` 携带清洗
 后的 OCR 原文（F1/F2 落地）；翻译失败或 OCR 空文本时该字段与译文均为空串
@@ -371,10 +456,13 @@ crates/vtrans-app/
 ├── README.md
 └── src/
     ├── lib.rs          # re-export, init_app
-    ├── state.rs         # AppState
-    ├── commands.rs      # Tauri command handlers
-    ├── events.rs        # 事件发送封装
+    ├── state.rs         # AppState（含 DpapiFileStore 构造、启动容错、下载槽）
+    ├── commands.rs      # Tauri command handlers（含 5 个模型下载/状态命令）
+    ├── events.rs        # 事件发送封装（含 model_download_progress）
     ├── hotkeys.rs       # 全局快捷键注册
+    ├── paths.rs         # 便携数据根解析 + 旧配置一次性迁移
+    ├── model_setup.rs   # ensure_data_models 自愈配置 + 只读 ModelStatusReport
+    ├── model_download.rs # 翻译模型下载编排（续传/校验/原子安装）
     └── setup.rs         # 应用启动初始化
 ```
 
@@ -422,9 +510,9 @@ Provider 与配置 id 一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
 
 ## 验收标准
 
-- [x] 所有 Commands 可被前端调用（`invoke_handler` 注册 26 个命令——18 个
-      基础命令 + 8 个多框命令，前端 `src/services/tauri.ts` 全部按 Tauri 2
-      camelCase 参数契约调用）
+- [x] 所有 Commands 可被前端调用（`invoke_handler` 注册 31 个命令——18 个
+      基础命令 + 8 个多框命令 + 5 个模型下载/状态命令，前端
+      `src/services/tauri.ts` 全部按 Tauri 2 camelCase 参数契约调用）
 - [x] 所有 Events 正确推送到前端（`events.rs` 单测 + `tests/contracts.rs`
       固化了事件名与 payload 形状）
 - [x] AppState 正确组装各模块实现（`AppState::new` / `new_with_debug`）
@@ -616,6 +704,28 @@ Provider 与配置 id 一致（`"openai"` / `"deepl"` / `"google"` / `"azure"` /
 - [x] 不新增 IPC 命令与事件；未修改 capture crate、vtrans-core 与其他
       crate；README（手工验证项 16 + 已知限制）与本文档同步
 - [x] 回归：fmt / clippy / app 单测 / workspace check 全绿
+
+### 发行部署验收（本任务：便携数据根 + 模型下载）
+
+- [x] 数据根锚定 `{exe}/data`（`resolve_data_root` / `resolve_data_root_for`
+      纯路径算术）；旧 `%APPDATA%\com.vtrans.app\config.json` 一次性迁移
+      （`migrate_legacy_config`，仅目标缺失时复制）
+- [x] 凭据本地化：`DpapiFileStore` 构造于 `data_root/credentials.bin`，
+      首启执行 `migrate_windows_to_dpapi`；回退链 DPAPI → Windows
+      Credential Manager → 内存存储，全部失败不阻断启动
+- [x] 启动自愈：`ensure_data_models` 每次启动/重试从包内只读源修复必选
+      文件，optional 条目（翻译模型）永不复制
+- [x] 启动容错：模型问题不阻断启动（占位 OCR/翻译 provider + 状态快照）；
+      `ocr_ready_gate` 使翻译入口在 OCR 未就位时返回明确错误
+- [x] 5 个新命令注册进 `invoke_handler` 且均无参数：
+      `download_translation_model` / `cancel_translation_model_download` /
+      `delete_translation_model` / `get_model_status` / `retry_model_setup`
+- [x] `model_download_progress` 事件 payload `{ bytes, total, fraction }`
+      （snake_case，500ms/1MiB 节流，完成必发）；下载 .part 续传 +
+      sha256 校验失败回滚 + 原子 rename 安装
+- [x] 下载中切换 `local` 被后端守卫拒绝（`reject_local_switch_during_download`，
+      与前端禁用选项双重保险）
+- [x] 日志纪律：下载只记 URL 主机名；`{data}/logs/` 小时轮转（setup.rs）
 
 ## 开发注意事项
 

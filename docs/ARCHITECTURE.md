@@ -139,7 +139,7 @@ Phase 0 合并后、Phase 1 启动前，进行一次架构审查，确保以下�
 日志格式：
 - 开发环境：控制台输出，带时间戳和着色
 - 生产环境：滚动日志文件，按小时轮转，保留 5 个文件
-- 日志路径：Tauri AppConfig 目录下的 logs/ 子目录
+- 日志路径：便携数据根 `{exe}/data/logs/` 子目录（见 docs/DEVELOPMENT.md §9）
 
 敏感数据红线：
 - 禁止记录 API Key、Bearer Token、用户原文完整内容、译文完整内容
@@ -191,7 +191,9 @@ vtrans-app:         AppError
 测试数据：
 - tests/fixtures/ 目录存放固定测试素材（图片、文本样本）
 - 图片素材不超过 100KB，文本样本不超过 10KB
-- 模型文件不提交 Git，通过 manifest 和下载脚本管理
+- OCR 模型随仓库 Git LFS 入库并打包内置（`bundle.resources`）；可下载的翻译
+  模型不进仓库/安装包（manifest `"optional": true` + 下载元数据），运行时由
+  下载流程安装到 `{exe}/data/models/`（见 docs/DEVELOPMENT.md §4 / §9）
 
 ### 5.4 代码风格
 
@@ -354,7 +356,7 @@ set_ocr_language(lang)      -> Result<(), AppError>
 set_source_language(lang)   -> Result<(), AppError>
 set_target_language(lang)   -> Result<(), AppError>
 set_translation_provider(id)-> Result<(), AppError>
-load_local_models()         -> Result<ModelLoadReport, AppError>
+load_local_models()         -> Result<VerifyReport, AppError>
 save_settings(settings)     -> Result<(), AppError>
 get_app_status()            -> Result<AppStatus, AppError>
 ```
@@ -368,8 +370,28 @@ translation_started      { timestamp: u64 }
 translation_completed    { result: TranslationResult }
 pipeline_error           { message: String, recoverable: bool }
 model_loading_progress   { model_id: String, progress: f32 }
+model_download_progress  { bytes: u64, total: u64, fraction: f32 }
 live_session_stopped     { reason: String }
 ```
+
+`model_download_progress` 在翻译模型下载期间节流发射（至少每 500ms 或每
+1MiB，完成时必发）；字段为 snake_case（与前端 `ModelDownloadProgress` 类型
+一致），`fraction = bytes / total`（clamp 到 [0,1]，total 未知时为 0）。
+
+#### 翻译模型下载与状态 Command（vtrans-app 定义，5 个，均无参数）
+
+```
+download_translation_model()          -> Result<(), AppError>
+cancel_translation_model_download()   -> Result<(), AppError>
+delete_translation_model()            -> Result<(), AppError>
+get_model_status()                    -> Result<ModelStatusReport, AppError>
+retry_model_setup()                   -> Result<ModelStatusReport, AppError>
+```
+
+`ModelStatusReport { entries: [{ id, state: "ready" | "missing" | "invalid",
+optional }], ocr_ready, translation_ready }`。详细语义（下载/续传/回滚、
+模型就位分类、启动容错）见 `docs/modules/10-app.md` 与
+`docs/modules/08-models.md`。
 
 #### 多框实时翻译 Command（vtrans-app 定义，8 个）
 
