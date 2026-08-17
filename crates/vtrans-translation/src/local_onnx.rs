@@ -1063,6 +1063,9 @@ mod tests {
             path: PathBuf::from(path),
             sha256: "abc".to_string(),
             size_bytes: 1,
+            optional: false,
+            download_url: None,
+            download_size_bytes: None,
         }
     }
 
