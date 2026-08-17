@@ -1,9 +1,15 @@
 # 模型文件
+# `*.onnx` 全局忽略保留：任何新增大模型文件默认不入库，防止误提交。
 *.onnx
 *.bin
 src-tauri/resources/models/ocr/*
 !src-tauri/resources/models/ocr/ppocrv6_dict.txt
+# OCR 推理模型随仓库 LFS 跟踪（见 .gitattributes 的 *.onnx filter=lfs）
+!src-tauri/resources/models/ocr/*.onnx
+# 翻译模型目录默认忽略；仅内置 tokenizer 随仓库跟踪，
+# translation/model.onnx（约 403MB）经下载获取，永不入库。
 src-tauri/resources/models/translation/*
+!src-tauri/resources/models/translation/tokenizer.json
 
 # PP-OCRv6 准备脚本的中间产物（下载包、转换、基准）
 scripts/ppocrv6/work/
