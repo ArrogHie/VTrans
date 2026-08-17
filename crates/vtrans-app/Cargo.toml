@@ -17,6 +17,7 @@ vtrans-models = { workspace = true }
 vtrans-pipeline = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -25,6 +26,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true, features = ["jpeg"] }
 base64 = "0.22"
+# Streaming download of the optional translation model (workspace feature
+# set already enables `stream` + rustls).
+reqwest = { workspace = true }
+# Incremental SHA-256 of the downloaded model file.
+sha2 = "0.10"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"

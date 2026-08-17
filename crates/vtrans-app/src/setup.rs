@@ -1,7 +1,7 @@
 //! Tauri application bootstrap helpers.
 
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tauri::{App, AppHandle, Builder, Manager, Runtime};
 use tauri_plugin_global_shortcut::Builder as GlobalShortcutBuilder;
@@ -14,6 +14,7 @@ use crate::commands::invoke_handler;
 use crate::error::AppError;
 use crate::hotkeys::register_hotkeys;
 use crate::overlay::OVERLAY_WINDOW_LABEL;
+use crate::paths::{migrate_legacy_config_if_needed, resolve_data_root};
 use crate::state::AppState;
 use crate::tray::{setup_tray, show_main_window};
 use crate::window_exclusion::exclude_app_windows_from_capture;
@@ -37,16 +38,16 @@ pub(crate) struct LoggingGuard(
 
 /// Initializes the shared tracing subscriber for the application.
 ///
-/// Log records go to the console and to `app_data_dir/logs` with hourly
-/// rotation (five files retained; see [`vtrans_core::init_logging`]). The
-/// configured `log_level` is used unless the `RUST_LOG` environment variable
-/// overrides it.
+/// Log records go to the console and to `{data}/logs` with hourly rotation
+/// (five files retained; see [`vtrans_core::init_logging`]). The configured
+/// `log_level` is used unless the `RUST_LOG` environment variable overrides
+/// it.
 ///
 /// Returns `None` when the subscriber is already initialized (for example by
 /// an embedding host or a test harness); the application continues without
 /// file logging in that case instead of failing to start.
-fn init_app_logging(app_data_dir: &Path, level: &str) -> Option<WorkerGuard> {
-    let log_dir = app_data_dir.join("logs");
+fn init_app_logging(data_root: &Path, level: &str) -> Option<WorkerGuard> {
+    let log_dir = data_root.join("logs");
     match init_logging(&log_dir, level) {
         Ok(guard) => {
             info!(log_dir = %log_dir.display(), level, "tracing initialized");
@@ -75,22 +76,33 @@ fn init_app_logging(app_data_dir: &Path, level: &str) -> Option<WorkerGuard> {
 ///
 /// # Errors
 ///
-/// Returns an application error when paths, providers, or shortcuts fail to initialize.
+/// Returns an application error when the executable location, paths,
+/// configuration, capture, or shortcuts fail to initialize. Model problems
+/// never fail startup: provisioning runs inside [`AppState::new_with_debug`]
+/// and degrades to a recorded status plus placeholder providers.
 #[tracing::instrument(skip_all)]
 pub fn init_app(app: &mut App<tauri::Wry>) -> Result<(), AppError> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| AppError::Tauri(error.to_string()))?;
-    let config = ConfigManager::new(&app_data_dir)
+    // R1: all mutable state lives under a single portable `{exe}/data` root.
+    // A legacy roaming `config.json` is migrated in once on first boot.
+    let data_root = resolve_data_root()?;
+    migrate_legacy_config_if_needed(&data_root);
+    let config = ConfigManager::new(&data_root)
         .and_then(|manager| manager.load())
         .map_err(AppError::from)?;
-    if let Some(guard) = init_app_logging(&app_data_dir, &config.log_level) {
+    if let Some(guard) = init_app_logging(&data_root, &config.log_level) {
         app.manage(LoggingGuard(guard));
     }
     let debug_mode = parse_debug_mode();
-    info!(debug_mode, "debug mode flag resolved");
-    let state = AppState::new_with_debug(&app_data_dir, debug_mode)?;
+    info!(debug_mode, data_root = %data_root.display(), "debug mode flag resolved");
+    // R2: locate the read-only bundled model source (resource dir first,
+    // source checkout as a dev fallback).
+    let bundled_models = bundled_models_dir(app);
+    if let Some(dir) = &bundled_models {
+        info!(bundled_models = %dir.display(), "bundled model source located");
+    } else {
+        warn!("bundled model source unavailable; model provisioning is disabled for this run");
+    }
+    let state = AppState::new_with_debug(&data_root, bundled_models.as_deref(), debug_mode)?;
     app.manage(state);
     app.state::<AppState>().attach_handle(app.handle().clone());
     setup_tray(app.handle())?;
@@ -109,6 +121,34 @@ pub fn init_app(app: &mut App<tauri::Wry>) -> Result<(), AppError> {
     exclude_app_windows_from_capture(app.handle());
     register_hotkeys(app.handle())?;
     Ok(())
+}
+
+/// Locates the read-only bundled model source (`resource_dir()/resources/models`).
+///
+/// On Windows the Tauri resource directory is the executable directory in
+/// both dev (tauri-build copies the resources there) and production (NSIS
+/// places them next to the exe), so `{resource_dir}/resources/models` works
+/// for both. A source-checkout fallback keeps `cargo run`-style flows alive
+/// when the resource copy is stale.
+fn bundled_models_dir(app: &App<tauri::Wry>) -> Option<PathBuf> {
+    let resource_models = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join("resources")
+        .join("models");
+    if resource_models.join("manifest.json").exists() {
+        return Some(resource_models);
+    }
+    let checkout_models = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("src-tauri")
+        .join("resources")
+        .join("models");
+    if checkout_models.join("manifest.json").exists() {
+        return Some(checkout_models);
+    }
+    None
 }
 
 /// Resolves whether Debug mode is enabled for this run.

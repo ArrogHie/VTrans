@@ -12,6 +12,12 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - 维护常驻选区 overlay 窗口，在屏幕上持续显示当前捕获区域边界。
 - Debug 模式下把进入 OCR 前的捕获帧以缩略图形式实时推送到前端面板。
 - 使用 AppError 将底层错误映射为可序列化、可展示的用户错误信息。
+- **便携数据布局**：所有可变状态收敛到单一数据根 `{exe}/data/`
+  （config.json、logs/、credentials.bin、models/），安装目录即数据目录，
+  不依赖 `%APPDATA%` / `%LOCALAPPDATA%`。
+- **模型就位与下载**：首启自动把内置 OCR 模型/字典/tokenizer 就位到
+  `{data}/models`（可自修复），翻译模型经 `download_translation_model`
+  从 manifest `download_url` 下载并 sha256 校验；模型未就位不阻断启动。
 
 ## 依赖关系
 
@@ -42,6 +48,9 @@ VTrans 的 Rust 应用层：组装各模块的生产实现，提供 Tauri Comman
 - tauri-plugin-single-instance：阻止多实例并存，避免全局快捷键冲突。
 - image：捕获帧缩放与 JPEG 编码（Debug 模式）。
 - base64：调试缩略图 Base64 编码（跨 IPC 事件 payload）。
+- reqwest（workspace 特性集已含 `stream` + rustls）：翻译模型流式下载。
+- sha2：下载文件 SHA-256 校验与测试夹具哈希。
+- futures：下载字节流的 `StreamExt` 消费。
 - windows 0.61：Win32 `SetWindowDisplayAffinity`（窗口捕获排除）。与 tauri
   2.11.5 使用同一 0.61 版本线，保证 `WebviewWindow::hwnd()` 返回的
   `HWND` 与 Win32 调用参数类型一致；仅启用 `Win32_Foundation` 与
@@ -56,7 +65,11 @@ pub struct AppState { /* managed by Tauri */ }
 
 impl AppState {
     pub fn new(app_data_dir: &Path) -> Result<Self, AppError>;
-    pub fn new_with_debug(app_data_dir: &Path, debug_mode: bool) -> Result<Self, AppError>;
+    pub fn new_with_debug(
+        app_data_dir: &Path,
+        bundled_models_dir: Option<&Path>,
+        debug_mode: bool,
+    ) -> Result<Self, AppError>;
 }
 
 pub struct AppStatus {
@@ -69,10 +82,37 @@ pub struct AppStatus {
     pub model_progress: Option<f32>,
     pub debug_mode: bool,
 }
+
+pub enum ModelState { Ready, Missing, Invalid } // 序列化为 "ready"/"missing"/"invalid"
+
+pub struct ModelEntryStatus {
+    pub id: String,
+    pub state: ModelState,
+    pub optional: bool,
+}
+
+pub struct ModelStatusReport {
+    pub entries: Vec<ModelEntryStatus>,
+    pub ocr_ready: bool,
+    pub translation_ready: bool,
+}
 ~~~
 
-AppState::new 从 app_data_dir/config.json 加载配置，默认从 app_data_dir/models/manifest.json 加载模型 manifest；AppConfig.model_dir 可以覆盖模型目录。
-AppState::new_with_debug 额外接收 Debug 模式开关（仅本次运行有效，不持久化）。
+`app_data_dir` 是便携数据根 `{exe}/data`（由 `setup::init_app` 经
+`paths::resolve_data_root` 解析并创建）。`AppState` 在其下管理
+`config.json`、`credentials.bin`（DPAPI 文件凭据库）、`logs/` 与
+`models/`；`AppConfig.model_dir` 可覆盖模型目录（高级配置，无 UI、不改
+schema）。`bundled_models_dir` 是只读内置模型源
+（`resource_dir()/resources/models`），用于首启模型就位与自修复。
+
+模型相关构造遵循**启动容错**：config 与 capture 失败才导致启动失败；
+模型就位/加载失败只 `warn!` 记录并写入 `ModelStatusReport` 状态快照，
+OCR/翻译 Provider 降级为占位实现（id 分别为 `"unavailable-ocr"` /
+`"unavailable-translation"`），翻译入口命令返回明确错误
+（「OCR 模型未就位，请重试模型修复」），应用照常启动。首启还会：
+把旧版 `%APPDATA%\com.vtrans.app\config.json` 迁移一次到
+`data/config.json`（失败仅 `warn!`）；在 `credentials.bin` 不存在时执行
+Windows 凭据管理器 → DPAPI 文件库的凭据迁移（失败仅 `warn!`）。
 
 ### Tauri Commands
 
@@ -105,6 +145,11 @@ start_multi_realtime() -> Result<(), AppError>
 stop_multi_realtime() -> Result<(), AppError>
 stop_box(box_id: u32) -> Result<(), AppError>
 open_result_window() -> Result<(), AppError>
+download_translation_model() -> Result<(), AppError>
+cancel_translation_model_download() -> Result<(), AppError>
+delete_translation_model() -> Result<(), AppError>
+get_model_status() -> Result<ModelStatusReport, AppError>
+retry_model_setup() -> Result<ModelStatusReport, AppError>
 ~~~
 
 `capture_once` 在流水线运行期间并发消费事件通道，把 `ocr_started`、
@@ -112,6 +157,72 @@ open_result_window() -> Result<(), AppError>
 因此不发送 `live_session_stopped`），命令本身仍只返回最终的 `OcrResult`。
 单次翻译完成后还通过 `translation://single-result` 事件把原文和译文推送
 到翻译弹窗，不再在主页面显示结果。
+
+### 便携数据布局与模型管理命令
+
+**数据根**：`{exe}/data/`（`current_exe` 父目录 + `data`），由
+`setup::init_app` 解析并创建；开发模式 exe 位于 `target/debug`，因此
+开发数据根为 `target/debug/data/`（已接受行为，不影响安装版）。目录结构：
+
+```text
+{exe}/
+├── vtrans.exe
+├── resources/models/        # 只读内置源（随包）：manifest.json、ocr/**、
+│                            #   translation/tokenizer.json（不含 model.onnx）
+└── data/                    # 便携数据根（首启自动创建）
+    ├── config.json          # 旧版 %APPDATA%\com.vtrans.app\config.json 迁移一次
+    ├── credentials.bin      # DPAPI 加密的凭据容器（首启从 Windows 凭据管理器迁移）
+    ├── logs/
+    └── models/              # 运行时模型根（config.model_dir 可覆盖）
+        ├── manifest.json    # 首启从内置源复制
+        ├── ocr/…            # 内置 OCR 模型/字典，缺失或校验失败自动重拷（自修复）
+        └── translation/
+            ├── tokenizer.json   # 内置
+            ├── model.onnx       # 下载安装（约 403MB，不随包、不入库）
+            └── model.onnx.part  # 下载临时文件（保留供断点续传）
+```
+
+**模型就位**（`model_setup::ensure_data_models`，启动时与
+`retry_model_setup` 执行）：对 manifest 每个条目，`data/models` 下缺失
+或 sha256 不符 → 从内置源复制（`vtrans_models::verify::verify_entry`
+校验）；optional 条目（`translation.model`）**不复制**（无内置源，走下载）。
+幂等、可自恢复：删除或损坏 `data/models` 后重启（或点「重试」）即修复。
+
+**五个模型管理命令**（全部无参数，注册进 `invoke_handler`）：
+
+- `download_translation_model()`：从 manifest `translation.model.download_url`
+  流式下载到 `model.onnx.part`；`.part` 已存在时带 `Range` 头断点续传
+  （响应非 206 则从头下载）；完成 sha256 校验后原子 rename 为
+  `model.onnx`（Windows 下 rename 覆盖既有文件）；promise 在完成/失败/
+  取消时 resolve。并发下载返回明确错误。下载成功后刷新状态快照并按
+  `save_settings`/`prepare_translation_provider` 同模式重建 local provider。
+  校验失败删除 `.part`、绝不 rename，返回明确 `AppError::ModelDownload`。
+  进度经 `model_download_progress` 事件推送，节流为每 500ms 或每 1MiB
+  （取先到者；完成后必发一次）。日志只记录 URL 的 host（可能带签名的
+  完整 URL 绝不入日志）。
+- `cancel_translation_model_download()`：触发 AppState 保存的
+  CancellationToken；下载 promise 以取消语义错误 resolve，`.part` 保留
+  供续传（校验状态不受污染）。无下载进行时为 no-op。
+- `delete_translation_model()`：先取消并（有界）等待下载任务释放槽位，
+  再删除 `model.onnx` 与残留 `.part`；当前 provider 为 `local` 时重建
+  provider（缺失态 → 前端「未安装」）。
+- `get_model_status()`：只读，复用 `verify_integrity` 语义映射为
+  `ModelStatusReport`（ready/missing/invalid；optional 缺失记 `missing`），
+  **不触发修复**。manifest 缺失时返回启动时记录的状态快照。
+- `retry_model_setup()`：重新执行 `ensure_data_models` 并返回最新状态
+  （R6 启动横幅「重试」）；OCR 或 local provider 由占位态恢复就绪时
+  立即重建，无需重启。
+
+下载进行中 `set_translation_provider` / `save_settings` 切到 `local`
+返回明确错误（与前端禁用双保险）；OCR 未就位（占位 provider）时
+`capture_once` / `start_live_translation`（含热键路径）/
+`start_multi_realtime` 返回「OCR 模型未就位，请重试模型修复」的明确
+错误，不静默失败。
+
+`manifest.json` 的 `translation.model` 已录入 `optional: true` +
+`download_url`（版本化占位直链，版本号与 workspace 版本一致）+
+`download_size_bytes`（与本机文件字节数一致）；**发布流程负责最终 URL
+与 sha256 回填**。
 
 ### 多框翻译命令（Multi-Box）
 
@@ -224,6 +335,9 @@ emit_pipeline_event 转发以下事件：
 - pipeline_error
 - live_session_stopped
 - model_loading_progress
+- model_download_progress：翻译模型下载进度，payload 为 snake_case
+  `{ bytes, total, fraction }`（`bytes` 含续传前缀、`total` 未知时为 0、
+  `fraction` 为 `bytes/total` 截断到 `[0.0, 1.0]`）
 - region_selected
 - overlay_region_updated
 - overlay_hidden
@@ -384,11 +498,14 @@ pub fn builder() -> tauri::Builder<tauri::Wry>
 
 src-tauri/src/main.rs 使用 builder()、generate_context!() 和 run() 完成宿主启动；capability 仍由宿主项目维护。
 
-init_app 在解析 app_data_dir 之后、创建 AppState 之前，通过
+init_app 在解析便携数据根 `{exe}/data` 之后、创建 AppState 之前，通过
 `vtrans_core::init_logging` 初始化 tracing：日志同时输出到控制台和
-`app_data_dir/logs`（按小时轮转，保留 5 个文件），级别取配置中的
+`{data}/logs`（按小时轮转，保留 5 个文件），级别取配置中的
 `log_level`（`RUST_LOG` 环境变量优先）。返回的 `WorkerGuard` 存入 Tauri
-管理的 `LoggingGuard`，确保非阻塞写入器在应用退出前完成刷新。
+管理的 `LoggingGuard`，确保非阻塞写入器在应用退出前完成刷新。init_app
+还完成：旧版 roaming `config.json` 的一次性迁移；内置模型源定位
+（`resource_dir()/resources/models`，dev 回退到源码 checkout 布局）；
+模型就位与 AppState 容错构造（见「便携数据布局」一节）。
 
 ## 构建与测试
 
@@ -431,8 +548,10 @@ cargo check -p vtrans
 模块测试计划中的以下项依赖 Windows 桌面环境（Graphics Capture、Credential
 Manager、模型文件），无法在无头环境自动化，登记为手工验证：
 
-1. **AppState 初始化**：部署模型文件到 `app_data_dir/models` 后启动应用；确认
-   启动日志出现 `application state initialized`，首次运行自动生成 `config.json`。
+1. **AppState 初始化**：启动应用（首启自动把内置模型就位到
+   `{data}/models`，dev 模式为 `target/debug/data/`）；确认启动日志出现
+   `application state initialized`，首次运行自动生成 `data/config.json`
+   与 `data/models/manifest.json`。
 2. **save_settings 全链路**：修改捕获间隔并保存，重启应用确认配置持久化；
    API 提供者需先在凭据管理器配置 key。
 3. **get_app_status 全链路**：启动后前端状态栏显示正确的 Provider、区域和
@@ -451,8 +570,9 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
    运行中切换应返回 `AlreadyRunning` 错误；重启应用确认配置持久化。
 7. **凭据全链路**：在设置面板为 openai/deepl/google/azure 输入 API Key、
    为 baidu 输入 APP ID + Secret 保存，确认日志只有掩码形式
-   （`sk-****1234`）；重启应用后凭据仍在（Credential Manager），翻译请求
-   携带新凭据生效；输入空串/超长值确认前端展示校验错误且不写入凭据。
+   （`sk-****1234`）；重启应用后凭据仍在（DPAPI 文件库
+   `data/credentials.bin`，或降级路径下的 Windows Credential Manager），
+   翻译请求携带新凭据生效；输入空串/超长值确认前端展示校验错误且不写入凭据。
 8. **get_app_config 水合**：在设置面板保存配置后修改配置文件中其它字段
    （如 OCR 语言），重启应用打开设置面板，确认显示后端真实值而非前端默认
    值；整包保存后其它字段不被覆盖。
@@ -512,6 +632,41 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
       `cargo run -p vtrans-capture --example wda_probe` 复核 WDA 在 WGC
       显示器捕获上的有效性（探针位于 vtrans-capture 的验证分支）。
 
+17. **便携数据布局（发行部署 R1/R2/R7）**：
+    - `cargo tauri build`（断网可完成编译阶段；若 NSIS 工具需要联网下载，
+      首次构建允许联网）后安装到 `D:\VTrans`，确认安装目录出现
+      `resources/models/`（manifest.json、ocr 模型/字典、tokenizer.json，
+      **无** translation/model.onnx）；
+    - 启动安装版，确认 `D:\VTrans\data\` 生成 config.json、logs/、
+      credentials.bin、models/（OCR 模型与字典自动就位），且
+      `%APPDATA%\com.vtrans.app`、`%LOCALAPPDATA%` 下无 VTrans 数据；
+    - **OCR 离线开箱即用**：断网状态安装并启动，框选翻译（云端引擎除外）
+      的 OCR 链路正常（可切到 local 引擎前先确认 OCR 已就位，通过
+      `get_model_status` 返回 `ocr_ready: true`）；
+    - **自恢复**：退出应用删除 `D:\VTrans\data\models`（或只删 ocr/det.onnx
+      并写坏 manifest），重启后确认模型自动恢复、状态报告回到 ready；
+    - 旧版数据迁移：在 `%APPDATA%\com.vtrans.app\config.json` 放置旧配置后
+      首启新版本，确认其被复制到 `data/config.json`（仅一次、不覆盖）。
+18. **翻译模型下载全流程（R4）**：设置页点下载，观察进度事件
+    `model_download_progress`（bytes/total/fraction 单调、节流、完成发
+    1.0）；下载中切到 local 引擎被后端明确拒绝；点取消后 promise 以取消
+    错误 resolve，`model.onnx.part` 保留；再次下载确认断点续传（服务器
+    支持 206 时 bytes 从上次进度继续）；下载完成后 `get_model_status`
+    报告 `translation_ready: true`，切换 local 引擎可离线翻译；删除模型
+    后状态回到「未安装」，再下载一次可恢复；用错误 sha256 的替代文件
+    模拟校验失败：`.part` 被清理、绝不出现坏 model.onnx、状态为
+    missing/invalid。
+19. **凭据迁移（R5）**：在 Windows 凭据管理器中预置 `VTrans:openai` 等
+    条目后首启新版本，确认日志出现迁移条数（info）且
+    `data/credentials.bin` 生成；重启后云端翻译仍可用且凭据管理器中的旧
+    条目已被删除；删除 `credentials.bin` 重启后确认迁移不再重复执行
+    （容器已存在即跳过），手工清空凭据管理器的验证留待发布流程。
+20. **启动容错（R6）**：删除 `data/models/manifest.json` 后启动（或首次
+    安装于无内置源的场景），确认应用仍能启动、主窗口经
+    `get_model_status` 显示错误横幅；此时框选/实时/多框翻译命令返回
+    「OCR 模型未就位，请重试模型修复」；点击横幅「重试」（或修复内置源
+    后重启）后状态恢复且无需重启即可翻译。
+
 以上各项的纯逻辑部分已有自动化测试：Provider 值域校验与配置更新
 （`validate_translation_provider_id` / `update_translation_provider_config`）、
 `AppStatus` 序列化契约、语言配置更新与目标语言校验、错误映射与事件转换。
@@ -524,7 +679,36 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
 
 ## 已知限制
 
-- AppState::new 需要可用的 Windows Graphics Capture 环境、模型 manifest 和对应模型文件；模型未部署时启动会返回 AppError::Model/AppError::Capture。
+- AppState::new 需要可用的 Windows Graphics Capture 环境与可写的配置目录；
+  模型 manifest/模型文件**不再**是启动前置条件——缺失时应用仍启动，OCR/
+  本地翻译降级为占位 provider 并返回明确错误（状态经 `get_model_status`
+  获取），由 `retry_model_setup` 或重启自修复。
+- **DPAPI 凭据用户绑定**：`credentials.bin` 由 DPAPI 按 Windows 用户
+  配置文件加密，换用户/换机后无法解密，凭据需重新录入（旧值迁移也只在
+  同用户上下文内有效）。
+- **安装模式**：NSIS 安装模式为 currentUser（tauri.conf.json 默认），
+  不支持 perMachine 安装；数据根锚定 exe 目录，因此安装到无写权限的
+  系统目录（如 `C:\Program Files`）会导致数据/凭据/模型写入失败——请
+  安装到用户可写目录（如 `D:\VTrans`）。
+- **开发模式数据根**：`cargo run`/`cargo tauri dev` 时 exe 位于
+  `target/debug`，数据根为 `target/debug/data/`；`cargo clean` 会连带
+  清除开发期数据与凭据（安装版不受影响）。
+- **LFS 要求**：`src-tauri/resources/models/ocr/*.onnx` 随仓库以 Git LFS
+  指针跟踪（`.gitattributes` 的 `*.onnx filter=lfs`），克隆仓库必须安装
+  git-lfs 并 `git lfs pull` 才能取得 OCR 模型；`*.onnx` 仍全局忽略，
+  `translation/model.onnx`（约 403MB）永不入库、经下载安装。
+- **打包资源 glob**：`bundle.resources` 中
+  `resources/models/ocr/**/*` 而非 `ocr/**`——glob crate 的 `**` 只匹配
+  目录、不匹配文件，tauri-build 会跳过目录并把空匹配视为构建错误
+  （实测 2.6.3 + glob 0.3）。`**/*` 是等价的递归文件形式。
+- **下载**：下载任务持有 CancellationToken（存 AppState），取消后
+  `.part` 保留供续传；续传依赖服务器返回 206（非 206 从头下载）。取消
+  请求发出后、下载循环退出前，切 local 仍会被拒绝（槽位释放即解除）。
+  下载中若进程退出，`.part` 下次启动可直接续传。校验/rename 在阻塞池
+  执行，不阻塞 UI 线程。
+- **下载 URL 占位**：manifest 的 `download_url` 是版本化占位直链，
+  发布流程负责最终 URL 与 sha256 回填；开发期下载前请先部署对应 release
+  资源。
 - 选区窗口的最终坐标由前端通过 update_live_region（携带当前模式
   `"single"` / `"live"`）确认；start_region_selection 会等待确认结果，
   Escape/关闭操作应调用 cancel_region_selection。
