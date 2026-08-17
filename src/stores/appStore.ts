@@ -6,6 +6,8 @@ import type {
   BoxedTranslationResult,
   LanguageCode,
   Mode,
+  ModelDownloadProgress,
+  ModelStatusReport,
   OcrResult,
   PipelineConfig,
   PipelineStatus,
@@ -37,6 +39,16 @@ interface AppState {
   multiBoxResults: Record<number, BoxedTranslationResult>;
   /** Latest single-capture result shown by the result window. */
   singleResult: SingleResultPayload | null;
+  /**
+   * Last `get_model_status` / `retry_model_setup` snapshot, `null` until the
+   * main window hydrates it. Drives the R6 startup banner and the local
+   * engine availability in the provider picker.
+   */
+  modelStatus: ModelStatusReport | null;
+  /** Last translation model download progress payload (`null` = none yet). */
+  modelDownloadProgress: ModelDownloadProgress | null;
+  /** Whether a translation model download is considered in flight. */
+  translationModelDownloading: boolean;
   setMode: (mode: Mode) => void;
   setStatus: (status: PipelineStatus) => void;
   setOcrResult: (result: OcrResult | null) => void;
@@ -44,6 +56,9 @@ interface AppState {
   setSelectedRegion: (region: ScreenRegion | null) => void;
   setError: (error: string | null) => void;
   setModelProgress: (progress: number | null) => void;
+  setModelStatus: (report: ModelStatusReport | null) => void;
+  setModelDownloadProgress: (progress: ModelDownloadProgress | null) => void;
+  setTranslationModelDownloading: (downloading: boolean) => void;
   providerSwitching: boolean;
   setProviderSwitching: (switching: boolean) => void;
   setConfig: (config: AppConfig) => void;
@@ -81,6 +96,9 @@ export const useAppStore = create<AppState>((set) => ({
   boxStatuses: {},
   multiBoxResults: {},
   singleResult: null,
+  modelStatus: null,
+  modelDownloadProgress: null,
+  translationModelDownloading: false,
   setMode: (mode) => set({ mode, error: null }),
   setStatus: (status) => set({ status, error: typeof status === "object" ? status.error : null }),
   setOcrResult: (ocrResult) => set({ ocrResult }),
@@ -88,6 +106,10 @@ export const useAppStore = create<AppState>((set) => ({
   setSelectedRegion: (selectedRegion) => set({ selectedRegion }),
   setError: (error) => set({ error, status: error ? { error } : "idle" }),
   setModelProgress: (modelProgress) => set({ modelProgress }),
+  setModelStatus: (modelStatus) => set({ modelStatus }),
+  setModelDownloadProgress: (modelDownloadProgress) => set({ modelDownloadProgress }),
+  setTranslationModelDownloading: (translationModelDownloading) =>
+    set({ translationModelDownloading }),
   setProviderSwitching: (switching) => set({ providerSwitching: switching }),
   setConfig: (config) => set({ config, hydrated: true }),
   setLiveConfig: (liveConfig) => set({ liveConfig }),

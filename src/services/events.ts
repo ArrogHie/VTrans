@@ -6,6 +6,7 @@ import type {
   BoxUpdatedPayload,
   BoxedTranslationResult,
   EventPayloadMap,
+  ModelDownloadProgress,
   OcrResult,
   PipelineConfig,
   SingleResultPayload,
@@ -38,6 +39,25 @@ export function onTranslationCompleted(
 /** Listen for a pipeline error and receive the human-readable message. */
 export function onPipelineError(callback: (message: string) => void): Promise<Unlisten> {
   return listenToEvent("pipeline_error", ({ message }) => callback(message));
+}
+
+/** Stable name of the backend translation-model download progress event. */
+export const MODEL_DOWNLOAD_PROGRESS = "model_download_progress";
+
+/**
+ * Listens for translation model download progress.
+ *
+ * Payload fields are snake_case (`bytes` / `total` / `fraction`) to match the
+ * Rust DTO. The backend throttles emissions during the download and stops
+ * after it settles, so callers treat progress events as the download-in-flight
+ * signal.
+ */
+export function onModelDownloadProgress(
+  callback: (progress: ModelDownloadProgress) => void,
+): Promise<Unlisten> {
+  return listen<ModelDownloadProgress>(MODEL_DOWNLOAD_PROGRESS, (eventPayload) =>
+    callback(eventPayload.payload),
+  );
 }
 
 /** Register all pipeline events and return one cleanup function. */
