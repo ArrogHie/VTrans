@@ -74,6 +74,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "resources/models/manifest.json",
+      "resources/models/ocr/**/*",
+      "resources/models/translation/tokenizer.json"
+    ],
     "icon": [
       "icons/icon.png",
       "icons/icon.ico"

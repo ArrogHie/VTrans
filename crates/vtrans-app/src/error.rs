@@ -65,6 +65,18 @@ pub enum AppError {
     #[error("provider credential error: {0}")]
     ProviderCredential(String),
 
+    /// The translation model download could not start, finish, or verify.
+    ///
+    /// Covers "already downloading", missing download metadata, network
+    /// failures, SHA-256 mismatches, and user-initiated cancellation.
+    #[error("model download error: {0}")]
+    ModelDownload(String),
+
+    /// A model (or the model manifest) required by the requested operation
+    /// is not ready (missing, corrupt, or unloaded).
+    #[error("model not ready: {0}")]
+    ModelNotReady(String),
+
     /// A Tauri operation failed.
     #[error("tauri error: {0}")]
     Tauri(String),
@@ -164,6 +176,12 @@ mod tests {
                 .to_string()
                 .contains("provider credential error")
         );
+        assert!(AppError::ModelDownload("sha256 mismatch".into())
+            .to_string()
+            .contains("model download error"));
+        assert!(AppError::ModelNotReady("OCR 模型未就位".into())
+            .to_string()
+            .contains("model not ready"));
         assert!(AppError::Tauri("boom".into())
             .to_string()
             .contains("tauri error"));

@@ -33,6 +33,15 @@ use vtrans_pipeline::{BoxStatus, BoxedTranslationResult, PipelineError, Translat
 //   stop_multi_realtime              -> {}
 //   stop_box                         -> { boxId }
 //   open_result_window               -> {}
+//   download_translation_model       -> {}
+//   cancel_translation_model_download -> {}
+//   delete_translation_model         -> {}
+//   get_model_status                 -> {}
+//   retry_model_setup                -> {}
+//
+// The five model-management commands take no arguments (Tauri 2 default
+// camelCase naming is irrelevant for them); their results are
+// `ModelStatusReport` (see below) or plain `()`.
 //
 // Do not add `rename_all = "snake_case"` to a command without updating
 // `src/services/tauri.ts` and `src/test/ipc.test.ts` on the frontend branch
@@ -270,4 +279,89 @@ fn translation_box_serde_uses_id_not_box_id() {
     let info_json = serde_json::to_string(&info).unwrap();
     assert!(info_json.contains(r#""box_id":3"#));
     assert!(!info_json.contains(r#""id":3"#));
+}
+
+// ── 发行部署：模型下载/状态 IPC 契约 ──
+
+#[test]
+fn model_download_progress_event_name_is_stable() {
+    assert_eq!(
+        vtrans_app::events::MODEL_DOWNLOAD_PROGRESS,
+        "model_download_progress"
+    );
+}
+
+#[test]
+fn model_download_progress_payload_matches_the_frontend_contract() {
+    use vtrans_app::events::ModelDownloadProgressPayload;
+    let payload = ModelDownloadProgressPayload {
+        bytes: 104_857_600,
+        total: 403_368_390,
+        fraction: 0.26,
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+    // Field names stay snake_case, exactly as TASK-10 specifies.
+    assert!(json.contains(r#""bytes":104857600"#));
+    assert!(json.contains(r#""total":403368390"#));
+    assert!(json.contains(r#""fraction":0.26"#));
+}
+
+#[test]
+fn model_status_report_matches_the_frontend_contract() {
+    use vtrans_app::{ModelEntryStatus, ModelState, ModelStatusReport};
+    let report = ModelStatusReport {
+        entries: vec![
+            ModelEntryStatus {
+                id: "ppocr-det-v6".to_string(),
+                state: ModelState::Ready,
+                optional: false,
+            },
+            ModelEntryStatus {
+                id: "opus-mt-en-zh-int8".to_string(),
+                state: ModelState::Missing,
+                optional: true,
+            },
+        ],
+        ocr_ready: true,
+        translation_ready: false,
+    };
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(json.contains(r#""entries""#));
+    assert!(json.contains(r#""id":"ppocr-det-v6""#));
+    assert!(json.contains(r#""state":"ready""#));
+    assert!(json.contains(r#""state":"missing""#));
+    assert!(json.contains(r#""optional":true"#));
+    assert!(json.contains(r#""ocr_ready":true"#));
+    assert!(json.contains(r#""translation_ready":false"#));
+}
+
+#[test]
+fn model_state_serializes_to_lowercase_identifiers() {
+    use vtrans_app::ModelState;
+    assert_eq!(
+        serde_json::to_string(&ModelState::Ready).unwrap(),
+        r#""ready""#
+    );
+    assert_eq!(
+        serde_json::to_string(&ModelState::Missing).unwrap(),
+        r#""missing""#
+    );
+    assert_eq!(
+        serde_json::to_string(&ModelState::Invalid).unwrap(),
+        r#""invalid""#
+    );
+}
+
+#[test]
+fn model_download_errors_are_frontend_safe_strings() {
+    let error = AppError::ModelDownload("翻译模型下载已在进行中".to_string());
+    assert_eq!(
+        serde_json::to_string(&error).unwrap(),
+        r#""model download error: 翻译模型下载已在进行中""#
+    );
+    let error = AppError::ModelNotReady("OCR 模型未就位，请重试模型修复".to_string());
+    assert_eq!(
+        serde_json::to_string(&error).unwrap(),
+        r#""model not ready: OCR 模型未就位，请重试模型修复""#
+    );
 }

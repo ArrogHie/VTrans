@@ -14,6 +14,7 @@ pub const TRANSLATION_COMPLETED: &str = "translation_completed";
 pub const PIPELINE_ERROR: &str = "pipeline_error";
 pub const LIVE_SESSION_STOPPED: &str = "live_session_stopped";
 pub const MODEL_LOADING_PROGRESS: &str = "model_loading_progress";
+pub const MODEL_DOWNLOAD_PROGRESS: &str = "model_download_progress";
 pub const REGION_SELECTED: &str = "region_selected";
 pub const OVERLAY_REGION_UPDATED: &str = "overlay_region_updated";
 pub const OVERLAY_HIDDEN: &str = "overlay_hidden";
@@ -152,6 +153,42 @@ pub fn emit_model_loading_progress<R: Runtime>(app: &AppHandle<R>, model_id: &st
     let payload = ModelProgressPayload { model_id, progress };
     if let Err(error) = app.emit(MODEL_LOADING_PROGRESS, payload) {
         tracing::warn!(error = %error, "failed to emit model loading progress");
+    }
+}
+
+/// Payload of the `model_download_progress` event.
+///
+/// Field names stay `snake_case` to match the frontend contract exactly;
+/// `fraction` is `bytes / total` clamped to `[0.0, 1.0]` (0.0 while the
+/// total is unknown).
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelDownloadProgressPayload {
+    /// Bytes received so far (including the resumed prefix).
+    pub bytes: u64,
+    /// Total download size in bytes, `0` while unknown.
+    pub total: u64,
+    /// Download progress in `[0.0, 1.0]`.
+    pub fraction: f32,
+}
+
+/// Emits translation model download progress to the frontend.
+///
+/// Emission failures are logged but never propagated: a closed settings
+/// panel must not fail the download.
+#[tracing::instrument(skip(app), fields(bytes, total))]
+pub fn emit_model_download_progress<R: Runtime>(
+    app: &AppHandle<R>,
+    bytes: u64,
+    total: u64,
+    fraction: f32,
+) {
+    let payload = ModelDownloadProgressPayload {
+        bytes,
+        total,
+        fraction,
+    };
+    if let Err(error) = app.emit(MODEL_DOWNLOAD_PROGRESS, payload) {
+        tracing::warn!(error = %error, "failed to emit model download progress");
     }
 }
 
@@ -483,6 +520,26 @@ mod tests {
     fn overlay_events_use_stable_names() {
         assert_eq!(OVERLAY_REGION_UPDATED, "overlay_region_updated");
         assert_eq!(OVERLAY_HIDDEN, "overlay_hidden");
+    }
+
+    #[test]
+    fn model_download_progress_event_name_is_stable() {
+        assert_eq!(MODEL_DOWNLOAD_PROGRESS, "model_download_progress");
+    }
+
+    #[test]
+    fn model_download_progress_payload_serializes_with_snake_case_fields() {
+        let payload = ModelDownloadProgressPayload {
+            bytes: 52_428_800,
+            total: 403_368_390,
+            fraction: 0.13,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains(r#""bytes":52428800"#));
+        assert!(json.contains(r#""total":403368390"#));
+        assert!(json.contains(r#""fraction":0.13"#));
+        assert!(!json.contains("bytesReceived"));
+        assert!(!json.contains("totalBytes"));
     }
 
     #[test]

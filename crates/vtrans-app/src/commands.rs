@@ -9,9 +9,11 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
 use vtrans_config::AppConfig;
 use vtrans_config::TranslationBoxConfig;
 use vtrans_core::{Language, OcrResult, PipelineMode, ScreenRegion, TranslationResult};
+use vtrans_models::{ModelError, VerifyReport};
 use vtrans_pipeline::{BoxStatus, MultiBoxPipeline, PipelineError, PipelineEvent, TranslationBox};
 
 use crate::debug_frame::{spawn_debug_frame_forwarder, RegionSource};
@@ -20,6 +22,13 @@ use crate::events::{
     emit_model_loading_progress, emit_multibox_box_added, emit_multibox_box_removed,
     emit_multibox_box_updated, emit_multibox_result, emit_multibox_status, emit_multibox_warning,
     emit_pipeline_event, emit_translation_single_result,
+};
+use crate::model_download::{
+    part_path_for, reject_local_switch_during_download, run_translation_model_download,
+    DOWNLOAD_CANCEL_WAIT,
+};
+use crate::model_setup::{
+    ensure_data_models, ensure_outcome_result, model_status_report, ModelStatusReport,
 };
 use crate::overlay::{
     apply_overlay, hide_region_overlay, overlay_intent, overlay_intent_for_stop, OverlayEvent,
@@ -254,7 +263,13 @@ pub async fn capture_once(
     state: State<'_, AppState>,
 ) -> Result<OcrResult, AppError> {
     let app = state.app_handle()?;
-    let result = run_single_capture(app.clone(), state.inner(), region).await;
+    let result = async {
+        // R6: a degraded OCR state must fail loudly with a clear repair
+        // hint instead of failing silently mid-pipeline.
+        state.inner().ocr_ready_gate()?;
+        run_single_capture(app.clone(), state.inner(), region).await
+    }
+    .await;
     // A successful selection keeps the app windows hidden until the capture
     // finishes; restore them now, on success and failure alike. Without a
     // pending selection snapshot this is a no-op.
@@ -432,6 +447,9 @@ async fn start_live_inner(
     state: &AppState,
     config: LiveTranslationConfig,
 ) -> Result<(), AppError> {
+    // R6: same OCR readiness gate as `capture_once`; the hotkey path goes
+    // through `start_live_task` and is covered as well.
+    state.ocr_ready_gate()?;
     let _lifecycle = state.live_lifecycle.lock().await;
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
@@ -707,6 +725,10 @@ pub async fn set_translation_provider(
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
+    // R4: switching to the local provider while its model is downloading
+    // would load a half-written file; reject it (the frontend disables the
+    // switch too — defense in depth).
+    reject_local_switch_during_download(state.inner().model_download_active(), &provider_id)?;
     let app = state.app_handle()?;
     state
         .set_translation_provider_id(&provider_id, Some(&app))
@@ -722,13 +744,15 @@ pub async fn set_translation_provider(
 /// Returns an application error when model integrity verification fails.
 #[tauri::command]
 #[tracing::instrument(skip(state))]
-pub async fn load_local_models(
-    state: State<'_, AppState>,
-) -> Result<vtrans_models::VerifyReport, AppError> {
+pub async fn load_local_models(state: State<'_, AppState>) -> Result<VerifyReport, AppError> {
+    let Some(model_manager) = state.model_manager() else {
+        return Err(AppError::ModelNotReady(
+            "模型清单不可用，请重试模型修复".to_string(),
+        ));
+    };
     let app = state.app_handle()?;
     state.set_model_progress(Some(0.0));
     emit_model_loading_progress(&app, "manifest", 0.0);
-    let model_manager = std::sync::Arc::clone(&state.model_manager);
     let report = tokio::task::spawn_blocking(move || {
         model_manager.verify_integrity().map_err(AppError::from)
     })
@@ -755,6 +779,11 @@ pub async fn save_settings(
     if state.live_task_is_running().await {
         return Err(PipelineError::AlreadyRunning.into());
     }
+    // R4: same local-switch guard as `set_translation_provider`.
+    reject_local_switch_during_download(
+        state.inner().model_download_active(),
+        &settings.translation.provider,
+    )?;
     let app = state.app_handle()?;
     let provider = state
         .prepare_translation_provider(settings.clone(), Some(&app))
@@ -1412,6 +1441,8 @@ where
 #[tracing::instrument(skip(state))]
 pub async fn start_multi_realtime(state: State<'_, AppState>) -> Result<(), AppError> {
     let app = state.app_handle()?;
+    // R6: same OCR readiness gate as the single-box entry commands.
+    state.inner().ocr_ready_gate()?;
     let forwarder_app = app.clone();
     let box_count = start_multi_session(state.inner(), move |pipeline, box_ids| {
         tokio::spawn(run_multi_forwarder(forwarder_app, pipeline, box_ids))
@@ -1550,6 +1581,191 @@ async fn run_multi_forwarder(
     }
 }
 
+// ── Translation model download and status commands ──
+
+/// Downloads the translation model from `translation.model.download_url`
+/// into `{data}/models` and installs it after SHA-256 verification.
+///
+/// The download streams into `model.onnx.part` (resuming an existing part
+/// via the `Range` header when the server supports it), reports throttled
+/// progress through the `model_download_progress` event, verifies the
+/// manifest SHA-256, and atomically renames the part over `model.onnx`.
+/// The promise resolves on completion, failure, or cancellation. On success
+/// the model status snapshot is refreshed and a configured local provider
+/// is rebuilt.
+///
+/// # Errors
+///
+/// Returns `AppError::ModelDownload` when a download is already running,
+/// the manifest carries no download URL, the transfer/verification fails,
+/// or the download is cancelled; `AppError::ModelNotReady` when the model
+/// manifest is unavailable.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn download_translation_model(state: State<'_, AppState>) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+    let cancel = CancellationToken::new();
+    if !state.inner().try_start_model_download(cancel.clone()) {
+        return Err(AppError::ModelDownload(
+            "翻译模型下载已在进行中".to_string(),
+        ));
+    }
+    let result = run_translation_model_download(state.inner(), &app, cancel.clone()).await;
+    state.inner().finish_model_download();
+    result
+}
+
+/// Cancels the in-flight translation model download.
+///
+/// The download promise resolves with a cancellation error and the `.part`
+/// file is kept so a later download resumes from the transferred prefix.
+/// Calling this command without an active download is a no-op.
+///
+/// # Errors
+///
+/// Returns an application error when the managed state is unavailable.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn cancel_translation_model_download(state: State<'_, AppState>) -> Result<(), AppError> {
+    state.inner().cancel_model_download();
+    tracing::info!("translation model download cancellation requested");
+    Ok(())
+}
+
+/// Deletes the installed translation model (`model.onnx`) and any residual
+/// `.part` file.
+///
+/// An in-flight download is cancelled first (and awaited, bounded) so no
+/// handle is left writing the file. When the configured provider is
+/// `"local"`, the provider is rebuilt afterwards — with the model gone the
+/// rebuild degrades to the "not installed" state the frontend derives from
+/// `get_model_status`.
+///
+/// # Errors
+///
+/// Returns an application error when a model file exists but cannot be
+/// deleted.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn delete_translation_model(state: State<'_, AppState>) -> Result<(), AppError> {
+    let app = state.app_handle()?;
+    state
+        .inner()
+        .cancel_and_wait_model_download(DOWNLOAD_CANCEL_WAIT)
+        .await;
+
+    let Some(model_manager) = state.model_manager() else {
+        tracing::info!("no model manifest; nothing to delete");
+        return Ok(());
+    };
+    let Some(entry) = model_manager.manifest().translation.as_ref() else {
+        tracing::info!("translation model is not configured; nothing to delete");
+        return Ok(());
+    };
+    let target_path = model_manager.manifest_dir().join(&entry.model.path);
+    let part_path = part_path_for(&target_path);
+    delete_file_if_exists(&target_path)?;
+    delete_file_if_exists(&part_path)?;
+
+    state.inner().refresh_model_status_async().await?;
+    if let Err(error) = state
+        .inner()
+        .rebuild_translation_provider_after_model_change(&app)
+        .await
+    {
+        tracing::warn!(
+            error = %error,
+            "translation provider rebuild after model deletion failed"
+        );
+    }
+    tracing::info!(entry_id = %entry.model.id, "translation model deleted");
+    Ok(())
+}
+
+/// Deletes a model file, tolerating an already-absent file.
+fn delete_file_if_exists(path: &std::path::Path) -> Result<(), AppError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            tracing::info!(path = %path.display(), "model file deleted");
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::Model(ModelError::Io(error))),
+    }
+}
+
+/// Returns the current model availability snapshot.
+///
+/// Strictly read-only: entries are re-verified with the same semantics as
+/// `verify_integrity` (missing optional entries are "not installed",
+/// existing-but-bad entries are failures), but nothing is copied, deleted,
+/// or repaired. The frontend derives its startup error banner from this
+/// report.
+///
+/// # Errors
+///
+/// Returns an application error when verification cannot run.
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn get_model_status(state: State<'_, AppState>) -> Result<ModelStatusReport, AppError> {
+    let Some(model_manager) = state.model_manager() else {
+        // No manifest: fall back to the status recorded at startup (which
+        // includes the provisioning errors), so the frontend banner still
+        // shows the degraded state.
+        return Ok(state.inner().model_status_snapshot());
+    };
+    tokio::task::spawn_blocking(move || Ok::<_, AppError>(model_status_report(&model_manager)))
+        .await
+        .map_err(|error| AppError::Tauri(format!("model status task failed: {error}")))?
+}
+
+/// Re-runs the self-healing model provisioning pass and returns the fresh
+/// model status (the R6 startup banner "retry" action).
+///
+/// Missing or corrupted model files are re-copied from the bundled source;
+/// when OCR (or the configured local translation provider) was degraded and
+/// is now ready, the provider is rebuilt so the repair takes effect without
+/// a restart.
+///
+/// # Errors
+///
+/// Returns `AppError::ModelNotReady` when provisioning still reports
+/// errors, alongside the reasons; the status snapshot stays available
+/// through [`get_model_status`].
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub async fn retry_model_setup(state: State<'_, AppState>) -> Result<ModelStatusReport, AppError> {
+    let app = state.app_handle()?;
+    let data_models_dir = state.inner().data_models_dir().to_path_buf();
+    let bundled_models_dir = state.inner().bundled_models_dir().map(ToOwned::to_owned);
+    let outcome = tokio::task::spawn_blocking(move || {
+        ensure_data_models(&data_models_dir, bundled_models_dir.as_deref())
+    })
+    .await
+    .map_err(|error| AppError::Tauri(format!("model repair task failed: {error}")))?;
+    if !outcome.errors.is_empty() {
+        tracing::warn!(
+            errors = ?outcome.errors,
+            "model repair completed with errors"
+        );
+        state.inner().set_model_status(outcome.report.clone());
+        return ensure_outcome_result(outcome);
+    }
+    state.inner().set_model_status(outcome.report.clone());
+    state.inner().refresh_ocr_provider_if_ready().await;
+    if let Err(error) = state
+        .inner()
+        .rebuild_translation_provider_after_model_change(&app)
+        .await
+    {
+        tracing::warn!(
+            error = %error,
+            "translation provider rebuild after model repair failed"
+        );
+    }
+    Ok(outcome.report)
+}
+
 /// Builds the invoke handler for all application commands.
 pub fn invoke_handler<R: tauri::Runtime>(
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
@@ -1580,6 +1796,11 @@ pub fn invoke_handler<R: tauri::Runtime>(
         stop_multi_realtime,
         stop_box,
         open_result_window,
+        download_translation_model,
+        cancel_translation_model_download,
+        delete_translation_model,
+        get_model_status,
+        retry_model_setup,
     ]
 }
 

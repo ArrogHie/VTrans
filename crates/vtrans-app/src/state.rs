@@ -1,27 +1,35 @@
 //! Shared application state and provider assembly.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::AppHandle;
 use tokio::sync::{oneshot, Mutex};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use vtrans_capture::WindowsCaptureSource;
 use vtrans_config::{AppConfig, ConfigManager};
 use vtrans_core::traits::{CaptureSource, OcrProvider, TranslationProvider};
-use vtrans_core::{OcrOptions, PipelineMode, PipelineStatus, ScreenRegion, TranslationRequest};
+use vtrans_core::{
+    CapturedImage, Language, OcrOptions, OcrResult, PipelineMode, PipelineStatus, ScreenRegion,
+    TranslationRequest, TranslationResult,
+};
 use vtrans_models::ModelManager;
 use vtrans_ocr::PaddleOcrProvider;
 use vtrans_pipeline::{MultiBoxConfig, MultiBoxPipeline};
 use vtrans_pipeline::{Pipeline, PipelineConfig, PipelineDeps};
-use vtrans_security::{CredentialManager, CredentialTarget};
+use vtrans_security::{
+    migrate_windows_to_dpapi, CredentialManager, CredentialTarget, DpapiFileStore,
+    InMemoryCredentialStore,
+};
 use vtrans_translation::{
     AzureTranslatorProvider, BaiduProvider, DeepLProvider, GoogleV2Provider,
     LocalTranslationProvider, OpenAiProvider,
 };
 
 use crate::error::AppError;
+use crate::model_setup::{ensure_data_models, model_status_report, ModelStatusReport};
 use crate::window_visibility::SelectionVisibilityState;
 
 /// The `model_id` used for translation provider loading progress events.
@@ -29,6 +37,16 @@ use crate::window_visibility::SelectionVisibilityState;
 /// Reused by the provider switch and settings save paths so the frontend
 /// shows a single "translation" progress bar during local model loads.
 const TRANSLATION_PROGRESS_MODEL_ID: &str = "translation";
+
+/// File name of the DPAPI-encrypted credential container inside the data root.
+pub(crate) const CREDENTIAL_FILE_NAME: &str = "credentials.bin";
+
+/// Runtime id of the placeholder OCR provider installed when the OCR models
+/// are missing or fail to load (see [`UnavailableOcrProvider`]).
+pub(crate) const UNAVAILABLE_OCR_PROVIDER_ID: &str = "unavailable-ocr";
+/// Runtime id of the placeholder translation provider installed when the
+/// configured provider (usually `local`) cannot be assembled.
+pub(crate) const UNAVAILABLE_TRANSLATION_PROVIDER_ID: &str = "unavailable-translation";
 
 /// A lazily-loaded local translation provider cached across switches.
 ///
@@ -98,6 +116,13 @@ impl LocalProviderCache {
         *self.model_dir.write().unwrap_or_else(poison_inner) = Some(model_dir.unwrap_or_default());
     }
 
+    /// Drops the cached provider, forcing the next switch to `"local"` to
+    /// reload from disk (used after the model file was deleted or replaced).
+    pub(crate) fn invalidate(&self) {
+        *self.provider.write().unwrap_or_else(poison_inner) = None;
+        *self.model_dir.write().unwrap_or_else(poison_inner) = None;
+    }
+
     /// Returns `true` when the cache holds a provider valid for the given
     /// directory, without mutating state.
     #[cfg(test)]
@@ -164,7 +189,21 @@ pub struct AppState {
     pub(crate) ocr_provider: std::sync::RwLock<Arc<dyn OcrProvider>>,
     pub(crate) translation_provider: std::sync::RwLock<Arc<dyn TranslationProvider>>,
     pub(crate) capture_source: Arc<WindowsCaptureSource>,
-    pub(crate) model_manager: Arc<ModelManager>,
+    /// Model manager over `{data}/models`; `None` when the manifest itself
+    /// could not be loaded (the app still starts, with degraded model state).
+    pub(crate) model_manager: Option<Arc<ModelManager>>,
+    /// Directory holding the runtime model files (`{data}/models` by default,
+    /// overridable through the advanced `config.model_dir` setting).
+    data_models_dir: PathBuf,
+    /// Read-only bundled model source (`resource_dir()/resources/models`),
+    /// `None` when the packaged resources are unavailable.
+    bundled_models_dir: Option<PathBuf>,
+    /// Latest model availability snapshot (updated at startup and after
+    /// download/delete/retry; `get_model_status` recomputes it fresh).
+    model_status: std::sync::RwLock<ModelStatusReport>,
+    /// Cancellation token of the in-flight translation model download, if
+    /// any. `Some` also means "a download owns the slot".
+    model_download: std::sync::RwLock<Option<CancellationToken>>,
     selected_region: std::sync::RwLock<Option<ScreenRegion>>,
     pub(crate) live_task: Mutex<Option<JoinHandle<()>>>,
     pub(crate) live_lifecycle: Mutex<()>,
@@ -204,54 +243,111 @@ pub struct AppState {
 impl AppState {
     /// Constructs the application state and all production providers.
     ///
-    /// `app_data_dir` is used for config.json and, unless overridden by the
-    /// persisted configuration, for a models/manifest.json directory.
+    /// `app_data_dir` is the portable data root (`{exe}/data`, resolved by
+    /// `setup.rs`) used for config.json, credentials.bin, logs, and — unless
+    /// overridden by the persisted configuration — `models/`.
+    /// `bundled_models_dir` is the read-only packaged model source
+    /// (`resource_dir()/resources/models`), used by the self-healing
+    /// provisioning pass.
     ///
     /// # Errors
     ///
-    /// Returns an application error when config, models, capture, OCR, or
-    /// translation cannot initialize.
+    /// Returns an application error when config or capture cannot initialize.
+    /// Model problems never fail startup: provisioning/loading failures are
+    /// logged, the status snapshot records them, and placeholder providers
+    /// answer with clear errors until the models are repaired.
     #[tracing::instrument(skip(app_data_dir))]
     pub fn new(app_data_dir: &Path) -> Result<Self, AppError> {
-        Self::new_with_debug(app_data_dir, false)
+        Self::new_with_debug(app_data_dir, None, false)
     }
 
     /// Constructs the application state with Debug mode explicitly enabled
-    /// or disabled.
+    /// or disabled and an explicit bundled model source.
     ///
     /// Debug mode is a per-run flag (command line / environment), never
-    /// persisted. See [`new`](Self::new) for the remaining contract.
+    /// persisted. See [`new`](Self::new) for the remaining contract and the
+    /// startup tolerance rules.
     ///
     /// # Errors
     ///
-    /// Returns an application error when config, models, capture, OCR, or
-    /// translation cannot initialize.
-    #[tracing::instrument(skip(app_data_dir, debug_mode))]
-    pub fn new_with_debug(app_data_dir: &Path, debug_mode: bool) -> Result<Self, AppError> {
+    /// Returns an application error when config or capture cannot initialize.
+    #[tracing::instrument(skip(app_data_dir, bundled_models_dir, debug_mode))]
+    pub fn new_with_debug(
+        app_data_dir: &Path,
+        bundled_models_dir: Option<&Path>,
+        debug_mode: bool,
+    ) -> Result<Self, AppError> {
         let config_manager = ConfigManager::new(app_data_dir)?;
         let config = config_manager.load()?;
-        let credentials = Arc::new(CredentialManager::new()?);
-        let model_dir = config
+        // R5: credentials live in a DPAPI-protected file inside the data
+        // root. First boot migrates the legacy Windows Credential Manager
+        // entries; every failure is tolerated (clear errors at use time).
+        let credential_path = app_data_dir.join(CREDENTIAL_FILE_NAME);
+        let run_migration = should_migrate_credentials(&credential_path);
+        let credentials = build_credential_manager(&credential_path, run_migration);
+        let data_models_dir = config
             .model_dir
             .clone()
             .unwrap_or_else(|| app_data_dir.join("models"));
-        let model_manager = Arc::new(ModelManager::from_manifest_dir(&model_dir)?);
+        // R2/R6: provision {data}/models from the bundled source before
+        // anything loads from it. Failures only degrade the model status.
+        let setup = ensure_data_models(&data_models_dir, bundled_models_dir);
+        for error in &setup.errors {
+            warn!(error = %error, "model provisioning problem");
+        }
+        let model_manager = match ModelManager::from_manifest_dir(&data_models_dir) {
+            Ok(manager) => Some(Arc::new(manager)),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "model manifest unavailable; the app starts with degraded model state"
+                );
+                None
+            }
+        };
         let capture_source = Arc::new(WindowsCaptureSource::new()?);
-        let ocr_provider =
-            Arc::new(PaddleOcrProvider::from_manager(&model_manager)?) as Arc<dyn OcrProvider>;
-        let translation_provider =
-            build_translation_provider(&config, &credentials, &model_manager)?;
+        let ocr_provider: Arc<dyn OcrProvider> = match model_manager.as_deref() {
+            Some(manager) => match PaddleOcrProvider::from_manager(manager) {
+                Ok(provider) => Arc::new(provider),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "OCR provider unavailable; translation commands report a clear error until the models are repaired"
+                    );
+                    Arc::new(UnavailableOcrProvider)
+                }
+            },
+            None => Arc::new(UnavailableOcrProvider),
+        };
+        let translation_provider = match build_translation_provider(
+            &config,
+            &credentials,
+            model_manager.as_deref(),
+        ) {
+            Ok(provider) => provider,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "translation provider unavailable; it is rebuilt once the models or credentials are ready"
+                );
+                Arc::new(UnavailableTranslationProvider)
+            }
+        };
         info!(
             ocr_provider = ocr_provider.id(),
             translation_provider = translation_provider.id(),
-            model_dir = %model_dir.display(),
+            model_dir = %data_models_dir.display(),
+            ocr_ready = setup.report.ocr_ready,
+            translation_ready = setup.report.translation_ready,
             "application state initialized"
         );
         // Seed the local provider cache when the startup configuration
         // already selects the local provider, so the first runtime switch
         // back to "local" reuses this instance instead of reloading.
         let local_provider_cache = LocalProviderCache::new();
-        if config.translation.provider == "local" {
+        if config.translation.provider == "local"
+            && translation_provider.id() != UNAVAILABLE_TRANSLATION_PROVIDER_ID
+        {
             local_provider_cache.set(Arc::clone(&translation_provider), config.model_dir.clone());
         }
         Ok(Self {
@@ -262,6 +358,10 @@ impl AppState {
             translation_provider: std::sync::RwLock::new(translation_provider),
             capture_source,
             model_manager,
+            data_models_dir,
+            bundled_models_dir: bundled_models_dir.map(Path::to_path_buf),
+            model_status: std::sync::RwLock::new(setup.report),
+            model_download: std::sync::RwLock::new(None),
             selected_region: std::sync::RwLock::new(None),
             live_task: Mutex::new(None),
             live_lifecycle: Mutex::new(()),
@@ -477,7 +577,12 @@ impl AppState {
             return Ok(cached);
         }
         self.emit_provider_progress(progress, 0.0);
-        let model_manager = Arc::clone(&self.model_manager);
+        let Some(model_manager) = self.model_manager() else {
+            self.set_model_progress(None);
+            return Err(AppError::ModelNotReady(
+                "模型清单不可用，无法加载本地翻译引擎".to_string(),
+            ));
+        };
         let provider = tokio::task::spawn_blocking(move || {
             LocalTranslationProvider::from_manager(&model_manager)
                 .map(|provider| Arc::new(provider) as Arc<dyn TranslationProvider>)
@@ -485,6 +590,7 @@ impl AppState {
         })
         .await
         .map_err(|error| {
+            self.set_model_progress(None);
             AppError::Tauri(format!(
                 "local translation provider load task failed: {error}"
             ))
@@ -587,6 +693,191 @@ impl AppState {
 
     pub(crate) fn set_model_progress(&self, progress: Option<f32>) {
         *self.model_progress.write().unwrap_or_else(poison_inner) = progress;
+    }
+
+    // ── Model provisioning and download state ──
+
+    /// Returns the directory holding the runtime model files.
+    #[must_use]
+    pub(crate) fn data_models_dir(&self) -> &Path {
+        &self.data_models_dir
+    }
+
+    /// Returns the read-only bundled model source, if available.
+    #[must_use]
+    pub(crate) fn bundled_models_dir(&self) -> Option<&Path> {
+        self.bundled_models_dir.as_deref()
+    }
+
+    /// Returns a clone of the loaded [`ModelManager`], or `None` when the
+    /// manifest could not be loaded (degraded model state).
+    #[must_use]
+    pub(crate) fn model_manager(&self) -> Option<Arc<ModelManager>> {
+        self.model_manager.clone()
+    }
+
+    /// Stores the latest model availability snapshot.
+    pub(crate) fn set_model_status(&self, report: ModelStatusReport) {
+        *self.model_status.write().unwrap_or_else(poison_inner) = report;
+    }
+
+    /// Returns the latest model availability snapshot.
+    #[must_use]
+    pub(crate) fn model_status_snapshot(&self) -> ModelStatusReport {
+        self.model_status
+            .read()
+            .unwrap_or_else(poison_inner)
+            .clone()
+    }
+
+    /// Whether the current OCR provider is functional (not the placeholder).
+    #[must_use]
+    pub(crate) fn ocr_ready(&self) -> bool {
+        self.ocr_provider.read().unwrap_or_else(poison_inner).id() != UNAVAILABLE_OCR_PROVIDER_ID
+    }
+
+    /// Gate used by the translation entry commands: fails with a clear
+    /// "OCR 模型未就位" error while the OCR provider is the placeholder.
+    pub(crate) fn ocr_ready_gate(&self) -> Result<(), AppError> {
+        check_ocr_ready(self.ocr_provider.read().unwrap_or_else(poison_inner).id())
+    }
+
+    /// Tries to claim the download slot for `token`.
+    ///
+    /// Returns `false` when another download is already in progress, so a
+    /// concurrent `download_translation_model` call fails fast instead of
+    /// starting a duplicate transfer.
+    pub(crate) fn try_start_model_download(&self, token: CancellationToken) -> bool {
+        let mut slot = self.model_download.write().unwrap_or_else(poison_inner);
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(token);
+        true
+    }
+
+    /// Releases the download slot after the download task finished.
+    pub(crate) fn finish_model_download(&self) {
+        *self.model_download.write().unwrap_or_else(poison_inner) = None;
+    }
+
+    /// Whether a translation model download is currently in progress.
+    #[must_use]
+    pub(crate) fn model_download_active(&self) -> bool {
+        self.model_download
+            .read()
+            .unwrap_or_else(poison_inner)
+            .as_ref()
+            .is_some_and(|token| !token.is_cancelled())
+    }
+
+    /// Requests cancellation of the in-flight download, if any.
+    pub(crate) fn cancel_model_download(&self) {
+        if let Some(token) = self
+            .model_download
+            .read()
+            .unwrap_or_else(poison_inner)
+            .clone()
+        {
+            token.cancel();
+        }
+    }
+
+    /// Cancels the in-flight download and waits (bounded) until the task
+    /// releases the slot, so file deletion can safely follow.
+    pub(crate) async fn cancel_and_wait_model_download(&self, wait: std::time::Duration) {
+        self.cancel_model_download();
+        let deadline = tokio::time::Instant::now() + wait;
+        while self
+            .model_download
+            .read()
+            .unwrap_or_else(poison_inner)
+            .is_some()
+        {
+            if tokio::time::Instant::now() >= deadline {
+                warn!("timed out waiting for the cancelled model download to finish");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Rebuilds the OCR provider when it is currently the placeholder and
+    /// the OCR model files verify (used by `retry_model_setup`).
+    pub(crate) async fn refresh_ocr_provider_if_ready(&self) {
+        if self.ocr_ready() {
+            return;
+        }
+        let Some(model_manager) = self.model_manager() else {
+            warn!("cannot rebuild the OCR provider: model manifest unavailable");
+            return;
+        };
+        let result =
+            tokio::task::spawn_blocking(move || PaddleOcrProvider::from_manager(&model_manager))
+                .await;
+        let provider = match result {
+            Ok(Ok(provider)) => provider,
+            Ok(Err(error)) => {
+                warn!(error = %error, "OCR provider rebuild failed; models may still be incomplete");
+                return;
+            }
+            Err(error) => {
+                warn!(error = %error, "OCR provider rebuild task failed");
+                return;
+            }
+        };
+        let id = provider.id();
+        *self.ocr_provider.write().unwrap_or_else(poison_inner) =
+            Arc::new(provider) as Arc<dyn OcrProvider>;
+        info!(ocr_provider = id, "OCR provider rebuilt after model repair");
+    }
+
+    /// Recomputes and stores the model status snapshot on the blocking pool
+    /// (async callers; the sync startup path uses
+    /// [`refresh_model_status_after_change`](Self::refresh_model_status_after_change)
+    /// directly).
+    pub(crate) async fn refresh_model_status_async(&self) -> Result<(), AppError> {
+        let Some(model_manager) = self.model_manager() else {
+            self.set_model_status(ModelStatusReport::default());
+            return Ok(());
+        };
+        let report = tokio::task::spawn_blocking(move || model_status_report(&model_manager))
+            .await
+            .map_err(|error| AppError::Tauri(format!("model status task failed: {error}")))?;
+        self.set_model_status(report);
+        Ok(())
+    }
+
+    /// Rebuilds the translation provider after a model change (download,
+    /// delete, repair) when the configured provider is `"local"`.
+    ///
+    /// On failure the provider is replaced with a placeholder that answers
+    /// with a clear "model not ready" error, matching the "not installed"
+    /// state the frontend derives from `get_model_status`.
+    pub(crate) async fn rebuild_translation_provider_after_model_change(
+        &self,
+        app: &AppHandle,
+    ) -> Result<(), AppError> {
+        let config = self.load_config()?;
+        if config.translation.provider != "local" {
+            return Ok(());
+        }
+        self.local_provider_cache.invalidate();
+        match self.prepare_translation_provider(config, Some(app)).await {
+            Ok(provider) => {
+                self.replace_translation_provider(provider);
+                Ok(())
+            }
+            Err(error) => {
+                self.set_model_progress(None);
+                warn!(
+                    error = %error,
+                    "local translation provider unavailable after a model change"
+                );
+                self.replace_translation_provider(Arc::new(UnavailableTranslationProvider));
+                Err(error)
+            }
+        }
     }
 
     pub(crate) async fn live_task_is_running(&self) -> bool {
@@ -837,10 +1128,15 @@ impl TranslationProvider for SharedTranslationProvider {
 fn build_translation_provider(
     config: &AppConfig,
     credentials: &CredentialManager,
-    model_manager: &ModelManager,
+    model_manager: Option<&ModelManager>,
 ) -> Result<Arc<dyn TranslationProvider>, AppError> {
     validate_translation_provider_id(&config.translation.provider)?;
     if config.translation.provider == "local" {
+        let Some(model_manager) = model_manager else {
+            return Err(AppError::ModelNotReady(
+                "模型清单不可用，无法加载本地翻译引擎".to_string(),
+            ));
+        };
         return Ok(Arc::new(LocalTranslationProvider::from_manager(
             model_manager,
         )?));
@@ -1137,6 +1433,130 @@ pub(crate) fn store_provider_credentials(
     credentials
         .store_for_provider(target, api_key)
         .map_err(AppError::from)
+}
+
+/// Placeholder OCR provider installed when the OCR models are missing or
+/// fail to load. It answers every recognition with a clear "repair the
+/// models" error instead of failing silently.
+struct UnavailableOcrProvider;
+
+#[async_trait::async_trait]
+impl OcrProvider for UnavailableOcrProvider {
+    fn id(&self) -> &'static str {
+        UNAVAILABLE_OCR_PROVIDER_ID
+    }
+
+    async fn recognize(
+        &self,
+        _image: &CapturedImage,
+        _region: &ScreenRegion,
+        _options: &OcrOptions,
+        _cancel: CancellationToken,
+    ) -> Result<OcrResult, vtrans_core::OcrError> {
+        Err(vtrans_core::OcrError::Inference(
+            "OCR 模型未就位，请重试模型修复".to_string(),
+        ))
+    }
+
+    fn supported_languages(&self) -> &[Language] {
+        &[]
+    }
+}
+
+/// Placeholder translation provider installed when the configured provider
+/// (usually `local`) cannot be assembled. It answers every translation with
+/// a clear "model not ready" error.
+struct UnavailableTranslationProvider;
+
+#[async_trait::async_trait]
+impl TranslationProvider for UnavailableTranslationProvider {
+    fn id(&self) -> &'static str {
+        UNAVAILABLE_TRANSLATION_PROVIDER_ID
+    }
+
+    async fn translate(
+        &self,
+        _request: &TranslationRequest,
+        _cancel: CancellationToken,
+    ) -> Result<TranslationResult, vtrans_core::TranslationError> {
+        Err(vtrans_core::TranslationError::Inference(
+            "翻译模型未就位，请先下载模型或重试模型修复".to_string(),
+        ))
+    }
+
+    fn supported_pairs(&self) -> &[(Language, Language)] {
+        &[]
+    }
+}
+
+/// Rejects translation entry commands while the OCR provider is the
+/// unavailable placeholder.
+///
+/// Kept as a pure function over the provider id so the gate is unit-testable
+/// without a full [`AppState`]; the commands wire it with the current
+/// provider id.
+pub(crate) fn check_ocr_ready(ocr_provider_id: &str) -> Result<(), AppError> {
+    if ocr_provider_id == UNAVAILABLE_OCR_PROVIDER_ID {
+        return Err(AppError::ModelNotReady(
+            "OCR 模型未就位，请重试模型修复".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the legacy Windows Credential Manager migration should run: the
+/// credential container must not exist yet (first boot in this data root).
+#[must_use]
+pub(crate) fn should_migrate_credentials(credential_path: &Path) -> bool {
+    !credential_path.exists()
+}
+
+/// Builds the credential manager backed by the DPAPI file store.
+///
+/// First boot (`run_migration`) migrates the legacy Windows Credential
+/// Manager entries into the container. Every failure degrades gracefully:
+/// DPAPI store unavailable → legacy Windows Credential Manager; that
+/// unavailable too → in-memory store (credentials do not persist). The app
+/// always starts; translation reports a clear error when credentials are
+/// actually needed but unusable.
+#[tracing::instrument(skip(credential_path), fields(path = %credential_path.display()))]
+fn build_credential_manager(credential_path: &Path, run_migration: bool) -> Arc<CredentialManager> {
+    match DpapiFileStore::new(credential_path) {
+        Ok(store) => {
+            let store = Arc::new(store);
+            if run_migration {
+                match migrate_windows_to_dpapi(&store) {
+                    Ok(migrated) => info!(
+                        migrated,
+                        "legacy windows credentials migrated to the dpapi file store"
+                    ),
+                    Err(error) => warn!(
+                        error = %error,
+                        "credential migration failed; continuing with the local credential store"
+                    ),
+                }
+            }
+            Arc::new(CredentialManager::with_store(store))
+        }
+        Err(error) => {
+            warn!(
+                error = %error,
+                "dpapi file credential store unavailable; falling back to the windows credential manager"
+            );
+            match CredentialManager::new() {
+                Ok(manager) => Arc::new(manager),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "windows credential manager unavailable; using an in-memory credential store (credentials will not persist)"
+                    );
+                    Arc::new(CredentialManager::with_store(Arc::new(
+                        InMemoryCredentialStore::new(),
+                    )))
+                }
+            }
+        }
+    }
 }
 
 fn poison_inner<T>(poisoned: std::sync::PoisonError<T>) -> T {
@@ -1600,5 +2020,116 @@ mod tests {
         // The frontend listens for this id; changing it would silently drop
         // the progress bar during provider switches.
         assert_eq!(TRANSLATION_PROGRESS_MODEL_ID, "translation");
+    }
+
+    // ── Model readiness gate ──
+
+    #[test]
+    fn ocr_readiness_gate_rejects_only_the_unavailable_placeholder() {
+        let error = check_ocr_ready(UNAVAILABLE_OCR_PROVIDER_ID).unwrap_err();
+        assert!(matches!(error, AppError::ModelNotReady(_)));
+        assert!(error.to_string().contains("OCR 模型未就位"));
+        // Functional OCR providers (any other id) pass the gate.
+        for provider in ["pp-ocr", "mock-ocr", ""] {
+            assert!(
+                check_ocr_ready(provider).is_ok(),
+                "provider {provider:?} must pass the gate"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_ocr_provider_reports_a_clear_error() {
+        let provider = UnavailableOcrProvider;
+        assert_eq!(provider.id(), UNAVAILABLE_OCR_PROVIDER_ID);
+        let error = provider
+            .recognize(
+                &CapturedImage::new(1, 1, vtrans_core::PixelFormat::Bgra8, vec![0u8; 4]).unwrap(),
+                &ScreenRegion::new("m0", 0, 0, 10, 10),
+                &OcrOptions::default(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("OCR 模型未就位"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_translation_provider_reports_a_clear_error() {
+        let provider = UnavailableTranslationProvider;
+        assert_eq!(provider.id(), UNAVAILABLE_TRANSLATION_PROVIDER_ID);
+        let error = provider
+            .translate(
+                &TranslationRequest::new("", Language::Auto, Language::ChineseSimplified),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("翻译模型未就位"));
+    }
+
+    #[test]
+    fn credential_migration_runs_only_when_the_container_is_absent() {
+        let dir =
+            std::env::temp_dir().join(format!("vtrans-app-migration-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CREDENTIAL_FILE_NAME);
+        assert!(should_migrate_credentials(&path));
+        std::fs::write(&path, b"existing-container").unwrap();
+        assert!(!should_migrate_credentials(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn credential_manager_falls_back_when_the_dpapi_store_is_unusable() {
+        // A path whose parent directory does not exist makes
+        // `DpapiFileStore::new` fail; the builder must fall back to the
+        // legacy Windows Credential Manager instead of failing startup.
+        // (Migration is disabled, so this test never touches the real vault.)
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let missing_parent = std::env::temp_dir().join(format!(
+            "vtrans-app-no-such-parent-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = missing_parent.join("credentials.bin");
+        let manager = build_credential_manager(&path, false);
+        assert!(
+            manager.load_for_provider(CredentialTarget::OpenAI).is_ok(),
+            "the fallback manager must answer credential reads"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn credential_manager_uses_the_dpapi_store_for_a_valid_path() {
+        // A real DPAPI-backed container is created for a valid temp path.
+        // Migration is disabled so the real Windows Credential Manager is
+        // never enumerated or mutated by this test.
+        let dir =
+            std::env::temp_dir().join(format!("vtrans-app-dpapi-build-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CREDENTIAL_FILE_NAME);
+        let manager = build_credential_manager(&path, false);
+        assert!(path.exists(), "the container file must be created");
+        assert!(manager
+            .load_for_provider(CredentialTarget::OpenAI)
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_provider_cache_invalidate_forces_a_reload() {
+        let cache = LocalProviderCache::new();
+        let provider = stub_provider();
+        cache.set(Arc::clone(&provider), None);
+        assert!(cache.is_hit(None));
+        cache.invalidate();
+        assert!(!cache.is_hit(None));
+        assert!(cache.get(None).is_none());
     }
 }
