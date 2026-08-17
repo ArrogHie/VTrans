@@ -11,6 +11,12 @@
 自 v0.2.0 起 OCR 模型为 PP-OCRv6 Small（det + rec），`PreprocessParams`
 新增 det/rec 可选字段，缺省取 v6 默认值，manifest schema version 保持 1。
 
+自发行部署功能（R3）起，`ModelEntry` 支持 `optional` 标记与下载元数据
+（`download_url` / `download_size_bytes`）：optional 条目（如 403MB 翻译
+模型）缺失不算损坏，`verify_integrity` 记入 `VerifyReport.skipped`；下载
+元数据仅作为 schema 载体供 `vtrans-app` 的下载流程消费，本模块不执行
+任何下载，校验热路径不访问网络。
+
 ## 2. 依赖关系
 
 上游 crate：
@@ -99,10 +105,10 @@ fn main() -> Result<(), ModelError> {
 |------|------|
 | `ModelManifest` | 根清单：版本 + OCR 组 + 可选翻译组 |
 | `OcrModelGroup` / `TranslationModelGroup` | OCR 与翻译模型组 |
-| `ModelEntry` | 单个模型条目：id、相对路径、SHA-256、大小 |
+| `ModelEntry` | 单个模型条目：id、相对路径、SHA-256、大小、optional 标记与下载元数据 |
 | `PreprocessParams` / `InferenceParams` | OCR 预处理与翻译推理参数 |
 | `ModelManager` | 加载清单、路径解析、完整性校验、进度状态 |
-| `VerifyReport` | 批量校验结果汇总 |
+| `VerifyReport` | 批量校验结果汇总（checked / passed / skipped / failed） |
 | `ModelError` | 错误枚举 |
 | `path::resolve_model_path` / `is_relative` | 路径工具 |
 | `verify::verify_entry` | 单个模型条目校验 |
@@ -117,7 +123,15 @@ pub struct ModelManifest {
 }
 
 /// 单个模型条目；path 相对于模型目录
-pub struct ModelEntry { pub id: String, pub path: PathBuf, pub sha256: String, pub size_bytes: u64 }
+pub struct ModelEntry {
+    pub id: String,
+    pub path: PathBuf,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub optional: bool,                  // 默认 false：缺失不算失败，记 skipped
+    pub download_url: Option<String>,    // 下载地址（app 消费，本模块不下载）
+    pub download_size_bytes: Option<u64>, // 下载大小（app 显示下载进度）
+}
 
 /// 预处理参数（新增字段为 serde default，缺省取 v6 默认值）
 pub struct PreprocessParams {
@@ -144,8 +158,14 @@ impl ModelManager {
     pub fn set_load_progress(&mut self, progress: Option<f32>);
 }
 
-/// checked = 已检查数，passed = 通过数，failed = 失败描述
-pub struct VerifyReport { pub checked: usize, pub passed: usize, pub failed: Vec<String> }
+/// checked = 已检查数，passed = 通过数，skipped = optional 缺失条目 id，failed = 失败描述
+/// 不变量：checked = passed + skipped.len() + failed.len()
+pub struct VerifyReport {
+    pub checked: usize,
+    pub passed: usize,
+    pub skipped: Vec<String>,
+    pub failed: Vec<String>,
+}
 
 pub enum ModelError {
     ManifestNotFound(PathBuf),              // manifest.json 不存在
@@ -156,15 +176,27 @@ pub enum ModelError {
     Io(std::io::Error),                     // 文件存在但读取失败
 }
 ```
-serde 表示：`ModelManifest` 及其子结构实现 `Serialize` / `Deserialize`；语言对序列化为 JSON 数组（如 `["en","zh-CN"]`），`dicts` 为对象，`image_size` 为 `[640, 640]`（检测输入上限，与 Python 基准 limit_side=640 一致）。`VerifyReport` 也可序列化，便于跨 IPC 传递校验结果。
+serde 表示：`ModelManifest` 及其子结构实现 `Serialize` / `Deserialize`；语言对序列化为 JSON 数组（如 `["en","zh-CN"]`），`dicts` 为对象，`image_size` 为 `[640, 640]`（检测输入上限，与 Python 基准 limit_side=640 一致）。`VerifyReport` 也可序列化，便于跨 IPC 传递校验结果；`skipped` 带 `#[serde(default)]`，旧版序列化报告仍可反序列化。
 
 `PreprocessParams` 的 det/rec 新字段均为 `#[serde(default)]`：v4 时代旧
 manifest（无这些字段）反序列化后自动取 PP-OCRv6 默认值；缺省值常量
 （`DEFAULT_BOX_THRESHOLD` 等）在 crate 根导出。
 
+`ModelEntry` 的 `optional` / `download_url` / `download_size_bytes` 同样
+是 `#[serde(default)]`（缺省 `false` / `None` / `None`）：schema version
+保持 1，旧 manifest 反序列化后这些字段取默认值。
+
 ## 5. 行为契约
 
 错误语义：`from_manifest_dir` / `from_json_str` 的 `ManifestNotFound` 不可重试（需先放好文件），`Parse`、`Io` 修复后可重试，`UnsupportedVersion` 需要升级或降级 manifest；`verify_integrity` 永远返回 `Ok(report)`，`FileNotFound`、`HashMismatch`、`Io` 都以字符串进入 `report.failed`，消费方应检查 `report.is_ok()`；`HashMismatch` 重下模型后可重试。
+
+skipped 语义：`optional == true` 且文件缺失的条目记入 `report.skipped`
+（条目 id 列表），不计入 `failed`，不影响 `report.is_ok()`；optional
+条目**存在但** sha256 不符（或读取失败）仍记入 `failed`——损坏必须报出。
+非 optional 条目缺失维持 failed。`skipped` 条目以 `debug!` 级别记录 id
+（不含敏感数据），不做 `warn`。`verify_entry` 本身不感知 optional：
+它只校验单文件，缺失一律返回 `FileNotFound`，skipped 分类由批量校验
+（`verify_integrity`）负责。
 
 并发模型：`ModelManager` 自动实现 `Send + Sync`，无内部锁；多线程并发调用只读方法（`manifest`、`verify_integrity`、`model_path`）安全；`set_load_progress` 需要 `&mut self`，由调用方保证独占。
 
@@ -179,7 +211,9 @@ manifest（无这些字段）反序列化后自动取 PP-OCRv6 默认值；缺�
 | 坑 | 正确做法 |
 |----|----------|
 | `from_manifest_dir` 不会创建 manifest.json，首次运行必失败 | 先确保 `src-tauri/resources/models/manifest.json` 已随应用分发 |
-| 模型文件未下载时 `verify_integrity` 报告大量失败 | 先运行 `scripts/ppocrv6/setup_ppocrv6.ps1`；把失败项当作下载检查清单 |
+| 模型文件未下载时 `verify_integrity` 报告大量失败 | 先运行 `scripts/ppocrv6/setup_ppocrv6.ps1`；把 `failed` 项当作下载检查清单（`skipped` 项是 optional 未安装，不属损坏） |
+| optional 条目标了 `"optional": true` 但仍希望强制校验 | optional 只影响缺失语义；存在时哈希照样校验，损坏进 `failed` |
+| 读取下载地址/大小 | `ModelEntry::download_url` / `download_size_bytes`（`Option`），由 `vtrans-app` 下载命令消费；本 crate 不下载、校验路径不联网 |
 | `verify_integrity` 同步阻塞，数百 MB 模型可能耗时数秒 | 在 `tokio::task::spawn_blocking` 或独立线程中调用，避免阻塞 UI |
 | 用 `model_path` 判断文件是否可用 | 先 `verify_integrity`，再使用 `model_path` 的结果 |
 | 字典 key 是语言代码字符串（`"ja"` / `"en"`） | 与 `vtrans_core::Language::code()` 对齐，不要硬编码中文名 |
@@ -205,8 +239,8 @@ manifest（无这些字段）反序列化后自动取 PP-OCRv6 默认值；缺�
 | `verify_integrity` 串行逐文件校验 | 性能限制 | 大目录可在上层并行调用 `verify_entry` |
 | `size_bytes` 不参与校验 | 待优化 | 先做大小预检可跳过明显错误的哈希计算 |
 | `load_progress` 不驱动真实下载/加载 | 待后续 Phase | 由 `vtrans-app` 的加载流程写入进度 |
-| 无自动下载/修复机制 | 待后续 Phase | 使用 `scripts/ppocrv6/setup_ppocrv6.ps1` 完成下载 |
-| 验证 CLI 依赖真实模型目录 | 设计使然 | `vtrans-verify-models` 读取 `--models` / `$VTRANS_MODEL_DIR`，缺文件时以非零码退出 |
+| 无自动下载/修复机制 | 设计使然 | 本模块提供 `download_url` / `download_size_bytes` 元数据，下载与修复由 `vtrans-app`（10-app）实现 |
+| 验证 CLI 依赖真实模型目录 | 设计使然 | `vtrans-verify-models` 读取 `--models` / `$VTRANS_MODEL_DIR`，缺必选文件时以非零码退出；optional 缺失仅提示 skipped |
 | v6 字典未入库时 `verify_integrity` 报 dict not found | 已通过 .gitignore 白名单提交 | 字典 `ppocrv6_dict.txt` 随 manifest 入库，模型 onnx 仍忽略 |
 
 ## 9. 构建与测试
@@ -228,13 +262,19 @@ cargo fmt -p vtrans-models -- --check
 已核验的模型元数据（输入/输出节点名、dtype、shape、opset、类数一致性）记录在
 `scripts/ppocrv6/inspect_report.json`，`vtrans-ocr` 以该报告为对照基准。
 
-测试覆盖：manifest 解析、缺失字段、SHA-256 匹配/不匹配、文件不存在、路径解析、批量校验报告（单元 + 集成 + 文档测试，共 52 个用例）。部署模型后可用独立验证 CLI 全量校验：
+测试覆盖：manifest 解析（含 optional 字段缺省与往返、模板解析）、缺失字段、SHA-256
+匹配/不匹配、文件不存在、optional 缺失 → skipped / optional 损坏 → failed、
+路径解析、批量校验报告（单元 + 集成 + CLI 端到端 + 文档测试，共 77 个
+用例）。部署模型后可用独立验证 CLI 全量校验：
 
 ```powershell
 cargo run --bin vtrans-verify-models -- --models src-tauri/resources/models
 ```
 
-该 CLI 与 `vtrans-app` 的 `load_local_models` 命令走同一套 `verify_integrity` 逻辑，缺文件或哈希不匹配时以非零退出码报告失败项。
+该 CLI 与 `vtrans-app` 的 `load_local_models` 命令走同一套 `verify_integrity`
+逻辑：必选文件缺失或哈希不匹配时以非零退出码报告失败项；optional 条目
+未安装仅打印 `skipped` 提示且不影响退出码（`VTRANS_MODEL_DIR` 环境变量
+仍受支持）。
 ## 10. 详细规格
 
 参见 `docs/modules/08-models.md`。
