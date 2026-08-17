@@ -647,6 +647,13 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
       并写坏 manifest），重启后确认模型自动恢复、状态报告回到 ready；
     - 旧版数据迁移：在 `%APPDATA%\com.vtrans.app\config.json` 放置旧配置后
       首启新版本，确认其被复制到 `data/config.json`（仅一次、不覆盖）。
+    - **本分支打包冒烟结果（2026-08-17）**：`cargo tauri build` 已尝试，
+      在本机因 `beforeBuildCommand`（`pnpm build`）找不到 node/pnpm 而中止
+      （`'pnpm' 不是内部或外部命令`）；`dist/` 已有前端产物但 tauri-cli
+      仍强制执行该命令。需在装有 Node.js/pnpm 的环境重新执行本项，
+      NSIS 工具下载与安装包产物待验证；编译期资源拷贝（target/debug/
+      resources/models）与 `bundle.resources` 清单已由 `cargo check
+      --workspace` 验证。
 18. **翻译模型下载全流程（R4）**：设置页点下载，观察进度事件
     `model_download_progress`（bytes/total/fraction 单调、节流、完成发
     1.0）；下载中切到 local 引擎被后端明确拒绝；点取消后 promise 以取消
