@@ -16,11 +16,12 @@
 
 | 序号 | 模块 | 任务单文件 | 分支 | 阶段 | 状态 | 备注 |
 |------|------|-----------|------|------|------|------|
-| 1 | 03-security | TASK-03-security.md | feat/03-dpapi-file-store | A | 开发中 | R5；DpapiFileStore + 迁移函数 |
-| 2 | 08-models | TASK-08-models.md | feat/08-manifest-optional-entries | A | 开发中 | R3；optional/skipped 语义 |
-| 3 | 10-app | TASK-10-app.md | feat/10-portable-data-layout | B | 待分配 | R1/R2/R4 后端/R5 构造点/R6/R7 核对 + LFS 配置 |
-| 4 | 11-frontend | TASK-11-frontend.md | feat/11-model-download-ui | C | 待分配 | R4 UI/R6 横幅；合并顺序 app 先 |
+| 1 | 03-security | TASK-03-security.md | feat/03-dpapi-file-store | A | 已整合 | 合并 main（526f93c）；fmt/clippy/test/workspace PASS，111 测试 |
+| 2 | 08-models | TASK-08-models.md | feat/08-manifest-optional-entries | A | 已整合 | 合并 main（19b7aca）；fmt/clippy/test PASS，77 测试 |
+| 3 | 10-app | TASK-10-app.md | feat/10-portable-data-layout | B | 开发中 | R1/R2/R4 后端/R5 构造点/R6/R7 核对 + LFS 配置 |
+| 4 | 11-frontend | TASK-11-frontend.md | feat/11-model-download-ui | C | 开发中 | R4 UI/R6 横幅；合并顺序 app 先 |
 | 5 | 文档同步 | TASK-DOCSYNC.md | docs/deployment-doc-sync | D | 待分配 | R7 文档侧 |
+| — | 07-translation | （整合修复） | fix/07-model-entry-fields | A' | 开发中 | 08 新字段导致 local_onnx.rs:1060 测试助手字面量编译失败，补字段修复 |
 
 ## 状态流转记录
 
