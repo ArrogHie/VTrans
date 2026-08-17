@@ -100,6 +100,12 @@ pub struct TranslationModelGroup {
 }
 
 /// A single model file entry with integrity metadata.
+///
+/// # Schema evolution
+///
+/// The manifest schema version stays at 1. Fields added after the original
+/// release are optional and default via serde, so an old manifest without
+/// them still deserializes (see the per-field docs for the defaults).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelEntry {
     /// Stable identifier (e.g. `"ppocr-det-v6"`).
@@ -110,6 +116,25 @@ pub struct ModelEntry {
     pub sha256: String,
     /// Expected file size in bytes.
     pub size_bytes: u64,
+    /// Whether the entry is optional: missing optional files do not count
+    /// as integrity failures; they are reported as skipped and can be
+    /// installed later (e.g. downloaded by the app).
+    ///
+    /// Absent in the JSON: defaults to `false`.
+    #[serde(default)]
+    pub optional: bool,
+    /// Download URL for the file, consumed by the app's download flow.
+    /// This crate never performs downloads; it only carries the metadata.
+    ///
+    /// Absent in the JSON: defaults to `None`.
+    #[serde(default)]
+    pub download_url: Option<String>,
+    /// Expected download size in bytes, used by the app to show progress.
+    /// For bundled optional files this typically equals [`size_bytes`](Self::size_bytes).
+    ///
+    /// Absent in the JSON: defaults to `None`.
+    #[serde(default)]
+    pub download_size_bytes: Option<u64>,
 }
 
 /// Image preprocessing parameters for OCR detection.
@@ -571,5 +596,138 @@ mod tests {
         let serialized = serde_json::to_string(&manifest).unwrap();
         let back = ModelManifest::from_json_str(&serialized).unwrap();
         assert_eq!(back.ocr.preprocess_params, *pp);
+    }
+
+    #[test]
+    fn model_entry_optional_fields_defaults() {
+        // A manifest without the new optional-entry fields must still
+        // deserialize, with `optional` false and no download metadata.
+        let manifest = ModelManifest::from_json_str(VALID_JSON_WITH_TRANS).unwrap();
+        let model = &manifest.translation.as_ref().unwrap().model;
+        assert!(!model.optional);
+        assert_eq!(model.download_url, None);
+        assert_eq!(model.download_size_bytes, None);
+    }
+
+    #[test]
+    fn model_entry_optional_fields_parsed() {
+        let json = r#"{
+            "version": 1,
+            "ocr": {
+                "det": { "id": "det", "path": "ocr/det.onnx", "sha256": "abc", "size_bytes": 1 },
+                "rec_ja": { "id": "rj", "path": "ocr/rec_ja.onnx", "sha256": "def", "size_bytes": 2 },
+                "rec_en": { "id": "re", "path": "ocr/rec_en.onnx", "sha256": "ghi", "size_bytes": 3 },
+                "rec_multi": null,
+                "dicts": {},
+                "preprocess_params": {
+                    "image_size": [960, 960],
+                    "mean": [0.485, 0.456, 0.406],
+                    "std": [0.229, 0.224, 0.225],
+                    "det_threshold": 0.2,
+                    "unclip_ratio": 1.4
+                }
+            },
+            "translation": {
+                "model": {
+                    "id": "tm",
+                    "path": "translation/model.onnx",
+                    "sha256": "mno",
+                    "size_bytes": 5,
+                    "optional": true,
+                    "download_url": "https://example.com/translation-model.onnx",
+                    "download_size_bytes": 403368390
+                },
+                "tokenizer": { "id": "tk", "path": "translation/tokenizer.json", "sha256": "pqr", "size_bytes": 6 },
+                "supported_pairs": [["en", "zh-CN"]],
+                "max_length": 512,
+                "inference_params": { "max_batch_size": 1, "num_beams": 4 }
+            }
+        }"#;
+        let manifest = ModelManifest::from_json_str(json).unwrap();
+        let model = &manifest.translation.as_ref().unwrap().model;
+        assert!(model.optional);
+        assert_eq!(
+            model.download_url.as_deref(),
+            Some("https://example.com/translation-model.onnx")
+        );
+        assert_eq!(model.download_size_bytes, Some(403_368_390));
+        // The tokenizer has no new fields: all defaults.
+        let tokenizer = &manifest.translation.as_ref().unwrap().tokenizer;
+        assert!(!tokenizer.optional);
+        assert_eq!(tokenizer.download_url, None);
+        assert_eq!(tokenizer.download_size_bytes, None);
+    }
+
+    #[test]
+    fn model_entry_optional_fields_roundtrip() {
+        let json = r#"{
+            "version": 1,
+            "ocr": {
+                "det": { "id": "det", "path": "ocr/det.onnx", "sha256": "abc", "size_bytes": 1 },
+                "rec_ja": { "id": "rj", "path": "ocr/rec_ja.onnx", "sha256": "def", "size_bytes": 2 },
+                "rec_en": { "id": "re", "path": "ocr/rec_en.onnx", "sha256": "ghi", "size_bytes": 3 },
+                "rec_multi": null,
+                "dicts": {},
+                "preprocess_params": {
+                    "image_size": [960, 960],
+                    "mean": [0.485, 0.456, 0.406],
+                    "std": [0.229, 0.224, 0.225],
+                    "det_threshold": 0.2,
+                    "unclip_ratio": 1.4
+                }
+            },
+            "translation": {
+                "model": {
+                    "id": "tm",
+                    "path": "translation/model.onnx",
+                    "sha256": "mno",
+                    "size_bytes": 5,
+                    "optional": true,
+                    "download_url": "https://example.com/translation-model.onnx",
+                    "download_size_bytes": 5
+                },
+                "tokenizer": { "id": "tk", "path": "translation/tokenizer.json", "sha256": "pqr", "size_bytes": 6 },
+                "supported_pairs": [["en", "zh-CN"]],
+                "max_length": 512,
+                "inference_params": { "max_batch_size": 1, "num_beams": 4 }
+            }
+        }"#;
+        let manifest = ModelManifest::from_json_str(json).unwrap();
+        let serialized = serde_json::to_string(&manifest).unwrap();
+        let back = ModelManifest::from_json_str(&serialized).unwrap();
+        assert_eq!(manifest, back);
+        assert_eq!(
+            back.translation.as_ref().unwrap().model,
+            manifest.translation.as_ref().unwrap().model
+        );
+    }
+
+    #[test]
+    fn model_entry_explicit_optional_false_parsed() {
+        // `optional: false` and `download_url: null` must parse the same as
+        // absent fields.
+        let json = r#"{
+            "version": 1,
+            "ocr": {
+                "det": { "id": "det", "path": "ocr/det.onnx", "sha256": "abc", "size_bytes": 1, "optional": false, "download_url": null, "download_size_bytes": null },
+                "rec_ja": { "id": "rj", "path": "ocr/rec_ja.onnx", "sha256": "def", "size_bytes": 2 },
+                "rec_en": { "id": "re", "path": "ocr/rec_en.onnx", "sha256": "ghi", "size_bytes": 3 },
+                "rec_multi": null,
+                "dicts": {},
+                "preprocess_params": {
+                    "image_size": [960, 960],
+                    "mean": [0.485, 0.456, 0.406],
+                    "std": [0.229, 0.224, 0.225],
+                    "det_threshold": 0.2,
+                    "unclip_ratio": 1.4
+                }
+            },
+            "translation": null
+        }"#;
+        let manifest = ModelManifest::from_json_str(json).unwrap();
+        let det = &manifest.ocr.det;
+        assert!(!det.optional);
+        assert_eq!(det.download_url, None);
+        assert_eq!(det.download_size_bytes, None);
     }
 }
