@@ -37,6 +37,18 @@ VTrans 的 React + TypeScript 前端，负责主控制面板、透明区域选�
   与本地 ONNX 模型，并按所选 Provider 条件渲染端点/模型/区域/APP ID 表单；
   API Key/Secret 只经 `set_provider_credentials` 写入系统凭据，不进配置、
   store、事件或日志。
+- 设置面板「本地翻译模型」卡片：一键下载 403MB 本地翻译模型（进度百分比 +
+  进度条实时更新、可取消、校验失败可重新下载、已安装可删除——删除二次确认）。
+  四态互斥：未安装→「下载」、下载中→「取消下载」、已安装→「删除」、校验失败→
+  「重新下载」；状态由挂载时 `get_model_status` 水合，进度经
+  `model_download_progress` 事件驱动，下载 promise 结算后重新拉取终态。
+- 主窗口启动容错横幅（R6）：挂载时 `get_model_status`，`ocr_ready == false`
+  或存在非 optional 条目 `invalid` 时显示持久横幅「OCR 模型未就位，翻译功能
+  不可用」+「重试」按钮（`retry_model_setup`）；修复后横幅随最新状态自动消失，
+  期间设置、框选等其余入口不受影响。
+- 引擎切换联动：`translation.provider` 选 local 但翻译模型未安装/校验失败 →
+  ProviderSelect 禁用 local 选项并提示「请先在设置中下载本地翻译模型」；
+  下载进行中同样禁止切 local（与后端拒绝双保险）。
 - 常驻选区方框仅实时会话显示：单次翻译不显示方框，翻译完成后也不残留。
 - 提供只读设置面板（捕获间隔、差异阈值、超时、重试、快捷键、置顶），显示当前后端配置。
 - Debug 模式下实时显示进入 OCR 前的捕获帧缩略图（仅显示、不保存、不持久化）。
@@ -99,6 +111,23 @@ export function openResultWindow(): Promise<void>;
 两个外观命令只持久化对应字段，不获取实时会话锁、不重建翻译 provider，
 实时运行中也可以保存（替代整包 `save_settings` 路径）。
 
+翻译模型下载命令（全部无参数，与 TASK-10-app.md「IPC 契约」一致）：
+
+```ts
+export function downloadTranslationModel(): Promise<void>;        // download_translation_model
+export function cancelTranslationModelDownload(): Promise<void>;  // cancel_translation_model_download
+export function deleteTranslationModel(): Promise<void>;          // delete_translation_model
+export function getModelStatus(): Promise<ModelStatusReport>;     // get_model_status
+export function retryModelSetup(): Promise<ModelStatusReport>;    // retry_model_setup
+```
+
+模型下载的流程编排在 `services/modelActions.ts`（主窗口与设置卡片共用，
+禁止复制逻辑）：`refreshModelStatus`（拉取并镜像状态）、`downloadModel` /
+`cancelModelDownload` / `deleteModel`（命令 + 终态刷新 + 下载中标记清理）、
+`retryModelSetup`（修复 + 镜像）、`applyModelDownloadProgress`（进度事件
+进 store）。下载中标记与进度只存内存 store；前端不保存任何模型内容、
+不把模型 URL 写入日志或控制台。
+
 ### 类型与映射
 
 ```ts
@@ -143,6 +172,31 @@ export function boxCountWarningText(threshold): string;
 `DEFAULT_CONFIG.version` 同步到 6，避免未水合即保存被后端校验拒绝或整包
 `save_settings` 覆盖后端多框字段。
 
+模型就位类型与推导（与 `vtrans-app` 的 DTO 一致）：
+
+```ts
+export type ModelState = "ready" | "missing" | "invalid";
+export interface ModelEntryStatus { id: string; state: ModelState; optional: boolean; }
+export interface ModelStatusReport {
+  entries: ModelEntryStatus[];
+  ocr_ready: boolean;
+  translation_ready: boolean;
+}
+export interface ModelDownloadProgress { bytes: number; total: number; fraction: number; }
+
+export const TRANSLATION_MODEL_ENTRY_ID = "opus-mt-en-zh-int8";
+export function findTranslationModelEntry(report): ModelEntryStatus | null;
+export function hasModelSetupProblems(report): boolean;   // R6 横幅显隐
+export function localProviderBlockReason(report, downloading):
+  "missing" | "invalid" | "downloading" | null;          // ProviderSelect local 禁用
+```
+
+`findTranslationModelEntry` 优先按 manifest id 精确匹配，找不到时回退到首个
+optional 条目（翻译模型是当前唯一 optional 条目）。`hasModelSetupProblems`
+为 `ocr_ready == false` 或存在非 optional 条目 `invalid`；optional 条目损坏
+只进设置卡片「校验失败」，不触发启动横幅。`localProviderBlockReason` 在
+报告未水合（`null`）时不阻塞（避免闪烁），下载中恒阻塞。
+
 ### Event service
 
 ```ts
@@ -171,6 +225,15 @@ export function onMultiBoxBoxUpdated(cb): Promise<Unlisten>;
 export function onMultiBoxStatus(cb): Promise<Unlisten>;
 export function onMultiBoxWarning(cb): Promise<Unlisten>;
 export function onSingleTranslationResult(cb): Promise<Unlisten>;
+```
+
+模型下载进度事件（payload 字段 snake_case，与 Rust DTO 一致）：
+
+```ts
+export const MODEL_DOWNLOAD_PROGRESS = "model_download_progress";
+export function onModelDownloadProgress(
+  callback: (progress: ModelDownloadProgress) => void,
+): Promise<Unlisten>;
 ```
 
 Debug 帧服务（仅 Debug 模式启用）：
@@ -290,6 +353,12 @@ interface AppState {
 `finally` 中复位；失败走既有 `setStatus({ error })` 路径并恢复可用态。
 切换开始时清空 `modelProgress`，避免命中缓存时闪烁上次残留的百分比。
 
+`modelStatus` / `modelDownloadProgress` / `translationModelDownloading` 三个
+新增字段承载模型下载功能状态（不可变更新，全部经 `set*` 写入）：主窗口与
+设置卡片共用同一份 store 状态，因此设置面板关闭不中断后端下载、重开即按
+最新状态水合；`modelActions` 的终态刷新在模型 ready 时同步清理下载中标记，
+防止迟到进度事件残留「下载中」假状态。进度数据只进内存，不落盘、不进日志。
+
 `setBoxesStatus(boxIds, status)` 批量镜像多框会话状态（
 `frontend_multibox_started` / `frontend_multibox_stopped` 事件与
 `startMultiBox` / `stopMultiBox` 本地落库共用）。`applyStatus` 水合从不覆盖
@@ -362,6 +431,25 @@ pnpm tauri dev
 - ProviderToggle：六个 provider 选项的标签、选中态与 `aria-pressed`。
 - 凭据 IPC：`set_provider_credentials` 只发送提供的字段，百度 `appId` + `secret`
   双字段载荷与后端契约一致。
+- 模型下载 IPC：5 个命令（download/cancel/delete/getModelStatus/retryModelSetup）
+  的命令名与无参调用（camelCase 契约）；`model_download_progress` 事件名、
+  snake_case payload 解包与 unlisten 清理。
+- 模型就位类型与推导：`findTranslationModelEntry`（manifest id 精确匹配 +
+  optional 回退 + 缺失返回 null）、`hasModelSetupProblems`（ocr_ready/非
+  optional invalid）、`localProviderBlockReason`（missing/invalid/downloading/
+  null，未水合不阻塞）。
+- 模型下载动作（modelActions，mock invoke）：`refreshModelStatus` 镜像与
+  ready 时清理标记、`downloadModel` 发起即置「下载中」+ resolve 后刷新终态 +
+  失败清标记、cancel/delete/retry 流程与失败路径。
+- 「本地翻译模型」卡片四态 SSR：未安装/下载中/已安装/校验失败 的状态文案与
+  按钮互斥（下载/取消下载/删除/重新下载/刷新 唯一展示）、进度百分比与进度条
+  （0% 兜底、100% clamp）、非下载态不渲染进度条。
+- 启动容错横幅：ModelSetupBanner 文案/重试按钮/重试中禁用；主窗口在
+  `ocr_ready == false` 或非 optional 条目 invalid 时显示、健康/未水合/
+  仅 optional invalid 时隐藏（重试成功即消失），横幅不阻塞其余入口。
+- ProviderSelect local 禁用：local 选项在 missing/invalid/downloading 时
+  禁用且云端选项不受影响；missing 时提示「请先在设置中下载本地翻译模型」、
+  invalid/downloading 提示对应文案，云端引擎选中时 missing 提示不显示。
 - 模式切换控件在实时会话运行期间的禁用行为。
 - 多框类型与配置：`BoxStatus` 的 Error 判定与中文标签、`isMultiBoxEngaged`
   判定、`shouldWarnBoxCount` / `boxCountWarningText` 警告逻辑、`DEFAULT_CONFIG`
@@ -428,6 +516,12 @@ pnpm tauri dev
 | Debug 退出清理 | Debug 模式下停止翻译并退出应用 | 面板帧数据随窗口销毁释放，不落盘、不写入日志、不进入结果窗口 |
 | Provider 表单 | 打开设置面板，依次选择 OpenAI/DeepL/Google/Azure/百度/本地 | 各 provider 只显示对应字段；切换 provider 自动套用默认端点，再手动改自定义端点 |
 | 凭据保存 | 在百度表单输入 APP ID 与 Secret 并保存，或为非百度 provider 保存 API Key | 保存成功提示；凭据只进入 Windows 凭据管理器，`config.json` 与日志不含 Key/Secret |
+| 模型下载 | 设置面板「本地翻译模型」卡片点击「下载」 | 卡片显示「下载中」+ 百分比 + 进度条；期间主窗口本地引擎选项禁用并提示 |
+| 模型下载取消 | 下载中点击「取消下载」 | 恢复「未安装」态；主窗口可再次发起下载 |
+| 模型下载完成 | 等待下载完成（sha256 校验通过） | 卡片显示「已安装」，主窗口可切换到本地引擎并离线翻译 |
+| 模型重新下载 | 删除 `data/models/translation/model.onnx` 后刷新状态或重启 | 卡片显示「校验失败」或「未安装」，「重新下载」可用 |
+| 模型删除 | 已安装态点击「删除」并二次确认 | 卡片回到「未安装」，本地引擎选项禁用并提示 |
+| 启动容错 | 删除/损坏 OCR 模型后重启应用 | 主窗口显示「OCR 模型未就位，翻译功能不可用」横幅 + 重试按钮；点击重试修复后横幅自动消失，其余功能可用 |
 
 ## 已知限制
 
@@ -502,3 +596,14 @@ pnpm tauri dev
     2px 宽度画在区域内侧——可见性优先的取舍：窗口外无空间可画，贴边侧
     最多 2px 描边重新进入捕获区（仅影响该侧）。dpr 换算先于外移，外移量
     恒为 CSS 2px。
+19. 模型下载进度为后端事件推送（`model_download_progress`，后端按约
+    500ms/1MB 节流），前端不在本地模拟进度；下载期间 webview 重载/设置面板
+    关闭不中断后端下载，重新挂载以 `get_model_status` + 进行中标记水合，
+    若后端仍在下载进度事件会继续推送。断点续传（`.part` + Range 头）为
+    后端 P1 能力，前端不感知；前端不保存任何模型内容，模型 URL 不进日志/
+    控制台（错误信息经 `getIpcErrorMessage` 脱敏展示）。
+20. `ModelStatusReport` 的翻译模型条目定位依赖 manifest id
+    `opus-mt-en-zh-int8`（找不到时回退首个 optional 条目）；若后端更换
+    manifest id 且新增了其它 optional 条目，需同步更新
+    `TRANSLATION_MODEL_ENTRY_ID`。`get_model_status` 只读不修复，修复必须
+    经 `retry_model_setup`（横幅重试按钮）或重启后的首启流程。

@@ -11,12 +11,18 @@ import {
 import { DebugPanel } from "../components/DebugPanel";
 import { LanguageSelector } from "../components/LanguageSelector";
 import { ModeToggle } from "../components/ModeToggle";
+import { ModelSetupBanner } from "../components/ModelSetupBanner";
 import { ProviderSelect } from "../components/ProviderSelect";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { StatusBar } from "../components/StatusBar";
 import { TranslationBoxList } from "../components/TranslationBoxList";
 import { useDebugFrame } from "../hooks/useDebugFrame";
-import { onMultiBoxWarning } from "../services/events";
+import { onModelDownloadProgress, onMultiBoxWarning } from "../services/events";
+import {
+  applyModelDownloadProgress,
+  refreshModelStatus,
+  retryModelSetup,
+} from "../services/modelActions";
 import { showRegionOverlay } from "../services/regionOverlay";
 import {
   getAppConfig,
@@ -43,7 +49,13 @@ import {
 } from "../services/multiBoxActions";
 import { useAppStore } from "../stores/appStore";
 import { shouldRestoreOverlay } from "../utils/overlayVisibility";
-import { boxCountWarningText, isAnyBoxRunning, isLocalPairSupported } from "../types";
+import {
+  boxCountWarningText,
+  hasModelSetupProblems,
+  isAnyBoxRunning,
+  isLocalPairSupported,
+  localProviderBlockReason,
+} from "../types";
 import type { LanguageCode, Mode, ProviderId } from "../types";
 
 const OCR_LANGUAGES = [
@@ -61,7 +73,8 @@ const TARGET_LANGUAGES = [
 export function MainWindow() {
   const {
     mode, status, error, config, modelProgress, liveConfig, livePaused,
-    providerSwitching, translationBoxes, boxStatuses,
+    providerSwitching, translationBoxes, boxStatuses, modelStatus,
+    translationModelDownloading,
     setMode, setStatus, setSelectedRegion, setProvider, setConfig, updateLanguage,
     setProviderSwitching, setModelProgress,
   } = useAppStore();
@@ -71,6 +84,7 @@ export function MainWindow() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
   const [warningToast, setWarningToast] = useState<string | null>(null);
+  const [retryingModelSetup, setRetryingModelSetup] = useState(false);
   const debugFrame = useDebugFrame(debugMode);
 
   useEffect(() => {
@@ -121,6 +135,29 @@ export function MainWindow() {
     return () => {
       disposed = true;
       window.clearTimeout(timer);
+      unlistenFn?.();
+    };
+  }, []);
+
+  // 模型就位状态与下载进度（主窗口常驻监听）：
+  // - 挂载时 get_model_status，供 R6 横幅与「本地引擎」禁用推导使用；
+  // - model_download_progress 事件在下载期间持续推送，设置面板关闭时主窗口
+  //   仍能据事件获知「下载进行中」，与后端拒绝切 local 形成双保险。
+  useEffect(() => {
+    let disposed = false;
+    let unlistenFn: (() => void) | undefined;
+    void refreshModelStatus().catch(() => {
+      // 状态拉取失败时不显示横幅（无法推导），不影响主窗口其余功能。
+    });
+    void onModelDownloadProgress((progress) => {
+      if (disposed) return;
+      applyModelDownloadProgress(progress);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else unlistenFn = unlisten;
+    });
+    return () => {
+      disposed = true;
       unlistenFn?.();
     };
   }, []);
@@ -199,6 +236,21 @@ export function MainWindow() {
     }
   };
 
+  /** R6 横幅「重试」：重新执行首启模型修复，成功后横幅随 store 状态自动消失。 */
+  const handleRetryModelSetup = async () => {
+    setRetryingModelSetup(true);
+    try {
+      await retryModelSetup();
+    } catch (ipcError) {
+      // 重试失败保持横幅可见（store 状态未更新），错误经状态栏提示，不静默。
+      console.warn(`[vtrans] model setup retry failed: ${getIpcErrorMessage(ipcError)}`);
+      setStatus({ error: getIpcErrorMessage(ipcError) });
+      void refreshModelStatus().catch(() => {});
+    } finally {
+      setRetryingModelSetup(false);
+    }
+  };
+
   // 多框操作统一走 multiBoxActions 状态机；busy 仅锁定多框区块，不阻塞单次/实时。
   const handleAddBox = async () => {
     setMultiBusy(true);
@@ -262,6 +314,10 @@ export function MainWindow() {
   // 启停按钮，统一由 live 模式底部控制行驱动（BUGFIX-2）。推导复用
   // types 的 isAnyBoxRunning，与悬浮球/水合共享同一语义（BUGFIX-4）。
   const anyRunning = isAnyBoxRunning(boxStatuses);
+  // R6 横幅：OCR 未就位或存在非 optional 条目校验失败时持续显示（不阻塞
+  // 设置、框选等其余入口）；本地引擎禁用推导与 ProviderSelect 联动。
+  const showModelSetupBanner = modelStatus !== null && hasModelSetupProblems(modelStatus);
+  const localBlocked = localProviderBlockReason(modelStatus, translationModelDownloading);
 
   return (
     <main className="min-h-screen bg-slate-50 px-5 py-6 text-slate-900">
@@ -281,6 +337,13 @@ export function MainWindow() {
           <Settings2 size={20} aria-hidden="true" />
         </button>
       </header>
+
+      {showModelSetupBanner && (
+        <ModelSetupBanner
+          retrying={retryingModelSetup}
+          onRetry={() => void handleRetryModelSetup()}
+        />
+      )}
 
       {warningToast && (
         <div
@@ -368,6 +431,7 @@ export function MainWindow() {
             disabled={providerSwitching || busy}
             switching={providerSwitching}
             progress={modelProgress}
+            localBlocked={localBlocked}
           />
           {config.translation.provider === "local" && !isLocalPairSupported(config) && (
             <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">

@@ -230,6 +230,39 @@ export interface ModelProgressPayload {
   progress: number;
 }
 
+/**
+ * Runtime state of one model entry as reported by `get_model_status` /
+ * `retry_model_setup` (`vtrans-app` 侧 `ModelState` 的 serde 表示）。
+ *
+ * `ready` = 存在且 sha256 通过；`missing` = 缺失；`invalid` = 存在但校验失败。
+ * optional 条目缺失时报告 `missing`（前端显示「未安装」而非「校验失败」）。
+ */
+export type ModelState = "ready" | "missing" | "invalid";
+
+/** One manifest model entry inside `ModelStatusReport`. */
+export interface ModelEntryStatus {
+  id: string;
+  state: ModelState;
+  optional: boolean;
+}
+
+/**
+ * Read-only model file snapshot returned by `get_model_status` /
+ * `retry_model_setup`（字段与 Rust DTO 一一对应，snake_case）。
+ */
+export interface ModelStatusReport {
+  entries: ModelEntryStatus[];
+  ocr_ready: boolean;
+  translation_ready: boolean;
+}
+
+/** Payload of the `model_download_progress` event (snake_case fields). */
+export interface ModelDownloadProgress {
+  bytes: number;
+  total: number;
+  fraction: number;
+}
+
 export interface TimestampPayload {
   timestamp: number;
 }
@@ -255,6 +288,7 @@ export type EventPayloadMap = {
   pipeline_error: PipelineErrorPayload;
   live_session_stopped: StoppedPayload;
   model_loading_progress: ModelProgressPayload;
+  model_download_progress: ModelDownloadProgress;
   region_selected: ScreenRegion;
   overlay_region_updated: ScreenRegion;
   overlay_hidden: null;
@@ -380,6 +414,68 @@ export function isLocalPairSupported(
 /** Reports whether a box status is the serialized `Error` variant. */
 export function isBoxError(status: BoxStatus): status is { Error: string } {
   return typeof status === "object" && status !== null && "Error" in status;
+}
+
+/**
+ * Manifest id of the downloadable local translation model entry.
+ *
+ * Matches `translation.model.id` in `src-tauri/resources/models/manifest.json`
+ * (owned by vtrans-app)。The optional-entry fallback below keeps the card
+ * working if the id ever changes.
+ */
+export const TRANSLATION_MODEL_ENTRY_ID = "opus-mt-en-zh-int8";
+
+/**
+ * Locates the downloadable translation model entry inside a status report.
+ *
+ * Prefers the exact manifest id, then falls back to the first optional entry
+ * (the translation model is the only optional entry today) so a renamed id
+ * does not silently break the download card. Returns `null` when the report
+ * carries no such entry.
+ */
+export function findTranslationModelEntry(
+  report: ModelStatusReport,
+): ModelEntryStatus | null {
+  return (
+    report.entries.find((entry) => entry.id === TRANSLATION_MODEL_ENTRY_ID) ??
+    report.entries.find((entry) => entry.optional) ??
+    null
+  );
+}
+
+/**
+ * Reports whether the model setup needs user attention (R6 startup banner).
+ *
+ * `true` when OCR is not ready or any non-optional entry failed verification.
+ * Optional entries (the downloadable translation model) never raise the
+ * banner; they are surfaced by the settings download card instead.
+ */
+export function hasModelSetupProblems(report: ModelStatusReport): boolean {
+  if (!report.ocr_ready) return true;
+  return report.entries.some((entry) => !entry.optional && entry.state === "invalid");
+}
+
+/** Why the local engine option is unavailable in the provider picker. */
+export type LocalProviderBlockReason = "missing" | "invalid" | "downloading";
+
+/**
+ * Derives whether switching to the local engine must be blocked.
+ *
+ * `null` means the local option is selectable. A `null` report (not yet
+ * hydrated) never blocks, avoiding a flicker before the first
+ * `get_model_status` resolves; a download in flight always blocks (double
+ * insurance with the backend rejection). A missing translation entry (older
+ * backend) is treated as unknown and does not block.
+ */
+export function localProviderBlockReason(
+  report: ModelStatusReport | null,
+  downloading: boolean,
+): LocalProviderBlockReason | null {
+  if (downloading) return "downloading";
+  if (report === null) return null;
+  const entry = findTranslationModelEntry(report);
+  if (!entry || entry.state === "ready") return null;
+  return entry.state === "invalid" ? "invalid" : "missing";
 }
 
 /**

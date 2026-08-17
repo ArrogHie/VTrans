@@ -4,6 +4,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type {
   AppConfig,
   AppStatus,
+  ModelStatusReport,
   OcrResult,
   PipelineConfig,
   ScreenRegion,
@@ -108,6 +109,42 @@ export function setTranslationProvider(providerId: AppConfig["translation"]["pro
 /** Verifies installed local model files. */
 export function loadLocalModels(): Promise<VerifyReport> {
   return call<VerifyReport>("load_local_models");
+}
+
+/**
+ * Starts the 403MB translation model download (all commands in this feature
+ * are parameterless). Progress arrives via the `model_download_progress`
+ * event; the returned promise settles when the download completes, fails, or
+ * is cancelled.
+ */
+export function downloadTranslationModel(): Promise<void> {
+  return call<void>("download_translation_model");
+}
+
+/** Cancels an in-flight translation model download. */
+export function cancelTranslationModelDownload(): Promise<void> {
+  return call<void>("cancel_translation_model_download");
+}
+
+/**
+ * Deletes the local translation model (cancelling a running download first if
+ * needed) and rebuilds the local provider into its missing state.
+ */
+export function deleteTranslationModel(): Promise<void> {
+  return call<void>("delete_translation_model");
+}
+
+/**
+ * Returns the read-only model status snapshot. Never triggers a repair;
+ * `retryModelSetup` is the explicit repair entry point.
+ */
+export function getModelStatus(): Promise<ModelStatusReport> {
+  return call<ModelStatusReport>("get_model_status");
+}
+
+/** Re-runs the first-run model setup and returns the fresh status snapshot. */
+export function retryModelSetup(): Promise<ModelStatusReport> {
+  return call<ModelStatusReport>("retry_model_setup");
 }
 
 /** Persists the complete application settings object. */

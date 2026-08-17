@@ -1,6 +1,6 @@
 import { Loader2 } from "lucide-react";
 import { PROVIDER_OPTIONS } from "./ProviderToggle";
-import type { ProviderId } from "../types";
+import type { LocalProviderBlockReason, ProviderId } from "../types";
 
 interface ProviderSelectProps {
   value: ProviderId;
@@ -11,7 +11,22 @@ interface ProviderSelectProps {
   switching: boolean;
   /** Backend model-loading progress (0..1), `null` before any event. */
   progress: number | null;
+  /**
+   * Why the local engine option is unavailable, or `null` when selectable.
+   *
+   * Derived from `get_model_status` plus the download-in-flight marker: a
+   * missing/invalid translation model or a running download disables the
+   * local option only (cloud options stay usable). This is double insurance
+   * with the backend rejection of switching to local.
+   */
+  localBlocked?: LocalProviderBlockReason | null;
 }
+
+const LOCAL_BLOCK_HINTS: Record<LocalProviderBlockReason, string> = {
+  missing: "请先在设置中下载本地翻译模型",
+  invalid: "本地翻译模型校验失败，请在设置中重新下载",
+  downloading: "本地翻译模型下载中，完成后可切换本地引擎",
+};
 
 /**
  * Engine picker used on the main window.
@@ -20,6 +35,10 @@ interface ProviderSelectProps {
  * spinner plus the model-loading percentage driven by `model_loading_progress`
  * events; `progress === null` falls back to a generic switching message. The
  * parent owns the switch lifecycle (busy guard, progress reset, restore).
+ *
+ * The local option is disabled while the translation model is unavailable or
+ * downloading; a hint explains why (always visible while downloading, and when
+ * the unavailable local engine is the current selection).
  */
 export function ProviderSelect({
   value,
@@ -27,7 +46,9 @@ export function ProviderSelect({
   disabled,
   switching,
   progress,
+  localBlocked = null,
 }: ProviderSelectProps) {
+  const localUnavailable = localBlocked !== null;
   return (
     <label className="mt-4 flex flex-col gap-1.5">
       <span className="text-xs font-medium text-slate-500">翻译引擎</span>
@@ -39,11 +60,24 @@ export function ProviderSelect({
         aria-label="翻译引擎"
       >
         {PROVIDER_OPTIONS.map((option) => (
-          <option key={option.value} value={option.value}>
+          <option
+            key={option.value}
+            value={option.value}
+            disabled={option.value === "local" && localUnavailable}
+          >
             {option.label}
           </option>
         ))}
       </select>
+      {localUnavailable && (value === "local" || localBlocked === "downloading") && (
+        <p
+          className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700"
+          role="status"
+          data-testid="local-model-block-hint"
+        >
+          {LOCAL_BLOCK_HINTS[localBlocked]}
+        </p>
+      )}
       {switching && (
         <p
           className="mt-2 flex items-center gap-2 text-xs text-slate-500"
