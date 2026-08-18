@@ -948,6 +948,12 @@ pub async fn set_api_key(api_key: String, state: State<'_, AppState>) -> Result<
 /// provider, the running provider is rebuilt immediately so the change
 /// applies without a restart.
 ///
+/// For Baidu, the APP ID is additionally mirrored into the persisted
+/// `config.translation.app_id` right after the vault write succeeds (the
+/// APP ID is not a secret and vtrans-config requires the field for the
+/// `"baidu"` provider). A failed configuration save is returned as an error
+/// so the vault and the configuration never silently disagree.
+///
 /// The frontend passes the arguments as `{ providerId, apiKey, appId,
 /// secret }` (Tauri 2 maps Rust `snake_case` parameters to camelCase by
 /// default).
@@ -956,7 +962,8 @@ pub async fn set_api_key(api_key: String, state: State<'_, AppState>) -> Result<
 ///
 /// Returns an application error when the provider id is unsupported, a
 /// required credential value is missing or invalid, a live task is running,
-/// the vault write fails, or the provider cannot be rebuilt.
+/// the vault write fails, the configuration sync fails, or the provider
+/// cannot be rebuilt.
 #[tauri::command]
 #[tracing::instrument(skip(state, api_key, app_id, secret), fields(provider_id))]
 pub async fn set_provider_credentials(
@@ -987,19 +994,27 @@ pub async fn set_provider_credentials(
         .transpose()?;
     let credentials = Arc::clone(&state.credentials);
     let store_provider_id = provider_id.clone();
+    let store_app_id = app_id.clone();
     tokio::task::spawn_blocking(move || {
         store_provider_credentials(
             &credentials,
             &store_provider_id,
             api_key.as_deref(),
-            app_id.as_deref(),
+            store_app_id.as_deref(),
             secret.as_deref(),
         )
     })
     .await
     .map_err(|error| AppError::Tauri(format!("credential store task failed: {error}")))??;
 
-    let config = state.load_config()?;
+    let mut config = state.load_config()?;
+    if apply_baidu_app_id_to_config(&mut config, &provider_id, app_id.as_deref()) {
+        state.save_config(&config)?;
+        tracing::info!(
+            provider = provider_id,
+            "baidu app id synced to the persisted configuration"
+        );
+    }
     if config.translation.provider == provider_id {
         let app = state.app_handle()?;
         let provider = state
@@ -1057,6 +1072,38 @@ fn validate_credential_value(value: &str, label: &str) -> Result<String, AppErro
         )));
     }
     Ok(trimmed.to_string())
+}
+
+/// Mirrors a freshly stored Baidu APP ID into a configuration snapshot.
+///
+/// The APP ID is not a secret, and vtrans-config requires
+/// `translation.app_id` to be non-empty whenever the configured provider is
+/// `"baidu"`. [`set_provider_credentials`] therefore persists the validated
+/// value into the configuration right after the vault write, so a provider
+/// switch immediately after the save passes validation without a full
+/// `save_settings` round trip. Other providers and calls without an APP ID
+/// leave the snapshot untouched. Returns `true` when the snapshot was
+/// mutated.
+///
+/// Kept as a pure function so the exact mutation performed by
+/// [`set_provider_credentials`] is unit-testable without a Tauri runtime.
+fn apply_baidu_app_id_to_config(
+    config: &mut AppConfig,
+    provider_id: &str,
+    app_id: Option<&str>,
+) -> bool {
+    if provider_id != "baidu" {
+        return false;
+    }
+    let Some(app_id) = app_id else {
+        return false;
+    };
+    let app_id = app_id.trim();
+    if app_id.is_empty() {
+        return false;
+    }
+    config.translation.app_id = Some(app_id.to_string());
+    true
 }
 
 /// Returns the complete persisted application configuration.
@@ -2113,6 +2160,76 @@ mod tests {
         let error =
             validate_credential_value(&"s".repeat(MAX_API_KEY_LEN + 1), "secret").unwrap_err();
         assert!(matches!(error, AppError::ProviderCredential(_)));
+    }
+
+    // ── Baidu APP ID configuration sync (Bug-010) ──
+
+    #[test]
+    fn baidu_app_id_sync_writes_the_config_value_when_provided() {
+        let mut config = AppConfig::default();
+        assert!(apply_baidu_app_id_to_config(
+            &mut config,
+            "baidu",
+            Some("  app-2024  ")
+        ));
+        assert_eq!(config.translation.app_id.as_deref(), Some("app-2024"));
+    }
+
+    #[test]
+    fn baidu_app_id_sync_skips_the_config_without_an_app_id() {
+        let mut config = AppConfig::default();
+        assert!(!apply_baidu_app_id_to_config(&mut config, "baidu", None));
+        assert_eq!(config, AppConfig::default());
+    }
+
+    #[test]
+    fn baidu_app_id_sync_ignores_non_baidu_providers() {
+        for provider in ["openai", "deepl", "google", "azure", "local"] {
+            let mut config = AppConfig::default();
+            assert!(
+                !apply_baidu_app_id_to_config(&mut config, provider, Some("app-2024")),
+                "provider {provider:?} must not write the app id"
+            );
+            assert_eq!(config.translation.app_id, None, "provider {provider:?}");
+        }
+    }
+
+    #[test]
+    fn baidu_app_id_sync_overwrites_an_existing_value_when_explicitly_provided() {
+        let mut config = AppConfig::default();
+        config.translation.app_id = Some("old-app".to_string());
+        assert!(apply_baidu_app_id_to_config(
+            &mut config,
+            "baidu",
+            Some("new-app")
+        ));
+        assert_eq!(config.translation.app_id.as_deref(), Some("new-app"));
+    }
+
+    #[test]
+    fn baidu_app_id_sync_persists_and_survives_reload() {
+        let dir = TestConfigDir::new();
+        let manager = ConfigManager::new(dir.path()).unwrap();
+        manager.save(&AppConfig::default()).unwrap();
+
+        let mut config = manager.load().unwrap();
+        assert!(apply_baidu_app_id_to_config(
+            &mut config,
+            "baidu",
+            Some("2026081000000000")
+        ));
+        manager.save(&config).unwrap();
+
+        let persisted = manager.load().unwrap();
+        assert_eq!(
+            persisted.translation.app_id.as_deref(),
+            Some("2026081000000000")
+        );
+        // Only the app id changed; the provider selection is untouched.
+        assert_eq!(
+            persisted.translation.provider,
+            AppConfig::default().translation.provider
+        );
     }
 
     fn ocr_result(text: &str) -> OcrResult {
