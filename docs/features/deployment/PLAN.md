@@ -104,6 +104,8 @@ Rust 侧 `ModelStatusReport` 定义为 `vtrans-app` 内部 DTO（`#[derive(Seria
 - 注：统筹提示词引用的全局 `docs/integration-report.md` 不存在（已知限制以各 crate README 与功能级报告为准），本次按 crate README 对照。
 
 ## 用户已确认决策（2026-08-17）
-1. 翻译模型 `download_url`：接受「版本化直链 + 发布流程回填 sha256」方案；开发期按 GitHub Releases 版本化占位 URL（`https://github.com/ArrogHie/VTrans/releases/download/v<版本>/translation-model.onnx`）录入 manifest，发布流程负责最终 URL 与 sha256 回填。
+1. 翻译模型 `download_url`：接受「版本化直链 + 发布流程回填 sha256」方案；开发期按 GitHub Releases 版本化占位 URL（`https://github.com/ArrogHie/VTrans/releases/download/v0.1.0/translation-model.onnx`）录入 manifest，发布流程负责最终 URL 与 sha256 回填。
 2. `VTRANS_CONFIG_DIR` / `VTRANS_MODEL_DIR`：**删除文档条目**（不补实现）；`VTRANS_MODEL_DIR` 保留 CLI `verify_models` 的说明并注明仅 CLI 生效。
 3. 开发模式 `data/` 落在 `target/debug/data/`：接受。
+
+> **2026-08-18 决策 1 落地**：用户选定 GitHub Releases 托管。v0.1.0 release 已创建并上传模型资产（gh 未应用重命名语法，资产实际名为 `model.onnx`），manifest `download_url` 最终为 `https://github.com/ArrogHie/VTrans/releases/download/v0.1.0/model.onnx`（fix/repack-download-url），sha256 与本机/资产一致（`6a9d4d0b…`）。

@@ -44,6 +44,7 @@ pub struct ModelEntryStatus { pub id: String, pub state: ModelState, pub optiona
 
 - 范围：`crates/vtrans-app` + **本功能授权的打包侧文件**：`src-tauri/tauri.conf.json`（bundle.resources）、`src-tauri/resources/models/manifest.json`（translation.model 条目录入）、根 `.gitignore`/`.gitattributes`（OCR 模型随仓库 LFS 跟踪）。PR 描述中逐项说明授权范围内的根文件变更。**禁止**修改其他 crate、vtrans-core、capabilities（无新窗口/权限需求）。
 - manifest.json 的 `download_url`：用户已确认「版本化直链 + 发布流程回填 sha256」方案（2026-08-17）。开发期录入版本化占位 URL（形如 `https://github.com/ArrogHie/VTrans/releases/download/v0.2.0/translation-model.onnx`，版本号与 `Cargo.toml workspace.package.version` 一致）；`download_size_bytes` 填本机 `translation/model.onnx` 实际字节数（与 manifest 既有 `sha256`/`size_bytes` 一致，若 manifest 缺 sha256 则用本机文件现算并同步 `size_bytes`）。README 注明「发布流程负责最终 URL 与 sha256 回填」。
+- **2026-08-18 更新**：release 已创建（v0.1.0），资产实际名为 `model.onnx`，`download_url` 已由 fix/repack-download-url 修正为 `…/download/v0.1.0/model.onnx`。
 
 ### R1 数据目录锚定 exe（P0）
 - `setup.rs:81-93`：`app.path().app_data_dir()` 改为 `{exe}/data`（`current_exe` 父目录 + `data`；创建目录失败按启动容错策略处理）。config（`setup.rs:85-87`）、logs（`setup.rs:48-64`）随之自动落位 `data/config.json`、`data/logs/`。

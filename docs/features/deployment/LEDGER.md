@@ -5,12 +5,16 @@
 - 需求来源：`docs/features/deployment/REQUIREMENTS.md`（用户需求文档，2026-08-17 提供）
 - 优先级：P0（R1-R6）；P1（R7、config 迁移、凭据迁移、断点续传）
 - 创建时间：2026-08-17
-- 当前状态：已整合（main 4da1a49），待用户手工验收（GUI/安装冒烟，见 INTEGRATION_REPORT.md 遗留问题 1）
+- 当前状态：已整合（main 831d561 + fix/repack-download-url 待合并）；待用户手工验收（GUI/安装冒烟，见 INTEGRATION_REPORT.md 遗留问题 1）
 
 ## 用户已确认决策（2026-08-17）
 1. `download_url`：接受「版本化直链（GitHub Releases）+ 发布流程回填 sha256」；开发期用版本化占位 URL。
 2. `VTRANS_CONFIG_DIR` / `VTRANS_MODEL_DIR`：删除文档条目（不补实现）；`VTRANS_MODEL_DIR` 保留 CLI 说明。
 3. 开发模式 `data/` 落 `target/debug/data/`：接受。
+
+## 用户验收反馈与修复（2026-08-18）
+1. **bug：校验按钮提示误导**——翻译模型缺失（skipped）时仍显示「本地模型校验通过」。修复：前端 `VerifyReport` 补 `skipped` 字段 + `verifyReportMessage` 三态文案（fix/11-verify-skipped-message，e7ca84d），合并 main（831d561）；372 前端测试全绿。
+2. **模型托管落地**——用户选定 GitHub Releases；main 已推送 origin（7ebbbb2..831d561，含 2 个 LFS 对象）；release v0.1.0 已创建并上传 translation ONNX（403368390 字节，资产名 `model.onnx`，gh 未应用 `#` 重命名语法）；manifest `download_url` 修正为 `…/v0.1.0/model.onnx`（fix/repack-download-url 待合并）。**已安装用户升级方式**：删除 `{安装目录}/data/models/manifest.json` 后重启（`load_or_repair_manifest` 仅在 manifest 缺失/损坏时从内置源重拷），或重装新安装包。
 
 ## 子任务台账
 
