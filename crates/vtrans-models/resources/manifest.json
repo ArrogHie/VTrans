@@ -52,7 +52,7 @@
       "sha256": "6a9d4d0b42f5ad0de0a91b9f81a1283078b264ed9c96a3341f76d631caec79f9",
       "size_bytes": 403368390,
       "optional": true,
-      "download_url": "https://github.com/ArrogHie/VTrans/releases/download/v0.1.0/translation-model.onnx",
+      "download_url": "https://github.com/ArrogHie/VTrans/releases/download/v0.1.0/model.onnx",
       "download_size_bytes": 403368390
     },
     "tokenizer": {
