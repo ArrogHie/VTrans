@@ -14,7 +14,11 @@
 
 ## 用户验收反馈与修复（2026-08-18）
 1. **bug：校验按钮提示误导**——翻译模型缺失（skipped）时仍显示「本地模型校验通过」。修复：前端 `VerifyReport` 补 `skipped` 字段 + `verifyReportMessage` 三态文案（fix/11-verify-skipped-message，e7ca84d），合并 main（831d561）；372 前端测试全绿。
-2. **模型托管落地**——用户选定 GitHub Releases；main 已推送 origin（7ebbbb2..831d561，含 2 个 LFS 对象）；release v0.1.0 已创建并上传 translation ONNX（403368390 字节，资产名 `model.onnx`，gh 未应用 `#` 重命名语法）；manifest `download_url` 修正为 `…/v0.1.0/model.onnx`（fix/repack-download-url 待合并）。**已安装用户升级方式**：删除 `{安装目录}/data/models/manifest.json` 后重启（`load_or_repair_manifest` 仅在 manifest 缺失/损坏时从内置源重拷），或重装新安装包。
+2. **模型托管落地**——用户选定 GitHub Releases；main 已推送 origin（7ebbbb2..831d561，含 2 个 LFS 对象）；release v0.1.0 已创建并上传 translation ONNX（403368390 字节，资产名 `model.onnx`，gh 未应用 `#` 重命名语法）；manifest `download_url` 修正为 `…/v0.1.0/model.onnx`（fix/repack-download-url，合并 1f38a14）。**已安装用户升级方式**：删除 `{安装目录}/data/models/manifest.json` 后重启（`load_or_repair_manifest` 仅在 manifest 缺失/损坏时从内置源重拷），或重装新安装包。
+
+### 2026-08-18 百度切换 bug 修复 + 正式 release
+- **bug：百度引擎切换报 app_id 校验错误**——根因：APP ID 落配置的唯一路径是设置页整包保存，用户点「保存凭据」只写凭据库 → 配置校验死锁。修复（fix/10-baidu-app-id-sync，合并 e3d3545，157+19+5 测试全绿）：切换百度时从凭据库回填 app_id（无凭据给明确提示、不留半切换状态）；「保存凭据」存百度时同步持久化 app_id 到配置。
+- **正式 release**：v0.1.0 重建于 main e3d3545——删除旧 release（仅模型文件）→ 重新创建，资产 = NSIS 安装包（35.9MB）+ MSI（41.3MB）+ `model.onnx`（403368390 字节，sha256 `6a9d4d0b…` 不变）；模型直链 URL 不变（`…/v0.1.0/model.onnx`，302 正常）；本地 tag 已同步。
 
 ## 子任务台账
 
