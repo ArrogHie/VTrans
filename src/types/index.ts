@@ -217,7 +217,26 @@ export interface HotkeyConfig {
 export interface VerifyReport {
   checked: number;
   passed: number;
+  /**
+   * Entries skipped because they are optional and missing on disk (e.g. the
+   * not-yet-downloaded translation model). Skipped entries do not count as
+   * failures but must not be reported as "verified" either.
+   */
+  skipped: string[];
   failed: string[];
+}
+
+/**
+ * User-facing verdict for a `load_local_models` report.
+ *
+ * Failed entries take precedence. A report with no failures but skipped
+ * optional entries (translation model not installed) must not claim the whole
+ * local model set passed.
+ */
+export function verifyReportMessage(report: VerifyReport): string {
+  if (report.failed.length > 0) return "本地模型需要检查";
+  if (report.skipped.length > 0) return "OCR 模型校验通过，翻译模型未安装（请在设置中下载）";
+  return "本地模型校验通过";
 }
 
 export interface PipelineErrorPayload {

@@ -3,10 +3,11 @@ import {
   deleteTranslationModel,
   downloadTranslationModel,
   getModelStatus,
+  loadLocalModels,
   retryModelSetup as retryModelSetupCommand,
 } from "./tauri";
 import { useAppStore } from "../stores/appStore";
-import { findTranslationModelEntry } from "../types";
+import { findTranslationModelEntry, verifyReportMessage } from "../types";
 import type { ModelDownloadProgress, ModelStatusReport } from "../types";
 
 /**
@@ -108,4 +109,15 @@ export async function retryModelSetup(): Promise<ModelStatusReport> {
   const report = await retryModelSetupCommand();
   useAppStore.getState().setModelStatus(report);
   return report;
+}
+
+/**
+ * Runs `load_local_models` and maps the report to the user-facing verdict.
+ *
+ * Optional entries missing on disk are reported as `skipped` (not `failed`),
+ * so a report with no failures can still mean the translation model is not
+ * installed; the verdict text must reflect that instead of claiming success.
+ */
+export async function verifyLocalModels(): Promise<string> {
+  return verifyReportMessage(await loadLocalModels());
 }

@@ -6,6 +6,7 @@ const tauriMocks = vi.hoisted(() => ({
   deleteTranslationModel: vi.fn(),
   getModelStatus: vi.fn(),
   retryModelSetup: vi.fn(),
+  loadLocalModels: vi.fn(),
 }));
 
 vi.mock("../services/tauri", () => tauriMocks);
@@ -17,6 +18,7 @@ const {
   downloadModel,
   refreshModelStatus,
   retryModelSetup,
+  verifyLocalModels,
 } = await import("../services/modelActions");
 const { useAppStore } = await import("../stores/appStore");
 import type { ModelStatusReport } from "../types";
@@ -130,6 +132,46 @@ describe("retryModelSetup", () => {
     tauriMocks.retryModelSetup.mockResolvedValueOnce(READY_REPORT);
     await expect(retryModelSetup()).resolves.toEqual(READY_REPORT);
     expect(useAppStore.getState().modelStatus).toEqual(READY_REPORT);
+  });
+});
+
+describe("verifyLocalModels", () => {
+  it("reports 本地模型校验通过 when nothing failed and nothing was skipped", async () => {
+    tauriMocks.loadLocalModels.mockResolvedValueOnce({
+      checked: 3,
+      passed: 3,
+      skipped: [],
+      failed: [],
+    });
+    await expect(verifyLocalModels()).resolves.toBe("本地模型校验通过");
+  });
+
+  it("flags the translation model as not installed when only optional entries were skipped", async () => {
+    // 发行部署后：翻译模型未下载 → skipped 非空且 failed 为空，不再误报「校验通过」。
+    tauriMocks.loadLocalModels.mockResolvedValueOnce({
+      checked: 3,
+      passed: 2,
+      skipped: ["opus-mt-en-zh-int8"],
+      failed: [],
+    });
+    await expect(verifyLocalModels()).resolves.toBe(
+      "OCR 模型校验通过，翻译模型未安装（请在设置中下载）",
+    );
+  });
+
+  it("reports 本地模型需要检查 when any entry failed, even alongside skipped entries", async () => {
+    tauriMocks.loadLocalModels.mockResolvedValueOnce({
+      checked: 3,
+      passed: 1,
+      skipped: ["opus-mt-en-zh-int8"],
+      failed: ["ppocr-rec-v5"],
+    });
+    await expect(verifyLocalModels()).resolves.toBe("本地模型需要检查");
+  });
+
+  it("lets IPC failures propagate so the caller can render the error message", async () => {
+    tauriMocks.loadLocalModels.mockRejectedValueOnce(new Error("模型校验失败"));
+    await expect(verifyLocalModels()).rejects.toThrow("模型校验失败");
   });
 });
 

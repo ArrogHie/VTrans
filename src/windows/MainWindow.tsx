@@ -22,13 +22,13 @@ import {
   applyModelDownloadProgress,
   refreshModelStatus,
   retryModelSetup,
+  verifyLocalModels,
 } from "../services/modelActions";
 import { showRegionOverlay } from "../services/regionOverlay";
 import {
   getAppConfig,
   getAppStatus,
   getIpcErrorMessage,
-  loadLocalModels,
   setOcrLanguage,
   setTargetLanguage,
   setTranslationProvider,
@@ -229,8 +229,7 @@ export function MainWindow() {
   const loadModels = async () => {
     setModelMessage(null);
     try {
-      const report = await loadLocalModels();
-      setModelMessage(report.failed.length === 0 ? "本地模型校验通过" : "本地模型需要检查");
+      setModelMessage(await verifyLocalModels());
     } catch (ipcError) {
       setModelMessage(getIpcErrorMessage(ipcError));
     }

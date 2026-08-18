@@ -39,8 +39,10 @@ describe("frontend contracts", () => {
   });
 
   it("matches the model verification report shape", () => {
-    const report = { checked: 2, passed: 2, failed: [] };
+    // serde 字段：checked/passed/skipped/failed（snake_case）。
+    const report = { checked: 2, passed: 2, skipped: [], failed: [] };
     expect(report.failed.length === 0).toBe(true);
+    expect(report.skipped.length === 0).toBe(true);
   });
 });
 
