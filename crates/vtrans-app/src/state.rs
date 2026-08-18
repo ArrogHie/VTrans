@@ -618,6 +618,14 @@ impl AppState {
     /// Switches the active translation provider, caching the local provider
     /// and emitting loading progress when `progress` is provided.
     ///
+    /// Switching to `"baidu"` additionally backfills the persisted
+    /// `translation.app_id` from the credential vault when the configuration
+    /// does not carry one yet (see
+    /// [`backfill_baidu_app_id_from_credentials`]), so the switch does not
+    /// fail vtrans-config validation right after the credentials were saved.
+    /// A missing APP ID rejects the switch without touching the persisted
+    /// configuration or the active provider.
+    ///
     /// # Errors
     ///
     /// Returns an application error for an unsupported provider id, a
@@ -628,6 +636,7 @@ impl AppState {
         progress: Option<&AppHandle>,
     ) -> Result<(), AppError> {
         let mut config = self.load_config()?;
+        backfill_baidu_app_id_from_credentials(provider_id, &mut config, &self.credentials)?;
         update_translation_provider_config(&mut config, provider_id)?;
         let provider = self
             .prepare_translation_provider(config.clone(), progress)
@@ -1242,6 +1251,65 @@ fn update_translation_provider_config(
         config.translation.api_endpoint = endpoint.to_string();
     }
     Ok(())
+}
+
+/// User-facing message returned when a switch to the `"baidu"` provider
+/// cannot find an APP ID in either the configuration or the credential
+/// vault.
+const BAIDU_APP_ID_MISSING_MESSAGE: &str = "百度 APP ID 未配置，请先在设置中保存百度凭据";
+
+/// Backfills `config.translation.app_id` from the Baidu APP ID credential
+/// when a provider switch targets `"baidu"` and the persisted configuration
+/// carries no value.
+///
+/// The `"baidu"` provider requires a non-empty `translation.app_id` in the
+/// persisted configuration (vtrans-config validation), while provider
+/// assembly reads the authoritative value from the credential vault. This
+/// bridge keeps both sources usable: after `set_provider_credentials` stored
+/// the APP ID, a switch succeeds by mirroring the vault value into the
+/// configuration snapshot before the provider is prepared and saved.
+/// Non-Baidu targets and configurations that already carry a non-empty
+/// value are left untouched.
+///
+/// # Errors
+///
+/// Returns `AppError::ProviderCredential` when neither the configuration
+/// nor the vault holds an APP ID (or the vault value is empty after
+/// trimming), and `AppError::Security` when the vault cannot be read. On
+/// error the snapshot is not mutated.
+fn backfill_baidu_app_id_from_credentials(
+    provider_id: &str,
+    config: &mut AppConfig,
+    credentials: &CredentialManager,
+) -> Result<(), AppError> {
+    if provider_id != "baidu" {
+        return Ok(());
+    }
+    if config
+        .translation
+        .app_id
+        .as_deref()
+        .is_some_and(|app_id| !app_id.trim().is_empty())
+    {
+        return Ok(());
+    }
+    if let Some(app_id) = credentials.load_for_provider(CredentialTarget::BaiduAppId)? {
+        let app_id = app_id.trim();
+        if app_id.is_empty() {
+            warn!("stored baidu app id credential is empty; provider switch rejected");
+            return Err(AppError::ProviderCredential(
+                BAIDU_APP_ID_MISSING_MESSAGE.to_string(),
+            ));
+        }
+        config.translation.app_id = Some(app_id.to_string());
+        info!("baidu app id backfilled into the configuration snapshot");
+        Ok(())
+    } else {
+        warn!("baidu app id is not configured; provider switch rejected");
+        Err(AppError::ProviderCredential(
+            BAIDU_APP_ID_MISSING_MESSAGE.to_string(),
+        ))
+    }
 }
 
 /// Canonical HTTP endpoint for each remote translation provider.
@@ -1876,6 +1944,159 @@ mod tests {
         let loaded = load_provider_credentials(&manager, &cloud_config("baidu")).unwrap();
         assert!(loaded.app_id.is_empty());
         assert!(loaded.secret.is_empty());
+    }
+
+    // ── Baidu APP ID switch backfill (Bug-010) ──
+
+    #[test]
+    fn baidu_switch_backfills_app_id_from_the_credential_vault() {
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::BaiduAppId, "  app-2024  ")
+            .unwrap();
+        let mut config = AppConfig::default();
+        backfill_baidu_app_id_from_credentials("baidu", &mut config, &manager).unwrap();
+        assert_eq!(config.translation.app_id.as_deref(), Some("app-2024"));
+    }
+
+    #[test]
+    fn baidu_switch_rejects_a_missing_app_id_without_mutating_the_snapshot() {
+        let manager = memory_credentials();
+        let mut config = cloud_config("openai");
+        let before = config.clone();
+        let error =
+            backfill_baidu_app_id_from_credentials("baidu", &mut config, &manager).unwrap_err();
+        assert!(matches!(error, AppError::ProviderCredential(_)));
+        assert!(
+            error.to_string().contains("百度 APP ID"),
+            "message must be user facing: {error}"
+        );
+        assert_eq!(
+            config, before,
+            "a rejected switch must leave the snapshot untouched"
+        );
+    }
+
+    #[test]
+    fn baidu_switch_keeps_an_existing_non_empty_config_app_id() {
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::BaiduAppId, "vault-app")
+            .unwrap();
+        let mut config = cloud_config("baidu");
+        config.translation.app_id = Some(" config-app ".to_string());
+        backfill_baidu_app_id_from_credentials("baidu", &mut config, &manager).unwrap();
+        assert_eq!(config.translation.app_id.as_deref(), Some(" config-app "));
+    }
+
+    #[test]
+    fn baidu_switch_treats_a_whitespace_only_config_app_id_as_missing() {
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::BaiduAppId, "app-2024")
+            .unwrap();
+        let mut config = cloud_config("baidu");
+        config.translation.app_id = Some("   ".to_string());
+        backfill_baidu_app_id_from_credentials("baidu", &mut config, &manager).unwrap();
+        assert_eq!(config.translation.app_id.as_deref(), Some("app-2024"));
+    }
+
+    #[test]
+    fn baidu_switch_rejects_a_whitespace_only_vault_app_id() {
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::BaiduAppId, "   ")
+            .unwrap();
+        let mut config = cloud_config("baidu");
+        let error =
+            backfill_baidu_app_id_from_credentials("baidu", &mut config, &manager).unwrap_err();
+        assert!(matches!(error, AppError::ProviderCredential(_)));
+        assert_eq!(config.translation.app_id, None);
+    }
+
+    #[test]
+    fn baidu_switch_backfill_is_a_noop_for_non_baidu_targets() {
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::BaiduAppId, "app-2024")
+            .unwrap();
+        for provider in ["openai", "deepl", "google", "azure", "local"] {
+            let mut config = cloud_config(provider);
+            backfill_baidu_app_id_from_credentials(provider, &mut config, &manager).unwrap();
+            assert_eq!(config.translation.app_id, None, "provider {provider:?}");
+        }
+    }
+
+    #[test]
+    fn baidu_switch_prepare_produces_a_persistable_config() {
+        // The full pre-save switch sequence (`backfill`, then provider
+        // selection) must yield a snapshot that passes the same validation
+        // `save_config` runs at the end of `set_translation_provider_id`.
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::BaiduAppId, "app-2024")
+            .unwrap();
+        let mut config = AppConfig::default();
+        backfill_baidu_app_id_from_credentials("baidu", &mut config, &manager).unwrap();
+        update_translation_provider_config(&mut config, "baidu").unwrap();
+        assert_eq!(config.translation.provider, "baidu");
+        assert_eq!(config.translation.app_id.as_deref(), Some("app-2024"));
+        assert!(
+            config.validate().is_ok(),
+            "save_config must accept the snapshot"
+        );
+    }
+
+    #[test]
+    fn baidu_switch_backfill_survives_a_save_and_reload_cycle() {
+        let manager = memory_credentials();
+        manager
+            .store_for_provider(CredentialTarget::BaiduAppId, "app-2024")
+            .unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("vtrans-app-baidu-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_manager = ConfigManager::new(&dir).unwrap();
+        config_manager.save(&AppConfig::default()).unwrap();
+
+        let mut config = config_manager.load().unwrap();
+        backfill_baidu_app_id_from_credentials("baidu", &mut config, &manager).unwrap();
+        update_translation_provider_config(&mut config, "baidu").unwrap();
+        config_manager.save(&config).unwrap();
+
+        let persisted = config_manager.load().unwrap();
+        assert_eq!(persisted.translation.provider, "baidu");
+        assert_eq!(persisted.translation.app_id.as_deref(), Some("app-2024"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn baidu_switch_rejection_never_persists_a_partial_switch() {
+        // `set_translation_provider_id` returns before `save_config` when
+        // the backfill fails, so the on-disk configuration (and therefore
+        // the selected provider) must stay exactly as it was.
+        let manager = memory_credentials();
+        let dir =
+            std::env::temp_dir().join(format!("vtrans-app-baidu-reject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_manager = ConfigManager::new(&dir).unwrap();
+        config_manager.save(&AppConfig::default()).unwrap();
+
+        let mut config = config_manager.load().unwrap();
+        let error =
+            backfill_baidu_app_id_from_credentials("baidu", &mut config, &manager).unwrap_err();
+        assert!(matches!(error, AppError::ProviderCredential(_)));
+        assert_eq!(
+            config_manager.load().unwrap().translation.provider,
+            AppConfig::default().translation.provider
+        );
+        assert_eq!(
+            config_manager.load().unwrap().translation.app_id,
+            AppConfig::default().translation.app_id
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

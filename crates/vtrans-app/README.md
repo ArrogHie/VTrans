@@ -271,9 +271,14 @@ provider 不接受凭据，返回 `AppError::ProviderCredential`。前端参数�
 
 `set_provider_credentials` 泛化地写入一个云端 provider 的完整凭据集：
 OpenAI/DeepL/Google/Azure 传 `apiKey`；Baidu 必须同时传 `appId` 与
-`secret`（分别写入 `baidu_app_id` / `baidu_secret` 两个独立目标）。写入后
-若目标 provider 就是当前配置的 provider，立即重建。前端参数名为
-`{ providerId, apiKey?, appId?, secret? }`（契约见 `tests/contracts.rs`）。
+`secret`（分别写入 `baidu_app_id` / `baidu_secret` 两个独立目标）。Baidu
+保存凭据成功后还会**同步把 APP ID 持久化到 `config.json` 的
+`translation.app_id`**（APP ID 非机密，且 vtrans-config 校验要求 baidu
+provider 必须携带该字段）：「保存凭据」后无需整包保存设置即可直接切换
+到百度引擎；配置落盘失败时命令返回错误，不留「凭据库有、配置无」的
+中间态。写入后若目标 provider 就是当前配置的 provider，立即重建。前端
+参数名为 `{ providerId, apiKey?, appId?, secret? }`（契约见
+`tests/contracts.rs`）。
 
 `get_app_config` 返回当前配置的完整快照（clone，不长时间持有锁），前端
 挂载时用它水合设置面板，避免整包 `save_settings` 用前端默认值覆盖后端
@@ -322,6 +327,14 @@ vtrans-config 校验一致），默认 `openai`。旧 id `"api"` 已废弃：迁
 配置持久化后生效；live 会话运行中切换仍返回 `PipelineError::AlreadyRunning`。
 本地 Provider 加载一次后缓存，再次切到 `local` 近瞬时命中缓存；切换期间发射
 `model_loading_progress`（`model_id="translation"`，0.0 → 1.0）。
+
+百度引擎的切换还有一条 APP ID 配置回填路径：`set_translation_provider`
+切到 `"baidu"` 时，若 `config.translation.app_id` 为空，
+`AppState::set_translation_provider_id` 会先从凭据库读 `baidu_app_id`
+回填到配置快照，再继续组装/保存；凭据库也没有 APP ID 时返回
+`AppError::ProviderCredential`（「百度 APP ID 未配置，请先在设置中保存
+百度凭据」），不修改配置、不替换 provider。组装 provider 时仍以凭据库
+为权威来源，配置字段只用于满足 vtrans-config 校验。
 
 ### Events
 
@@ -573,6 +586,12 @@ Manager、模型文件），无法在无头环境自动化，登记为手工验�
    （`sk-****1234`）；重启应用后凭据仍在（DPAPI 文件库
    `data/credentials.bin`，或降级路径下的 Windows Credential Manager），
    翻译请求携带新凭据生效；输入空串/超长值确认前端展示校验错误且不写入凭据。
+   百度专项：保存 APP ID + Secret 后**不做整包保存设置**，直接在主窗口把
+   翻译引擎切到百度，切换应立即成功（不再报 `translation.app_id must not
+   be empty`），`data/config.json` 的 `translation.app_id` 等于刚保存的
+   APP ID，重启应用后再次切换仍成功；全新数据目录（凭据库无 APP ID）下
+   切到百度应返回「百度 APP ID 未配置」提示，且 `config.json` 与当前
+   引擎选择均不改变。
 8. **get_app_config 水合**：在设置面板保存配置后修改配置文件中其它字段
    （如 OCR 语言），重启应用打开设置面板，确认显示后端真实值而非前端默认
    值；整包保存后其它字段不被覆盖。
